@@ -22,6 +22,20 @@ if [ ! -f /workspace/.claude.json ] || \
 JSON
 fi
 
+# Always ensure settings.json suppresses the bypass-permissions warning dialog.
+# Without skipDangerousModePermissionPrompt, --dangerously-skip-permissions
+# blocks at a "Yes, I accept" prompt that we can't answer non-interactively.
+if [ ! -f /workspace/.claude/settings.json ] || \
+   ! grep -q '"skipDangerousModePermissionPrompt"[[:space:]]*:[[:space:]]*true' /workspace/.claude/settings.json; then
+  cat > /workspace/.claude/settings.json <<'JSON'
+{
+  "permissions": { "defaultMode": "auto", "allow_bypass_permissions": true },
+  "skipDangerousModePermissionPrompt": true,
+  "skipAutoPermissionPrompt": true
+}
+JSON
+fi
+
 DEVICE_NAME="${CLAUDE_DEVICE_NAME:-claude-remote}"
 
 # Health proxy for kubelet probes.
