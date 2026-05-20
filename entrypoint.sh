@@ -1,8 +1,11 @@
 #!/bin/sh
 set -e
 
+echo "[entrypoint] start $(date -u +%FT%TZ)"
+
 export HOME=/workspace
 mkdir -p /workspace/.claude
+echo "[entrypoint] HOME=$HOME"
 
 # Seed first-run config if onboarding hasn't been completed yet. Required
 # because no human is here to press keys at the theme/trust prompts.
@@ -37,11 +40,19 @@ JSON
 fi
 
 DEVICE_NAME="${CLAUDE_DEVICE_NAME:-claude-remote}"
+echo "[entrypoint] device=$DEVICE_NAME config_seeded"
 
 # Health proxy for kubelet probes.
 node /opt/health-proxy.js &
+echo "[entrypoint] health-proxy pid=$!"
 
 # `claude --remote-control` needs a PTY (script wrapper),
 # a device name, and skip-permissions to run non-interactively.
 # Reference: ~/Library/LaunchAgents/com.user.claude-remote-control.plist on Mac.
-exec script -qfc "claude --remote-control ${DEVICE_NAME} --dangerously-skip-permissions" /dev/null
+#
+# Typescript file is /dev/stdout (NOT /dev/null) so claude's PTY output
+# reaches the container stdout pipe and shows up in kubelet/Loki logs.
+# /dev/null swallowed the welcome banner and any registration errors
+# silently, leaving us blind in 0.1.5.
+echo "[entrypoint] exec claude --remote-control"
+exec script -qfc "claude --remote-control ${DEVICE_NAME} --dangerously-skip-permissions 2>&1" /dev/stdout
