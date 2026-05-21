@@ -48,6 +48,12 @@ case "$DEVICE_NAME" in
 esac
 echo "[entrypoint] device=$DEVICE_NAME config_seeded"
 
+# Health proxy for container readiness/liveness probes. Start it before the
+# native installer so /healthz can return 503 instead of refusing connections
+# during slow first-start refreshes.
+node /opt/health-proxy.js &
+echo "[entrypoint] health-proxy pid=$!"
+
 # Install or refresh the native claude binary in $HOME/.local/bin. The
 # native build can auto-update without sudo (the npm-global install in
 # /usr/local cannot — `claude doctor` warns about it). Persisted to a
@@ -64,10 +70,6 @@ if [ -x /workspace/.local/bin/claude ]; then
 else
   echo "[entrypoint] using npm-global claude: $(claude --version 2>&1 | head -1)"
 fi
-
-# Health proxy for container readiness/liveness probes.
-node /opt/health-proxy.js &
-echo "[entrypoint] health-proxy pid=$!"
 
 # `claude --remote-control` needs a PTY (script wrapper),
 # a device name, and skip-permissions to run non-interactively.
