@@ -6,6 +6,10 @@ Please report security vulnerabilities via [GitHub private vulnerability reporti
 
 We aim to respond within 5 business days and will coordinate a fix before any public disclosure.
 
+Security reports are in scope when they affect the container image, entrypoint behavior, health check behavior, published GitHub Actions workflows, or documented runtime isolation assumptions.
+
+Please do not include live Claude credentials, tokens, private keys, or sensitive workspace data in reports.
+
 ## Intentional Design Decisions
 
 ### `--dangerously-skip-permissions`

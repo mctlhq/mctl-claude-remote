@@ -1,0 +1,30 @@
+name: PR checks
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Shell syntax
+        run: sh -n entrypoint.sh
+
+      - name: Node syntax
+        run: node --check health-proxy.js
+
+      - name: Docker build
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          push: false
+          tags: mctl-claude-remote:ci

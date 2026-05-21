@@ -40,6 +40,12 @@ JSON
 fi
 
 DEVICE_NAME="${CLAUDE_DEVICE_NAME:-claude-remote}"
+case "$DEVICE_NAME" in
+  -* | *[!A-Za-z0-9_.-]* | "")
+    echo "[entrypoint] ERROR CLAUDE_DEVICE_NAME must not start with '-' and may contain only letters, numbers, dot, underscore, and hyphen" >&2
+    exit 2
+    ;;
+esac
 echo "[entrypoint] device=$DEVICE_NAME config_seeded"
 
 # Install or refresh the native claude binary in $HOME/.local/bin. The

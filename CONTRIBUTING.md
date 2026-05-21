@@ -22,7 +22,7 @@ chore: bump node base image to 22.4
 
 ## PR Review
 
-Non-trivial PRs are reviewed automatically by Claude via the `claude-review.yml` workflow. Address all P1/P2 findings before requesting a merge. P3 nits can be deferred.
+PRs should pass the repository checks before merge. Security-sensitive changes should include a short explanation of the threat model impact in the PR description.
 
 ## Versioning
 
