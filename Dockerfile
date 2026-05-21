@@ -11,6 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     git \
+    jq \
+    openssl \
     util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_NPM_VERSION}"
@@ -19,7 +21,10 @@ WORKDIR /workspace
 
 COPY health-proxy.js /opt/health-proxy.js
 COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+# Optional pr-steward automation assets. Inert unless PR_STEWARD_ENABLED=true.
+COPY bin/ /opt/steward/bin/
+COPY skills/ /opt/steward/skills/
+RUN chmod +x /entrypoint.sh /opt/steward/bin/*
 
 ENV HOME=/workspace
 
