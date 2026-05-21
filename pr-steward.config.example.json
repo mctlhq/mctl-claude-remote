@@ -1,0 +1,31 @@
+{
+  "merge_mode": "never",
+  "max_attempts": 3,
+  "stuck_hours": 6,
+  "tick_lock_stale_minutes": 15,
+  "label_prefix": "steward",
+  "review_trigger": "@claude review",
+  "review_bots": ["claude[bot]", "chatgpt-codex-connector[bot]"],
+  "repos": [
+    {
+      "name": "OWNER/REPO",
+      "pr_filter": {
+        "author": "app/your-implementer-app",
+        "labels": ["agents"]
+      }
+    }
+  ],
+  "github_app": {
+    "slug": "your-steward-app",
+    "token_file": "/run/steward/gh-token"
+  },
+  "escalation": {
+    "channel": "telegram",
+    "telegram": {
+      "peer": "REPLACE_WITH_CHAT_OR_PEER"
+    }
+  },
+  "logging": {
+    "file": "/workspace/steward.log"
+  }
+}

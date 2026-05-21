@@ -74,6 +74,45 @@ echo "[entrypoint] device=$DEVICE_NAME config_seeded"
 node /opt/health-proxy.js &
 echo "[entrypoint] health-proxy pid=$!"
 
+# Optional pr-steward automation. Default-off: when PR_STEWARD_ENABLED is not
+# exactly "true" this whole block is a no-op and the container behaves as a
+# plain remote-control device. Runs before the (potentially slow) native binary
+# refresh because skill install and token minting do not depend on it. When
+# enabled we (1) install the bundled steward skill (and any operator-supplied
+# overlay skills, e.g. codex-watch) into the workspace skill dir, and (2) start
+# a background loop that keeps a fresh GitHub App installation token on tmpfs.
+# The token never reaches stdout.
+if [ "${PR_STEWARD_ENABLED:-false}" = "true" ]; then
+  echo "[entrypoint] pr-steward enabled"
+
+  mkdir -p /workspace/.claude/skills
+  if [ -d /opt/steward/skills ]; then
+    cp -R /opt/steward/skills/. /workspace/.claude/skills/ 2>/dev/null || true
+    echo "[entrypoint] installed bundled steward skills"
+  fi
+  # Operator overlay skills (private layer) — e.g. codex-watch. Optional.
+  if [ -n "${PR_STEWARD_SKILLS_DIR:-}" ] && [ -d "${PR_STEWARD_SKILLS_DIR}" ]; then
+    cp -R "${PR_STEWARD_SKILLS_DIR}/." /workspace/.claude/skills/ 2>/dev/null || true
+    echo "[entrypoint] installed overlay skills from ${PR_STEWARD_SKILLS_DIR}"
+  fi
+
+  if [ -x /opt/steward/bin/gh-app-token ]; then
+    (
+      while true; do
+        if /opt/steward/bin/gh-app-token; then
+          sleep 2700   # ~45 min; token is valid ~60 min
+        else
+          echo "[token-refresh] mint failed; retry in 60s"
+          sleep 60
+        fi
+      done
+    ) &
+    echo "[entrypoint] token-refresh pid=$!"
+  else
+    echo "[entrypoint] WARN pr-steward enabled but /opt/steward/bin/gh-app-token missing"
+  fi
+fi
+
 # Install or refresh the native claude binary in $HOME/.local/bin. The
 # native build can auto-update without sudo (the npm-global install in
 # /usr/local cannot — `claude doctor` warns about it). Persisted to a

@@ -1,0 +1,153 @@
+# Reference deployment for mctl-claude-remote with the optional pr-steward
+# automation enabled. Generic — replace the <PLACEHOLDER> values and supply your
+# own GitHub App credentials and steward config. Without the App secret, the
+# ConfigMap, and PR_STEWARD_ENABLED=true, the same image runs as a plain
+# remote-control device.
+#
+# Security posture baked in below: non-root, read-only root filesystem,
+# all capabilities dropped, RuntimeDefault seccomp, tmpfs for the token, and a
+# deny-by-default NetworkPolicy. Treat these as the minimum, not the ceiling.
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: claude-remote-workspace
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 5Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pr-steward-config
+data:
+  # Populate from pr-steward.config.example.json with your real repos/filters.
+  pr-steward.config.json: |
+    {
+      "merge_mode": "never",
+      "max_attempts": 3,
+      "stuck_hours": 6,
+      "tick_lock_stale_minutes": 15,
+      "label_prefix": "steward",
+      "review_trigger": "@claude review",
+      "review_bots": ["claude[bot]", "chatgpt-codex-connector[bot]"],
+      "repos": [
+        { "name": "<OWNER>/<REPO>", "pr_filter": { "author": "app/<IMPLEMENTER_APP>", "labels": ["agents"] } }
+      ],
+      "github_app": { "slug": "<STEWARD_APP_SLUG>", "token_file": "/run/steward/gh-token" },
+      "escalation": { "channel": "telegram", "telegram": { "peer": "<CHAT_OR_PEER>" } },
+      "logging": { "file": "/workspace/steward.log" }
+    }
+---
+# In production, generate this Secret from Vault via an ExternalSecret rather than
+# committing the key. The private key must be mounted on tmpfs, mode 0400.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pr-steward-github-app
+type: Opaque
+stringData:
+  private-key.pem: "<REPLACE_VIA_EXTERNALSECRET>"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: claude-remote
+  labels: { app: claude-remote }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }   # single writer to the RWO workspace volume
+  selector:
+    matchLabels: { app: claude-remote }
+  template:
+    metadata:
+      labels: { app: claude-remote }
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: claude-remote
+          image: ghcr.io/mctlhq/mctl-claude-remote:<VERSION>
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          env:
+            - name: CLAUDE_DEVICE_NAME
+              value: "claude-remote"
+            - name: PR_STEWARD_ENABLED
+              value: "false"            # kill switch — flip to "true" to enable
+            - name: PR_STEWARD_CONFIG
+              value: "/etc/steward/pr-steward.config.json"
+            - name: GH_APP_ID
+              value: "<APP_ID>"
+            - name: GH_APP_INSTALLATION_ID
+              value: "<INSTALLATION_ID>"
+            - name: GH_APP_PRIVATE_KEY_FILE
+              value: "/etc/steward/github-app/private-key.pem"
+            - name: GH_APP_TOKEN_FILE
+              value: "/run/steward/gh-token"
+          ports:
+            - containerPort: 8080
+              name: health
+          readinessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: health }
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits:   { cpu: "1000m", memory: "1Gi" }
+          volumeMounts:
+            - { name: workspace, mountPath: /workspace }
+            - { name: tmp, mountPath: /tmp }
+            - { name: steward-runtime, mountPath: /run/steward }
+            - { name: steward-config, mountPath: /etc/steward/pr-steward.config.json, subPath: pr-steward.config.json, readOnly: true }
+            - { name: steward-app-key, mountPath: /etc/steward/github-app, readOnly: true }
+      volumes:
+        - name: workspace
+          persistentVolumeClaim: { claimName: claude-remote-workspace }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 256Mi }
+        - name: steward-runtime
+          emptyDir: { medium: Memory, sizeLimit: 1Mi }   # holds the short-lived token only
+        - name: steward-config
+          configMap: { name: pr-steward-config }
+        - name: steward-app-key
+          secret: { secretName: pr-steward-github-app, defaultMode: 0400 }
+---
+# Deny-by-default. Allow only DNS + outbound HTTPS, and ingress on the health port.
+# NOTE: most CNIs match egress by CIDR, not FQDN. To restrict egress to GitHub /
+# Anthropic / Telegram by hostname you need Cilium FQDN policy or an egress proxy;
+# otherwise pin the relevant CIDRs here. The 0.0.0.0/0:443 rule below is the
+# permissive baseline — tighten it for production.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: claude-remote
+spec:
+  podSelector:
+    matchLabels: { app: claude-remote }
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - ports:
+        - { protocol: TCP, port: 8080 }   # health probe
+  egress:
+    - to: []
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+    - to: []
+      ports:
+        - { protocol: TCP, port: 443 }   # TIGHTEN: GitHub + Anthropic relay + Telegram + Vault

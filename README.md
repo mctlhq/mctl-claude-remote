@@ -91,6 +91,54 @@ docker run --rm \
 
 Anything persisted under `/workspace` should be treated as sensitive because it can contain Claude authentication state and workspace data.
 
+## Optional: pr-steward automation
+
+The image ships an **optional, off-by-default** automation that turns the
+persistent session into a pull-request steward: it watches PRs for a code-review
+bot (`claude[bot]` / `chatgpt-codex-connector[bot]`), applies fixes for P1/P2
+findings, re-triggers the review, and **escalates to a human before any merge and
+after N failed fix attempts**. It never merges on its own.
+
+It is fully generic — every target repo, filter, threshold and the escalation
+channel come from a config file. The driver is your own scheduler (e.g. a Claude
+RemoteTrigger routine) firing the prompt `Run the pr-steward skill.` per tick.
+
+**Kill switch:** the automation is inert unless `PR_STEWARD_ENABLED=true`. Set it
+to anything else (or leave it unset) and the container is a plain remote-control
+device. The skill itself re-checks the flag on every tick.
+
+| Variable | Default | Description |
+|---|---|---|
+| `PR_STEWARD_ENABLED` | `false` | Master switch. Must be exactly `true` to activate. |
+| `PR_STEWARD_CONFIG` | `/workspace/pr-steward.config.json` | Path to the steward config (see `pr-steward.config.example.json`). |
+| `PR_STEWARD_SKILLS_DIR` | _(unset)_ | Optional dir of overlay skills to install (e.g. your `codex-watch` skill). |
+| `GH_APP_ID` | — | GitHub App ID. |
+| `GH_APP_INSTALLATION_ID` | — | App installation ID for the target repos. |
+| `GH_APP_PRIVATE_KEY_FILE` | — | Path to the App private key (PEM). Mount on **tmpfs, mode 0400**. |
+| `GH_APP_TOKEN_FILE` | `/run/steward/gh-token` | Where the entrypoint writes the short-lived installation token. |
+
+**GitHub App (no PAT).** Create a GitHub App with fine-grained permissions
+**Contents: RW, Pull requests: RW, Issues: RW, Checks: read, Metadata: read** — no
+admin. Install it only on the repos you want stewarded. The entrypoint runs a
+background loop that mints a ~1h installation token every ~45 min via
+`bin/gh-app-token` and writes it to `GH_APP_TOKEN_FILE`. A push made by a GitHub
+App *does* re-fire `on: synchronize` workflows, so your review action re-runs after
+each steward fix.
+
+**Secret hygiene.** The installation token is never printed and never embedded in a
+git remote URL (the skill uses `gh auth setup-git`). Mount the App private key from
+a secret manager (e.g. an ExternalSecret) onto tmpfs, not via an env var.
+
+**Hardening & network.** See `deploy/pr-steward.example.yaml` for a reference
+manifest: non-root, read-only root filesystem, all capabilities dropped,
+`RuntimeDefault` seccomp, tmpfs token volume, and a deny-by-default NetworkPolicy
+(egress should be tightened to your GitHub / Anthropic / escalation endpoints).
+
+**Branch protection prerequisite.** Because the steward pushes fix commits, protect
+the default branch: require a PR, **require human approval**, and require status
+checks — so even though v1 never calls merge, the App is structurally unable to land
+code without a human.
+
 ## Build Model
 
 The Dockerfile defaults to installing the latest `@anthropic-ai/claude-code` npm package at image build time, then refreshes the native Claude binary on container startup when possible. To build against a specific npm package version:
