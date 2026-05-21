@@ -44,14 +44,24 @@ Compute `LP="${label_prefix}"` for label names below.
 ## 2. Authenticate as the GitHub App (no token ever on a command line)
 
 The entrypoint refresh loop keeps a fresh installation token in
-`github_app.token_file`. Authenticate `gh` and git from that file:
+`github_app.token_file`. `gh` and `git` need it via two different paths — do NOT
+rely on `gh auth setup-git`, which fails when no host has been authenticated via
+`gh auth login` (a fresh steward workspace has none):
 
 ```sh
-GH_TOKEN="$(cat "$TOKEN_FILE")"; export GH_TOKEN
-gh auth setup-git    # git uses gh's credential helper — token is NOT embedded in remote URLs
+HOST="${GH_HOST:-github.com}"
+# gh CLI (pr list / comment / repo clone): env token, no persisted auth state.
+case "$HOST" in
+  github.com|*.ghe.com) export GH_TOKEN="$(cat "$TOKEN_FILE")" ;;   # github.com / GHEC
+  *)                    export GH_ENTERPRISE_TOKEN="$(cat "$TOKEN_FILE")" ;;  # GHES host
+esac
+# git push/clone: a credential helper that re-reads the token file on every call
+# (so a background-rotated token is picked up) and never embeds it in a URL.
+git config --global "credential.https://${HOST}.helper" \
+  '!f() { echo username=x-access-token; echo "password=$(cat '"$TOKEN_FILE"')"; }; f'
 ```
 
-- Never `echo`/log `$GH_TOKEN`. Never build a `https://x-access-token:...@github.com` URL.
+- Never `echo`/log the token. Never build a `https://x-access-token:...@github.com` URL.
 - On any GitHub `HTTP 401`: re-read the token file once (the refresh loop may have just
   rotated it) and retry. If still 401, log `result=auth_error reason=token_invalid`
   and end the tick (do **not** burn a fix attempt — this is transient).
