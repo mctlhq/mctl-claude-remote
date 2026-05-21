@@ -39,6 +39,26 @@ if [ ! -f /workspace/.claude/settings.json ] || \
 JSON
 fi
 
+# Seed a CLAUDE.md if the workspace doesn't have one yet. This gives Claude
+# context about its environment on every new session. Users can override by
+# writing their own CLAUDE.md to the persistent volume.
+if [ ! -f /workspace/CLAUDE.md ]; then
+  cat > /workspace/CLAUDE.md <<'MD'
+# Remote Worker Environment
+
+You are running inside a container as a Claude Code remote worker.
+
+- Workspace: `/workspace` (persisted across restarts via external storage)
+- Mode: `--remote-control` with `--dangerously-skip-permissions`
+- All file operations work under `/workspace`; git is available
+
+## Session continuity
+
+Conversation history is not preserved across container restarts.
+If context matters for future sessions, write a summary to a file in `/workspace`.
+MD
+fi
+
 DEVICE_NAME="${CLAUDE_DEVICE_NAME:-claude-remote}"
 case "$DEVICE_NAME" in
   -* | *[!A-Za-z0-9_.-]* | "")
