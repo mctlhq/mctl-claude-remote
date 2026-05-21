@@ -126,8 +126,11 @@ latest `review_trigger` comment timestamp, parses P1/P2/P3 badges, and writes
 Per PR, per tick:
 1. Ensure a fresh review baseline exists for the **current head**. If there is no
    `review_trigger` comment newer than the last head push, post one
-   (`gh pr comment <N> -R $REPO --body "<review_trigger>"`) — this also re-fires
-   `claude-review.yml`. (A GitHub **App** push/comment *does* trigger workflows.)
+   (`gh pr comment <N> -R $REPO --body "<review_trigger>"`). This re-triggers a
+   comment-driven reviewer (e.g. codex) and gives codex-watch a fresh baseline
+   timestamp. Note: an Action-based reviewer such as `claude-review.yml` fires on
+   `pull_request` events — i.e. the fix **push** in §7 (a `synchronize`), NOT on the
+   comment — so never rely on the comment alone to schedule a new Action run.
 2. If no watcher result file exists for this PR+baseline, launch a watcher (see the
    `codex-watch` skill's "Launch a watcher" section) and `action=wait reason=watcher-launched`.
 3. If a result file exists:
@@ -135,9 +138,12 @@ Per PR, per tick:
      `P1`/`P2` badge tokens. Beware the **claude[bot] progress-checklist false-clean**
      caveat (a `- [ ]` / "View job run" body means the review is still running → treat
      as `awaiting-review`).
-   - `status=timeout` → if `${LP}:reposted` absent: re-post `review_trigger`, relaunch
-     watcher, add `${LP}:reposted`, `action=wait reason=review-timeout-reposted`. If
-     `${LP}:reposted` already present: **§9 escalate** (bot silent twice).
+   - `status=timeout` → the reviewer never responded. For a comment-driven reviewer
+     and if `${LP}:reposted` is absent: re-post `review_trigger`, relaunch the watcher,
+     add `${LP}:reposted`, `action=wait reason=review-timeout-reposted`. For an
+     Action-based reviewer a repost will NOT schedule a run (only a new push does), so a
+     persistent timeout means investigate. If `${LP}:reposted` is already present (or the
+     reviewer is Action-based with no new push pending): **§9 escalate** (bot silent twice).
 
 ## 7. Apply a fix (P1/P2 findings present, attempt < max)
 

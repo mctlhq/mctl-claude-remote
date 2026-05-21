@@ -125,7 +125,10 @@ spec:
         - name: steward-config
           configMap: { name: pr-steward-config }
         - name: steward-app-key
-          secret: { secretName: pr-steward-github-app, defaultMode: 0400 }
+          # 0440 (not 0400): with fsGroup the file is group-owned by the non-root
+          # runAsGroup, so the App can read the key. 0400 would be owner(root)-only
+          # and the non-root process would fail bin/gh-app-token's readability check.
+          secret: { secretName: pr-steward-github-app, defaultMode: 0440 }
 ---
 # Deny-by-default. Allow only DNS + outbound HTTPS, and ingress on the health port.
 # NOTE: most CNIs match egress by CIDR, not FQDN. To restrict egress to GitHub /

@@ -13,10 +13,23 @@
 #   GH_APP_INSTALLATION_ID    Installation ID (numeric)          [required]
 #   GH_APP_PRIVATE_KEY_FILE   Path to the App private key (PEM)  [required]
 #   GH_APP_TOKEN_FILE         Output path for the token          [default: /run/steward/gh-token]
-#   GH_API_BASE               API base URL                       [default: https://api.github.com]
+#   GH_HOST                   GitHub host                        [default: github.com]
+#   GH_API_BASE               API base URL                       [default: derived from GH_HOST]
 set -eu
 
-API_BASE="${GH_API_BASE:-https://api.github.com}"
+# Derive the API base from GH_HOST so the minter follows the same host the
+# steward authenticates against, instead of always hitting api.github.com.
+# GH_API_BASE still wins if set explicitly. GHES exposes the REST API under
+# https://<host>/api/v3; GHEC data-residency (*.ghe.com) under https://api.<host>.
+if [ -n "${GH_API_BASE:-}" ]; then
+  API_BASE="$GH_API_BASE"
+else
+  case "${GH_HOST:-github.com}" in
+    github.com) API_BASE="https://api.github.com" ;;
+    *.ghe.com)  API_BASE="https://api.${GH_HOST}" ;;
+    *)          API_BASE="https://${GH_HOST}/api/v3" ;;
+  esac
+fi
 APP_ID="${GH_APP_ID:-}"
 INSTALLATION_ID="${GH_APP_INSTALLATION_ID:-}"
 KEY_FILE="${GH_APP_PRIVATE_KEY_FILE:-}"

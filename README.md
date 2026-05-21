@@ -114,7 +114,7 @@ device. The skill itself re-checks the flag on every tick.
 | `PR_STEWARD_SKILLS_DIR` | _(unset)_ | Optional dir of overlay skills to install (e.g. your `codex-watch` skill). |
 | `GH_APP_ID` | — | GitHub App ID. |
 | `GH_APP_INSTALLATION_ID` | — | App installation ID for the target repos. |
-| `GH_APP_PRIVATE_KEY_FILE` | — | Path to the App private key (PEM). Mount on **tmpfs, mode 0400**. |
+| `GH_APP_PRIVATE_KEY_FILE` | — | Path to the App private key (PEM). Mount on **tmpfs, group-readable (mode 0440 + fsGroup)** so the non-root process can read it. |
 | `GH_APP_TOKEN_FILE` | `/run/steward/gh-token` | Where the entrypoint writes the short-lived installation token. |
 
 **GitHub App (no PAT).** Create a GitHub App with fine-grained permissions
