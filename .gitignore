@@ -1,0 +1,16 @@
+# Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# Local artifacts
+*.log
+dist/
+tmp/
