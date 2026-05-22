@@ -34,7 +34,7 @@ Keys (see `pr-steward.config.example.json`):
 | `label_prefix` | Label namespace (default `steward`). |
 | `review_trigger` | Comment text that triggers the review bot (e.g. `@claude review`). |
 | `review_bots[]` | Bot logins codex-watch should match. |
-| `repos[]` | `{ name: "owner/repo", pr_filter: { author, labels[] } }`. |
+| `repos[]` | `{ name: "owner/repo", pr_filter: { head_prefix?, author?, labels[]? } }`. All filter keys optional; see §4. |
 | `github_app.token_file` | Path the refresh loop writes the installation token to. |
 | `escalation` | `{ channel, ... }` — how to ping a human. |
 | `logging.file` | Path for the structured log (also echoed to stdout). |
@@ -87,12 +87,28 @@ gh pr list -R "$REPO" --state open --json number,headRefName,headRefOid,author,l
   --search "<filter>"
 ```
 
-Build the search/filter from `pr_filter`: e.g. `author:app/<implementer>` and/or
-`label:<labels>`. Skip drafts (`isDraft=true` → `action=wait reason=draft`).
+Build the server-side search from the `pr_filter` keys that map to GitHub search
+qualifiers: `author` → `author:<login>` and each `labels[]` entry → `label:<name>`.
+Skip drafts (`isDraft=true` → `action=wait reason=draft`).
 
-On first pickup of a PR, add label `${LP}:owned`. Treat any PR carrying `${LP}:owned`
-as in scope even if the filter would otherwise miss it (so we keep finishing a PR the
-implementer relabels mid-flight).
+**`head_prefix` is matched client-side, not via `--search`.** GitHub's `head:`
+qualifier is an exact-branch match with no prefix/wildcard support, so a prefix like
+`feat/agents-` cannot be expressed server-side. After listing, **drop any PR whose
+`headRefName` does not start with `pr_filter.head_prefix`** (string prefix, case-
+sensitive). This is the primary discriminator when an automated author opens PRs under
+the same identity as humans (e.g. an implementer that pushes `feat/agents-<slug>`
+branches via a shared token): the branch prefix is what separates steward-owned PRs
+from human PRs, so when `head_prefix` is set it is a hard gate — a PR that fails it is
+never owned, even if `author`/`labels` would match.
+
+If `pr_filter` has no keys at all, the steward would match every open PR in the repo;
+treat an empty filter as a misconfiguration and `action=skip reason=empty-pr-filter`
+rather than touching unfiltered PRs.
+
+On first pickup of a PR (one that passed every filter), add label `${LP}:owned`. Treat
+any PR carrying `${LP}:owned` as in scope even if the filter would otherwise miss it
+(so we keep finishing a PR whose branch/labels change mid-flight) — but a PR that fails
+`head_prefix` and does **not** already carry `${LP}:owned` is out of scope.
 
 ## 5. Per-PR decision (mirror of run_shepherd.py `decide()`)
 

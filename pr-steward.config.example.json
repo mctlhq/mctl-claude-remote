@@ -10,6 +10,7 @@
     {
       "name": "OWNER/REPO",
       "pr_filter": {
+        "head_prefix": "feat/agents-",
         "author": "app/your-implementer-app",
         "labels": ["agents"]
       }
