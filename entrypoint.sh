@@ -55,8 +55,8 @@ You are running inside a container as a Claude Code remote worker.
 ## Session continuity
 
 Conversation history is not preserved across container restarts.
-Before a planned restart, run `/compact` to write a session summary, then save
-it with a name like `/workspace/session-notes.md` — that file is synced to
+Before a planned restart, ask Claude to write a summary to a file in
+`/workspace`, e.g. `/workspace/session-notes.md` — that file is synced to
 persistent storage and will be available after the container comes back up.
 MD
 fi

@@ -67,7 +67,7 @@ http.createServer((req, res) => {
   const elapsed = Date.now() - lastGoodTls;
   if (lastGoodTls > 0 && elapsed < TLS_GRACE_MS) {
     res.writeHead(200, { 'Content-Type': 'text/plain' });
-    res.end(`OK (TLS grace: ${Math.round(elapsed / 1000)}s ago)\n`);
+    res.end(`OK (TLS grace: ${Math.round((TLS_GRACE_MS - elapsed) / 1000)}s remaining)\n`);
     return;
   }
 
