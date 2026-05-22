@@ -157,13 +157,26 @@ fallback chain, and if it cannot be determined, escalate rather than block:
 2. On error (`Resource not accessible by integration`, or any failure) fall back to REST,
    which only needs Checks:read / commit-status:read:
    ```sh
-   gh api "repos/$REPO/commits/$head/check-runs" --jq '[.check_runs[].conclusion]'
-   gh api "repos/$REPO/commits/$head/status"     --jq '.state'
+   # MUST paginate: check-runs returns 30 per page by default, so a failing run on a
+   # later page would be silently missed and could let a bad PR merge in when-green.
+   gh api --paginate "repos/$REPO/commits/$head/check-runs?per_page=100" \
+     --jq '.check_runs[].conclusion'
+   gh api "repos/$REPO/commits/$head/status" --jq '.state'
    ```
-   `checks_green` = no check-run conclusion in
-   {`failure`,`cancelled`,`timed_out`,`action_required`,`startup_failure`} **and** combined
-   status `.state` ≠ `failure`. A `pending`/empty set ⇒ not green yet →
-   `action=wait reason=awaiting-checks`.
+   Evaluate the **full paginated set** of check-run conclusions (`.state` from
+   `/status` is a server-side rollup over all legacy statuses, so it needs no
+   pagination — use it only as a failure signal, never as a green requirement, since
+   a repo with no legacy statuses reports `pending`):
+   - **Failed** (not green → §9 build-failure path): any conclusion in
+     {`failure`,`cancelled`,`timed_out`,`action_required`,`startup_failure`}, or
+     `.state == "failure"`.
+   - **Not green yet** (`action=wait reason=awaiting-checks`): any conclusion is
+     `null` (a run still executing reports `conclusion: null`) or `stale`, or the
+     check-run set is empty with `.state == "pending"`.
+   - **`checks_green = true`** only when **every** conclusion ∈
+     {`success`,`neutral`,`skipped`} (none `null`/`stale`) **and** `.state ≠ failure`.
+     Treat any conclusion outside that allow-list as not-green — never default an
+     unrecognized or in-progress conclusion to green.
 3. If BOTH the node query and REST fail, treat checks as **unknown** — do NOT retry in a loop
    and do NOT hang: `action=escalate reason=checks-unavailable`, send ONE §9 non-review
    escalation, stop for this PR. (`merge_mode=when-green` must never merge on unknown checks.)
@@ -269,8 +282,11 @@ steward never bypasses branch protection.
 1. **Re-verify at head.** Re-fetch the PR JSON
    (`gh pr view <N> -R $REPO --json headRefOid,mergeStateStatus,statusCheckRollup,reviewDecision`).
    `gh pr view` is a single-PR node, so `statusCheckRollup` is App-readable here; if it still
-   errors, use the §5 REST fallback, and on **unknown** checks `action=wait
-   reason=checks-unavailable` — never merge on unknown.
+   errors, use the §5 REST fallback. If checks come back **unknown** (both the node query
+   and the REST fallback fail at re-verify), do **not** merge and do **not** loop on `wait`
+   — a silent `wait` here recreates the exact hang this design avoids. Instead
+   `action=escalate reason=checks-unavailable`, send ONE §9 non-review escalation, and stop
+   for this PR (same as §5 step 3). Never merge on unknown.
    If `headRefOid` differs from the `head` you evaluated, a push landed mid-tick →
    `action=wait reason=head-moved`, next tick re-evaluates. Re-confirm `mergeable`,
    `checks_green`, `approved` on the fresh JSON.
