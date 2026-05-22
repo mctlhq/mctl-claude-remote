@@ -34,7 +34,7 @@ Keys (see `pr-steward.config.example.json`):
 | `label_prefix` | Label namespace (default `steward`). |
 | `review_trigger` | Comment text that triggers the review bot (e.g. `@claude review`). |
 | `review_bots[]` | Bot logins codex-watch should match. |
-| `repos[]` | `{ name: "owner/repo", pr_filter: { author, labels[] } }`. |
+| `repos[]` | `{ name: "owner/repo", pr_filter: { head_prefix?, author?, labels[]? } }`. All filter keys optional; see §4. |
 | `github_app.token_file` | Path the refresh loop writes the installation token to. |
 | `escalation` | `{ channel, ... }` — how to ping a human. |
 | `logging.file` | Path for the structured log (also echoed to stdout). |
@@ -83,16 +83,41 @@ log `action=skip reason=locked` and exit 0. Otherwise write
 For each repo in `repos[]`:
 
 ```sh
-gh pr list -R "$REPO" --state open --json number,headRefName,headRefOid,author,labels,isDraft,mergeStateStatus,statusCheckRollup,url \
+gh pr list -R "$REPO" --state open --limit 200 --json number,headRefName,headRefOid,author,labels,isDraft,mergeStateStatus,statusCheckRollup,url \
   --search "<filter>"
 ```
 
-Build the search/filter from `pr_filter`: e.g. `author:app/<implementer>` and/or
-`label:<labels>`. Skip drafts (`isDraft=true` → `action=wait reason=draft`).
+Build the server-side search from every `pr_filter` key that maps to a GitHub search
+qualifier — push as much filtering server-side as possible so the result set is small
+and pagination-safe:
+- `author` → `author:<login>`
+- each `labels[]` entry → `label:<name>`
+- `head_prefix` → `head:<prefix>` — GitHub's `head:` qualifier matches **by branch-name
+  prefix** (e.g. `head:feat/agents-` matches `feat/agents-foo` but not `fix/...`), so the
+  prefix discriminator belongs in the search, not just client-side.
 
-On first pickup of a PR, add label `${LP}:owned`. Treat any PR carrying `${LP}:owned`
-as in scope even if the filter would otherwise miss it (so we keep finishing a PR the
-implementer relabels mid-flight).
+Pass `--limit 200` (above the 30 default) so that even a permissive filter on a busy
+repo does not silently drop in-scope PRs past the first page. Skip drafts
+(`isDraft=true` → `action=wait reason=draft`).
+
+**`head_prefix` is still re-checked client-side as a hard gate** (defense-in-depth):
+after listing, **drop any PR whose `headRefName` does not start with
+`pr_filter.head_prefix`** (string prefix, case-sensitive). The `head:` search qualifier
+is case-insensitive and could in principle widen on edge cases, so the client-side
+exact-prefix check is the authoritative gate. `head_prefix` is the primary discriminator
+when an automated author opens PRs under the same identity as humans (e.g. an implementer
+that pushes `feat/agents-<slug>` branches via a shared token): the branch prefix is what
+separates steward-owned PRs from human PRs, so when `head_prefix` is set it is a hard
+gate — a PR that fails it is never owned, even if `author`/`labels` would match.
+
+If `pr_filter` has no keys at all, the steward would match every open PR in the repo;
+treat an empty filter as a misconfiguration and `action=skip reason=empty-pr-filter`
+rather than touching unfiltered PRs.
+
+On first pickup of a PR (one that passed every filter), add label `${LP}:owned`. Treat
+any PR carrying `${LP}:owned` as in scope even if the filter would otherwise miss it
+(so we keep finishing a PR whose branch/labels change mid-flight) — but a PR that fails
+`head_prefix` and does **not** already carry `${LP}:owned` is out of scope.
 
 ## 5. Per-PR decision (mirror of run_shepherd.py `decide()`)
 
