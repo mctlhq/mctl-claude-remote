@@ -142,6 +142,40 @@ else
   echo "[entrypoint] using npm-global claude: $(claude --version 2>&1 | head -1)"
 fi
 
+# Optional pr-steward scheduler. Fires a headless `claude -p` tick on a cadence
+# so the steward runs without a human prompting the live session. Off unless
+# pr-steward is enabled AND PR_STEWARD_SCHEDULE_SECONDS is a positive integer.
+# Placed after the native-binary refresh so `claude` resolves to the updated
+# build. A cheap GitHub pre-check gates each tick: we only spawn the (Claude-
+# usage-costly) model run when an in-scope PR actually needs attention, so idle
+# cadences cost one GitHub API call, not Claude usage. Each tick is wrapped in
+# `timeout` so a stuck turn can't wedge the loop (the live session had no such
+# guard). Runs alongside the remote-control session, sharing HOME/skills/creds.
+if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
+   printf '%s' "${PR_STEWARD_SCHEDULE_SECONDS:-0}" | grep -qE '^[1-9][0-9]*$'; then
+  STEWARD_LOG_DIR=/var/log/steward
+  [ -d "$STEWARD_LOG_DIR" ] || STEWARD_LOG_DIR=/tmp
+  STEWARD_SCHED_LOG="$STEWARD_LOG_DIR/scheduler.log"
+  STEWARD_CLAUDE_BIN="$(command -v claude)"
+  STEWARD_PRECHECK=/opt/steward/bin/pr-steward-precheck
+  STEWARD_TICK_TIMEOUT="${PR_STEWARD_TICK_TIMEOUT_SECONDS:-1800}"
+  # Guard against a misconfigured value: `timeout 0` kills the tick instantly
+  # and a negative value errors out, silently breaking every tick.
+  printf '%s' "$STEWARD_TICK_TIMEOUT" | grep -qE '^[1-9][0-9]*$' || STEWARD_TICK_TIMEOUT=1800
+  (
+    while true; do
+      sleep "${PR_STEWARD_SCHEDULE_SECONDS}"
+      if [ -x "$STEWARD_PRECHECK" ] && "$STEWARD_PRECHECK" >>"$STEWARD_SCHED_LOG" 2>&1; then
+        echo "[scheduler $(date -u +%FT%TZ)] work found; firing tick" >>"$STEWARD_SCHED_LOG"
+        timeout "$STEWARD_TICK_TIMEOUT" "$STEWARD_CLAUDE_BIN" -p "Run the pr-steward skill" \
+          --dangerously-skip-permissions >>"$STEWARD_SCHED_LOG" 2>&1 \
+          || echo "[scheduler $(date -u +%FT%TZ)] tick exited non-zero (timeout/error)" >>"$STEWARD_SCHED_LOG"
+      fi
+    done
+  ) &
+  echo "[entrypoint] pr-steward scheduler pid=$! interval=${PR_STEWARD_SCHEDULE_SECONDS}s gate=precheck"
+fi
+
 # `claude --remote-control` needs a PTY (script wrapper),
 # a device name, and skip-permissions to run non-interactively.
 #
