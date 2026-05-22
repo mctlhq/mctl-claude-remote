@@ -1,12 +1,16 @@
 ---
 name: pr-steward
-description: Autonomous pull-request steward for a persistent Claude Code remote-control session. Each invocation runs ONE tick - it discovers in-scope PRs, waits for a code-review bot (claude[bot] / chatgpt-codex-connector[bot]) via the codex-watch skill, applies fixes for P1/P2 findings, re-triggers the review, and escalates to a human before any merge and after N failed fix attempts. Never merges on its own. All target repos, filters, thresholds and the escalation channel come from a config file - nothing org-specific is baked in. Invoke when the operator (or a scheduled RemoteTrigger routine) says "run the pr-steward skill" / "run a steward tick".
+description: Autonomous pull-request steward for a persistent Claude Code remote-control session. Each invocation runs ONE tick - it discovers in-scope PRs, waits for a code-review bot (claude[bot] / chatgpt-codex-connector[bot]) via the codex-watch skill, applies fixes for P1/P2 findings, re-triggers the review, and either escalates to a human (merge_mode=never) or auto-merges once the review is clean+approved and CI is green (merge_mode=when-green). All target repos, filters, thresholds, the merge mode and the escalation channel come from a config file - nothing org-specific is baked in. Invoke when the operator (or a scheduled RemoteTrigger routine) says "run the pr-steward skill" / "run a steward tick".
 ---
 
 # pr-steward — autonomous PR review/fix loop (one tick per invocation)
 
 This skill turns the persistent remote-control session into a stand-in operator for
-review-driven PRs. It is **off by default** and **never merges autonomously**.
+review-driven PRs. It is **off by default**. Merging is gated by `merge_mode`:
+`never` (escalate to a human, the conservative default) or `when-green` (auto-merge
+once the review is clean and **approved** and CI is green — see §8). Even in
+`when-green` it never merges anything that fails the head-SHA-anchored
+clean+approved+green gate or the `head_prefix` ownership gate.
 
 It is *stateless per tick*: all durable state is reconstructed from GitHub (PR labels
 + PR JSON + the `codex-watch` result file). A pod restart loses nothing.
@@ -27,15 +31,20 @@ Keys (see `pr-steward.config.example.json`):
 
 | Key | Meaning |
 |---|---|
-| `merge_mode` | Must be `"never"` in v1. If anything else, treat as `"never"` and log a warning — there is no autonomous merge path. |
+| `merge_mode` | `"never"` (default — escalate ready-to-merge to a human, no merge call) or `"when-green"` (auto-merge once the §8 gate holds). Any unrecognized value → treat as `"never"` and log a warning. |
+| `merge_method` | Merge style for `when-green`: `"merge"` (default), `"squash"`, or `"rebase"`. Default `"merge"` — the org keeps the feature branch visible in the graph, so do NOT squash. |
 | `max_attempts` | Max fix iterations per PR before escalating (default 3). |
+| `max_files_changed` | Per-fix-attempt cap: if a fix would touch more than this many files, escalate instead of pushing (default 10). |
+| `max_diff_lines` | Per-fix-attempt cap on total added+removed lines; exceed → escalate, no push (default 300). |
+| `forbidden_paths[]` | Glob paths a fix must never touch (default `[".github/workflows/**", "**/secrets/**", "deploy/**", "**/values.yaml", "**/values.yaml.tpl"]`). A finding that can only be fixed by editing one of these → escalate (out of scope). |
 | `stuck_hours` | Escalate an owned PR with no head-SHA progress after this many hours. |
 | `tick_lock_stale_minutes` | Lockfile staleness window. |
 | `label_prefix` | Label namespace (default `steward`). |
 | `review_trigger` | Comment text that triggers the review bot (e.g. `@claude review`). |
-| `review_bots[]` | Bot logins codex-watch should match. |
+| `review_bots[]` | Bot logins codex-watch should match. v1 pilots are Claude-only: `["claude[bot]"]`. Add `"chatgpt-codex-connector[bot]"` only once dual-bot gating is supported. |
 | `repos[]` | `{ name: "owner/repo", pr_filter: { head_prefix?, author?, labels[]? } }`. All filter keys optional; see §4. |
 | `github_app.token_file` | Path the refresh loop writes the installation token to. |
+| `gitops` | Optional `{ repo, agents_state_path, branch_prefix }` for the best-effort `.status.yaml` write-back after a `when-green` merge (see §8.1). Omit to skip write-back. |
 | `escalation` | `{ channel, ... }` — how to ping a human. |
 | `logging.file` | Path for the structured log (also echoed to stdout). |
 
@@ -83,7 +92,7 @@ log `action=skip reason=locked` and exit 0. Otherwise write
 For each repo in `repos[]`:
 
 ```sh
-gh pr list -R "$REPO" --state open --limit 200 --json number,headRefName,headRefOid,author,labels,isDraft,mergeStateStatus,statusCheckRollup,url \
+gh pr list -R "$REPO" --state open --limit 200 --json number,headRefName,headRefOid,author,labels,isDraft,mergeStateStatus,statusCheckRollup,reviewDecision,url \
   --search "<filter>"
 ```
 
@@ -125,6 +134,11 @@ For each in-scope, non-draft PR compute:
 - `head = headRefOid`
 - `checks_green` = every required check in `statusCheckRollup` is SUCCESS/NEUTRAL/SKIPPED
 - `mergeable` = `mergeStateStatus` ∈ {`CLEAN`,`HAS_HOOKS`,`UNSTABLE`}
+- `approved` = `reviewDecision == "APPROVED"` — branch protection's required-review
+  verdict. The review bot's APPROVED review (e.g. `claude-review.yml` approving when
+  it finds no P1/P2) is what flips this. This is the merge gate that lets the App
+  land code without weakening branch protection (the App never bypasses required
+  reviews — it waits for the bot's approval).
 - `attempt` = highest N from any `${LP}:attempt-N` label (0 if none)
 - review state — via §6 (codex-watch)
 
@@ -135,12 +149,16 @@ Apply, in order:
 | PR merged or closed externally | remove all `${LP}:*` labels; `action=drop` |
 | review bot has not responded for current `head` yet | `action=wait reason=awaiting-review` |
 | **P1/P2 findings at current `head`** | if `attempt >= max_attempts` → **escalate (max-attempt)**, add `${LP}:escalated`, stop. Else → **§7 apply fix** |
-| no P1/P2 findings, `mergeable`, `checks_green` | **§8 ready-to-merge escalation** — add `${LP}:ready-to-merge`, ping once, **DO NOT MERGE** |
+| no P1/P2, `mergeable`, `checks_green`, `approved`, **`merge_mode=when-green`** | **§8 merge** — re-verify at head, then `gh pr merge`. |
+| no P1/P2, `mergeable`, `checks_green` (and either `merge_mode=never` or not yet `approved`) | **§8 ready-to-merge escalation** — add `${LP}:ready-to-merge`, ping once, **DO NOT MERGE** |
 | no P1/P2 findings but not mergeable / checks not green / build failure NOT from review | **§9 non-review escalation** |
 | watcher timed out | §6 timeout handling |
 
 Only ever match findings **at the current head SHA**. codex-watch's trigger-timestamp
-baseline already enforces this — never reuse a pre-fixup review.
+baseline already enforces this — never reuse a pre-fixup review. `approved` is likewise
+head-anchored: a fix push (a `synchronize`) re-runs `claude-review.yml`, and with
+"dismiss stale approvals on push" enabled the prior approval is cleared until the bot
+re-approves the new head — so `approved` cannot be satisfied by an approval of older code.
 
 ## 6. Reading the review — delegate to the `codex-watch` skill
 
@@ -178,25 +196,88 @@ Per PR, per tick:
    `git fetch origin <branch> && git checkout <branch>` if already cloned).
 3. Address each P1/P2 finding in the worktree. Keep edits minimal and scoped to the
    finding — no opportunistic refactors.
-4. Commit (`fix: address review findings`) and `git push` (App identity via the
+4. **Safety envelope — verify BEFORE committing; if any check fails, abort the fix,
+   add `${LP}:escalated`, send a `non-review` escalation (reason `scope-guard`), and
+   stop acting on this PR. Never push a fix that violates these:**
+   - `git diff --name-only` count ≤ `max_files_changed`.
+   - `git diff --numstat` total added+removed lines ≤ `max_diff_lines`.
+   - No changed path matches any `forbidden_paths[]` glob (workflows, secrets, deploy
+     manifests, `values.yaml`). A finding only fixable by editing those is out of
+     scope for the steward — escalate, don't push.
+   - No dependency-manifest version changes (`package.json`/`go.mod`/lockfiles) unless
+     a P1/P2 finding explicitly calls for the bump.
+   - **Scope expansion**: if the fix touches files outside the set the original PR
+     diff already changed, treat it as scope expansion → escalate. The steward fixes
+     review findings on the PR's own surface; it does not grow the change.
+   - Only ever push to the PR's own `feat/agents-*` head branch; **never force-push**
+     (no `git push --force`/`+ref`). A non-fast-forward push means someone else moved
+     the branch — abort and re-evaluate next tick.
+5. Commit (`fix: address review findings`) and `git push` (App identity via the
    credential helper from §2).
-5. Re-post `review_trigger` and relaunch the watcher for the new head.
-6. Bump the attempt label: remove `${LP}:attempt-{n}`, add `${LP}:attempt-{n+1}`.
+6. Re-post `review_trigger` and relaunch the watcher for the new head.
+7. Bump the attempt label: remove `${LP}:attempt-{n}`, add `${LP}:attempt-{n+1}`.
    Remove `${LP}:fixing` and `${LP}:reposted`.
-7. **Attempt accounting** (mirror run_shepherd.py:1146-1202):
+8. **Attempt accounting** (mirror run_shepherd.py:1146-1202):
    - *transient* push failure (auth/network) → do NOT bump the attempt; leave state for
      next tick; `result=transient_fail`.
    - *deterministic* outcome (no commits produced, or branch missing on origin) → DO
      bump the attempt; if it reaches `max_attempts`, escalate (max-attempt).
-8. `action=address-review result=pushed attempt=<n+1>`.
+9. `action=address-review result=pushed attempt=<n+1>`.
 
-## 8. Ready-to-merge — escalate, never merge
+## 8. Clean + green: merge (when-green) or escalate (never)
 
-When a PR is clean (no P1/P2 at head), `mergeable`, and `checks_green`:
+A PR reaches this section when it has no P1/P2 at head, is `mergeable`, and
+`checks_green`.
+
+### merge_mode = never (default) — escalate, do not merge
 - Add `${LP}:ready-to-merge` (idempotent — if already present, do nothing and do NOT
   ping again).
 - Send ONE escalation (§10, template `ready-to-merge`).
-- **Do not run `gh pr merge`.** A human merges. (Gated `/merge` is a v2 enhancement.)
+- **Do not run `gh pr merge`.** A human merges.
+
+### merge_mode = when-green — gated auto-merge
+Only proceed if **`approved`** is also true (§5). If not approved yet, fall back to the
+`never` branch above (escalate ready-to-merge / wait for the bot's approval) — the
+steward never bypasses branch protection.
+
+1. **Re-verify at head.** Re-fetch the PR JSON
+   (`gh pr view <N> -R $REPO --json headRefOid,mergeStateStatus,statusCheckRollup,reviewDecision`).
+   If `headRefOid` differs from the `head` you evaluated, a push landed mid-tick →
+   `action=wait reason=head-moved`, next tick re-evaluates. Re-confirm `mergeable`,
+   `checks_green`, `approved` on the fresh JSON.
+2. **Merge the exact reviewed SHA:**
+   ```sh
+   gh pr merge <N> -R "$REPO" --"${merge_method:-merge}" --delete-branch --match-head-commit "$head"
+   ```
+   `--match-head-commit` makes GitHub reject the merge if the head moved since step 1,
+   so a race can never smuggle unreviewed code through. On mismatch/error →
+   `action=wait`, next tick re-evaluates (do NOT retry-loop within the tick).
+3. On success: add `${LP}:merged`, remove `${LP}:ready-to-merge`/`${LP}:owned`, run the
+   best-effort status write-back (§8.1), send ONE `merged` notification (§10).
+4. `action=merge result=merged head_sha=<head>`.
+
+### 8.1 Best-effort `.status.yaml` write-back (when-green only)
+
+The merged PR is the source of truth; this write-back is reconciliation/audit and is
+**non-blocking — a failure NEVER rolls back the merge.** Skip entirely if `gitops` is
+not configured.
+
+Derive the proposal from the PR branch: `service` = repo stem (e.g. `mctl-design`),
+`slug` = `headRefName` with the `gitops.branch_prefix` (`feat/agents-`) stripped.
+Target file: `<gitops.agents_state_path>/<service>/proposals/<slug>/.status.yaml`.
+
+1. Clone/refresh `gitops.repo` shallow into a temp dir (App credential helper from §2).
+2. Update the file: `status: merged`, `merged_at: <iso>`, `merge_commit: <sha>`,
+   `pr: <url>`, `updated_by: mctl-claude-remote[bot]`. Preserve all other keys.
+3. Commit `chore(agents-state): mark <service>/<slug> merged (#<N>)` and push to the
+   default branch with **pull --rebase retry** (up to 3 times — the file is tiny and
+   contention on the gitops mutex is low).
+4. If the file does not exist (hand-written PR with no proposal) → log
+   `result=status_skip reason=no-proposal`, do nothing else.
+5. If the push still fails after retries → log `result=status_write_failed`, send ONE
+   `non-review` escalation (reason `status-writeback`), and leave the proposal as-is.
+   The read-only reconciler in mctl-agents will repair the drift later. Do not retry
+   destructively.
 
 ## 9. Non-review / stuck escalation
 
@@ -215,8 +296,12 @@ transition (the `${LP}:ready-to-merge` / `${LP}:escalated` labels are the dedupe
 
 Templates (`{...}` from PR context):
 - **ready-to-merge:** `✅ {repo}#{pr} clean & green ({p1}P1/{p2}P2). Ready to merge — your call. {url}`
+- **merged:** `🚀 {repo}#{pr} auto-merged (clean + approved + green). Deploy rolling out. {url}`
 - **max-attempt:** `⛔ {repo}#{pr} stuck after {attempts} fix attempts; P1/P2 persist: {summaries}. Human triage needed. {url}`
 - **non-review:** `⚠️ {repo}#{pr} {failure_type} (not a review finding): {detail}. Out of steward scope. {url}`
+
+The `merged` template is a notification, not a "your call" ping — it tells the operator
+a merge already happened. Only used in `merge_mode=when-green`.
 
 ## 11. Structured logging
 
@@ -237,7 +322,11 @@ Do not loop — one tick per invocation. The RemoteTrigger routine fires the nex
 
 ## Anti-patterns (do not regress)
 
-1. **Auto-merging.** v1 never calls `gh pr merge`. Escalate before merge, always.
+1. **Ungated merging.** Only merge when `merge_mode=when-green` AND the full
+   head-SHA-anchored gate holds: no P1/P2, `mergeable`, `checks_green`, `approved`
+   (`reviewDecision==APPROVED`), and the PR passed the `head_prefix` ownership gate.
+   With `merge_mode=never`, escalate and never call `gh pr merge`. Never bypass branch
+   protection — wait for the bot's approval rather than merging unapproved code.
 2. **Token leakage.** No token on a command line, in a remote URL, or in any log.
 3. **Matching a stale review.** Always key findings to the current head SHA via the
    codex-watch trigger baseline.

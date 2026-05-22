@@ -33,14 +33,23 @@ and acts on GitHub on the operator's behalf. Its security contract:
   background, written to a tmpfs file (mode 0400), never logged, and never embedded
   in a git remote URL. The App private key must be mounted from a secret manager on
   tmpfs, not passed via an environment variable.
-- **No autonomous merge.** v1 never merges; it escalates to a human before merge and
-  after a bounded number of failed fix attempts. Protect the default branch
-  (required human approval + status checks) as defense in depth.
+- **Gated merge.** Merging is controlled by `merge_mode`. The default `"never"`
+  escalates to a human and never calls `gh pr merge`. The opt-in `"when-green"` mode
+  auto-merges, but only when a head-SHA-anchored gate holds: no P1/P2 findings, CI
+  green, the PR is mergeable, **and** an approving review exists at the current head
+  (`reviewDecision==APPROVED`). The steward never bypasses branch protection — it
+  waits for the review bot's approval, so the App's merge is structurally impossible
+  until a clean review approves the exact reviewed SHA.
+- **Bounded fixes.** Fix commits are constrained by a safety envelope
+  (`max_files_changed`, `max_diff_lines`, `forbidden_paths`, no scope expansion, no
+  force-push); a finding that can only be fixed outside that envelope is escalated,
+  not pushed.
 - **Containment.** Run with the hardened, deny-by-default profile in
   `deploy/pr-steward.example.yaml`.
 
-Report any way the automation can be made to merge without human approval, leak the
-token, or act outside its configured repo scope.
+Report any way the automation can be made to merge outside the `when-green` gate
+(unapproved, with P1/P2 open, or with red CI), leak the token, or act outside its
+configured repo scope.
 
 ## Supported Versions
 

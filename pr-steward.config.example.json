@@ -1,24 +1,37 @@
 {
   "merge_mode": "never",
+  "merge_method": "merge",
   "max_attempts": 3,
+  "max_files_changed": 10,
+  "max_diff_lines": 300,
+  "forbidden_paths": [
+    ".github/workflows/**",
+    "**/secrets/**",
+    "deploy/**",
+    "**/values.yaml",
+    "**/values.yaml.tpl"
+  ],
   "stuck_hours": 6,
   "tick_lock_stale_minutes": 15,
   "label_prefix": "steward",
   "review_trigger": "@claude review",
-  "review_bots": ["claude[bot]", "chatgpt-codex-connector[bot]"],
+  "review_bots": ["claude[bot]"],
   "repos": [
     {
       "name": "OWNER/REPO",
       "pr_filter": {
-        "head_prefix": "feat/agents-",
-        "author": "app/your-implementer-app",
-        "labels": ["agents"]
+        "head_prefix": "feat/agents-"
       }
     }
   ],
   "github_app": {
     "slug": "your-steward-app",
     "token_file": "/run/steward/gh-token"
+  },
+  "gitops": {
+    "repo": "OWNER/your-gitops-repo",
+    "agents_state_path": "platform-gitops/agents-state",
+    "branch_prefix": "feat/agents-"
   },
   "escalation": {
     "channel": "telegram",
