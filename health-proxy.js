@@ -3,6 +3,11 @@ const fs = require('fs');
 const http = require('http');
 const PORT = parseInt(process.env.PORT || '8080', 10);
 
+// Grace window: tolerate TLS connection drops shorter than this many ms.
+// The relay WebSocket briefly loses ESTABLISHED state during reconnects
+// triggered by large payloads (e.g. image uploads from the mobile app).
+const TLS_GRACE_MS = parseInt(process.env.TLS_GRACE_MS || '60000', 10);
+
 // Returns true if any process has "remote-control" in its cmdline.
 function isClaudeRunning() {
   try {
@@ -37,19 +42,37 @@ function hasOutboundTls() {
   return false;
 }
 
+// Timestamp of the last probe that observed an ESTABLISHED TLS connection.
+// Starts at 0 so a brand-new container that has never had a connection fails
+// immediately (the startup probe covers the initial connect window).
+let lastGoodTls = 0;
+
 http.createServer((req, res) => {
   if (!isClaudeRunning()) {
     res.writeHead(503, { 'Content-Type': 'text/plain' });
     res.end('claude process not found\n');
     return;
   }
-  if (!hasOutboundTls()) {
-    res.writeHead(503, { 'Content-Type': 'text/plain' });
-    res.end('claude has no outbound TLS connections\n');
+
+  if (hasOutboundTls()) {
+    lastGoodTls = Date.now();
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end('OK\n');
     return;
   }
-  res.writeHead(200, { 'Content-Type': 'text/plain' });
-  res.end('OK\n');
+
+  // No live connection right now — but if we had one recently, stay healthy.
+  // This prevents the liveness probe from killing the container during a
+  // transient WebSocket reconnect (e.g. after sending a large image payload).
+  const elapsed = Date.now() - lastGoodTls;
+  if (lastGoodTls > 0 && elapsed < TLS_GRACE_MS) {
+    res.writeHead(200, { 'Content-Type': 'text/plain' });
+    res.end(`OK (TLS grace: ${Math.round((TLS_GRACE_MS - elapsed) / 1000)}s remaining)\n`);
+    return;
+  }
+
+  res.writeHead(503, { 'Content-Type': 'text/plain' });
+  res.end('claude has no outbound TLS connections\n');
 }).listen(PORT, () => {
   console.log(`healthz :${PORT}`);
 });
