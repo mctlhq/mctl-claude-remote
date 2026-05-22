@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+# pr-steward-precheck — cheap gate for the scheduler loop.
+#
+# Exits 0 if at least one in-scope PR needs a steward tick (open, head branch
+# matches a configured repo's pr_filter.head_prefix, and not already in a
+# terminal steward state). Exits 1 when there is nothing to do, so the caller
+# can skip spawning a token-costly `claude -p` tick. Exits 2 on config/auth
+# error (caller should treat like "no work").
+#
+# Generic: every repo and prefix comes from the config file. Read-only — makes
+# no GitHub mutations. The GitHub App token is read from a file and exported
+# only for the gh calls; it is never printed.
+set -eu
+
+CONFIG="${PR_STEWARD_CONFIG:-/workspace/pr-steward.config.json}"
+TOKEN_FILE="${GH_APP_TOKEN_FILE:-/run/steward/gh-token}"
+
+[ -f "$CONFIG" ]     || { echo "precheck: config not found: $CONFIG" >&2; exit 2; }
+[ -s "$TOKEN_FILE" ] || { echo "precheck: token file missing/empty: $TOKEN_FILE" >&2; exit 2; }
+
+LABEL_PREFIX="$(jq -r '.label_prefix // "steward"' "$CONFIG")"
+TERMINAL_MERGED="${LABEL_PREFIX}:merged"
+TERMINAL_ESCALATED="${LABEL_PREFIX}:escalated"
+
+# App token via gh's GH_TOKEN env. Never echoed; gh embeds it in no output.
+GH_TOKEN="$(cat "$TOKEN_FILE")"
+export GH_TOKEN
+export GH_PAGER=cat GH_PROMPT_DISABLED=1
+
+repos_count="$(jq '.repos | length' "$CONFIG")"
+i=0
+while [ "$i" -lt "$repos_count" ]; do
+  name="$(jq -r ".repos[$i].name" "$CONFIG")"
+  prefix="$(jq -r ".repos[$i].pr_filter.head_prefix // \"\"" "$CONFIG")"
+  i=$((i + 1))
+  [ -n "$name" ] && [ "$name" != "null" ] || continue
+
+  # head: is a server-side prefix match; the jq startswith re-confirms it and
+  # drops PRs already in a terminal steward state (merged / escalated).
+  search=""
+  [ -n "$prefix" ] && [ "$prefix" != "null" ] && search="head:$prefix"
+
+  hits="$(gh pr list -R "$name" --state open ${search:+--search "$search"} \
+            --limit 200 --json number,headRefName,labels 2>/dev/null \
+          | jq --arg pfx "$prefix" --arg merged "$TERMINAL_MERGED" --arg esc "$TERMINAL_ESCALATED" \
+              '[ .[]
+                 | select($pfx == "" or $pfx == "null" or (.headRefName | startswith($pfx)))
+                 | select([.labels[].name] | (index($merged) or index($esc)) | not)
+               ] | length' 2>/dev/null || echo 0)"
+
+  if [ "${hits:-0}" -gt 0 ]; then
+    echo "precheck: $name has $hits candidate PR(s)"
+    exit 0
+  fi
+done
+
+echo "precheck: no in-scope PRs need a tick"
+exit 1

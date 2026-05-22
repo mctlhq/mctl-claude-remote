@@ -85,6 +85,8 @@ spec:
               value: "claude-remote"
             - name: PR_STEWARD_ENABLED
               value: "false"            # kill switch — flip to "true" to enable
+            - name: PR_STEWARD_SCHEDULE_SECONDS
+              value: "0"                # >0 enables the built-in precheck-gated tick loop
             - name: PR_STEWARD_CONFIG
               value: "/etc/steward/pr-steward.config.json"
             - name: GH_APP_ID

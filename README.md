@@ -102,8 +102,21 @@ approved and CI is green** (`when-green`). It escalates after N failed fix attem
 either way, and never merges anything failing the clean+approved+green gate.
 
 It is fully generic — every target repo, filter, threshold and the escalation
-channel come from a config file. The driver is your own scheduler (e.g. a Claude
-RemoteTrigger routine) firing the prompt `Run the pr-steward skill.` per tick.
+channel come from a config file. Each tick is one run of the prompt
+`Run the pr-steward skill.`
+
+**Built-in scheduler (recommended driver).** Set `PR_STEWARD_SCHEDULE_SECONDS`
+to a positive integer and the entrypoint runs the steward itself on that cadence
+— a headless `claude -p "Run the pr-steward skill"` per tick — so no external
+driver is needed. Before each tick a cheap GitHub pre-check
+(`bin/pr-steward-precheck`) lists open PRs across the configured repos using the
+already-minted App token, and the model run is spawned **only** when an in-scope
+PR is not yet in a terminal `<label_prefix>:merged` / `<label_prefix>:escalated`
+state. Idle cadences therefore cost a single GitHub API call, not Claude usage.
+Each tick is wrapped in `timeout` (`PR_STEWARD_TICK_TIMEOUT_SECONDS`, default
+1800s) so a stuck turn cannot wedge the loop. Leave `PR_STEWARD_SCHEDULE_SECONDS`
+unset (or `0`) to disable the scheduler; you can still drive ticks from any
+external scheduler (e.g. a Claude RemoteTrigger routine) instead.
 
 `merge_mode` and `merge_method` are top-level defaults, but any `repos[]` entry may
 override them — so one repo can auto-merge (`when-green`) while the rest stay
@@ -120,6 +133,8 @@ device. The skill itself re-checks the flag on every tick.
 | `PR_STEWARD_ENABLED` | `false` | Master switch. Must be exactly `true` to activate. |
 | `PR_STEWARD_CONFIG` | `/workspace/pr-steward.config.json` | Path to the steward config (see `pr-steward.config.example.json`). |
 | `PR_STEWARD_SKILLS_DIR` | _(unset)_ | Optional dir of overlay skills to install (e.g. your `codex-watch` skill). |
+| `PR_STEWARD_SCHEDULE_SECONDS` | _(unset)_ | Positive integer enables the built-in scheduler: a precheck-gated headless `claude -p` tick every N seconds. Unset/`0` = no scheduler. |
+| `PR_STEWARD_TICK_TIMEOUT_SECONDS` | `1800` | Per-tick `timeout` for the headless run, so a stuck turn cannot wedge the scheduler loop. |
 | `GH_APP_ID` | — | GitHub App ID. |
 | `GH_APP_INSTALLATION_ID` | — | App installation ID for the target repos. |
 | `GH_APP_PRIVATE_KEY_FILE` | — | Path to the App private key (PEM). Mount on **tmpfs, group-readable (mode 0440 + fsGroup)** so the non-root process can read it. |
