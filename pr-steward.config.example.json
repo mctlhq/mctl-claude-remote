@@ -22,6 +22,14 @@
       "pr_filter": {
         "head_prefix": "feat/agents-"
       }
+    },
+    {
+      "name": "OWNER/ANOTHER_REPO",
+      "pr_filter": {
+        "head_prefix": "claude/"
+      },
+      "merge_mode": "when-green",
+      "merge_method": "squash"
     }
   ],
   "github_app": {

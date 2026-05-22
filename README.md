@@ -105,6 +105,12 @@ It is fully generic — every target repo, filter, threshold and the escalation
 channel come from a config file. The driver is your own scheduler (e.g. a Claude
 RemoteTrigger routine) firing the prompt `Run the pr-steward skill.` per tick.
 
+`merge_mode` and `merge_method` are top-level defaults, but any `repos[]` entry may
+override them — so one repo can auto-merge (`when-green`) while the rest stay
+escalate-only (`never`). The effective values for a PR are
+`repo.merge_mode ?? merge_mode ?? "never"` and
+`repo.merge_method ?? merge_method ?? "merge"`. See `pr-steward.config.example.json`.
+
 **Kill switch:** the automation is inert unless `PR_STEWARD_ENABLED=true`. Set it
 to anything else (or leave it unset) and the container is a plain remote-control
 device. The skill itself re-checks the flag on every tick.
