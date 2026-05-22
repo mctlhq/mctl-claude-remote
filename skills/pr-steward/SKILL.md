@@ -92,9 +92,15 @@ log `action=skip reason=locked` and exit 0. Otherwise write
 For each repo in `repos[]`:
 
 ```sh
-gh pr list -R "$REPO" --state open --limit 200 --json number,headRefName,headRefOid,author,labels,isDraft,mergeStateStatus,statusCheckRollup,reviewDecision,url \
+gh pr list -R "$REPO" --state open --limit 200 --json number,headRefName,headRefOid,author,labels,isDraft,mergeStateStatus,reviewDecision,url \
   --search "<filter>"
 ```
+
+**Do NOT request `statusCheckRollup` in this list query.** `gh pr list` resolves through
+GitHub's GraphQL **search** API, and a GitHub App installation token is denied there with
+`Resource not accessible by integration` on `search.nodes[].status` — which fails or empties
+the whole list and wedges the tick. Check status is only needed per-PR; fetch it in §5 via
+the single-PR node + REST fallback, both of which App tokens can read.
 
 Build the server-side search from every `pr_filter` key that maps to a GitHub search
 qualifier — push as much filtering server-side as possible so the result set is small
@@ -132,7 +138,8 @@ any PR carrying `${LP}:owned` as in scope even if the filter would otherwise mis
 
 For each in-scope, non-draft PR compute:
 - `head = headRefOid`
-- `checks_green` = every required check in `statusCheckRollup` is SUCCESS/NEUTRAL/SKIPPED
+- `checks_green` = every required check is SUCCESS/NEUTRAL/SKIPPED, from the check status
+  fetched per the **App-token-safe procedure below** (the §4 list no longer carries it)
 - `mergeable` = `mergeStateStatus` ∈ {`CLEAN`,`HAS_HOOKS`,`UNSTABLE`}
 - `approved` = `reviewDecision == "APPROVED"` — branch protection's required-review
   verdict. The review bot's APPROVED review (e.g. `claude-review.yml` approving when
@@ -141,6 +148,38 @@ For each in-scope, non-draft PR compute:
   reviews — it waits for the bot's approval).
 - `attempt` = highest N from any `${LP}:attempt-N` label (0 if none)
 - review state — via §6 (codex-watch)
+
+**Fetching check status (App-token safe — never hang).** The §4 list omits
+`statusCheckRollup` because the search API denies it to App tokens. Resolve it per-PR with a
+fallback chain, and if it cannot be determined, escalate rather than block:
+1. `gh pr view <N> -R "$REPO" --json statusCheckRollup` — the single-PR node IS readable by
+   App installation tokens (unlike `search.nodes[].status`).
+2. On error (`Resource not accessible by integration`, or any failure) fall back to REST,
+   which only needs Checks:read / commit-status:read:
+   ```sh
+   # MUST paginate: check-runs returns 30 per page by default, so a failing run on a
+   # later page would be silently missed and could let a bad PR merge in when-green.
+   gh api --paginate "repos/$REPO/commits/$head/check-runs?per_page=100" \
+     --jq '.check_runs[].conclusion'
+   gh api "repos/$REPO/commits/$head/status" --jq '.state'
+   ```
+   Evaluate the **full paginated set** of check-run conclusions (`.state` from
+   `/status` is a server-side rollup over all legacy statuses, so it needs no
+   pagination — use it only as a failure signal, never as a green requirement, since
+   a repo with no legacy statuses reports `pending`):
+   - **Failed** (not green → §9 build-failure path): any conclusion in
+     {`failure`,`cancelled`,`timed_out`,`action_required`,`startup_failure`}, or
+     `.state == "failure"`.
+   - **Not green yet** (`action=wait reason=awaiting-checks`): any conclusion is
+     `null` (a run still executing reports `conclusion: null`) or `stale`, or the
+     check-run set is empty with `.state == "pending"`.
+   - **`checks_green = true`** only when **every** conclusion ∈
+     {`success`,`neutral`,`skipped`} (none `null`/`stale`) **and** `.state ≠ failure`.
+     Treat any conclusion outside that allow-list as not-green — never default an
+     unrecognized or in-progress conclusion to green.
+3. If BOTH the node query and REST fail, treat checks as **unknown** — do NOT retry in a loop
+   and do NOT hang: `action=escalate reason=checks-unavailable`, send ONE §9 non-review
+   escalation, stop for this PR. (`merge_mode=when-green` must never merge on unknown checks.)
 
 Apply, in order:
 
@@ -242,6 +281,12 @@ steward never bypasses branch protection.
 
 1. **Re-verify at head.** Re-fetch the PR JSON
    (`gh pr view <N> -R $REPO --json headRefOid,mergeStateStatus,statusCheckRollup,reviewDecision`).
+   `gh pr view` is a single-PR node, so `statusCheckRollup` is App-readable here; if it still
+   errors, use the §5 REST fallback. If checks come back **unknown** (both the node query
+   and the REST fallback fail at re-verify), do **not** merge and do **not** loop on `wait`
+   — a silent `wait` here recreates the exact hang this design avoids. Instead
+   `action=escalate reason=checks-unavailable`, send ONE §9 non-review escalation, and stop
+   for this PR (same as §5 step 3). Never merge on unknown.
    If `headRefOid` differs from the `head` you evaluated, a push landed mid-tick →
    `action=wait reason=head-moved`, next tick re-evaluates. Re-confirm `mergeable`,
    `checks_green`, `approved` on the fresh JSON.
