@@ -159,6 +159,9 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
   STEWARD_CLAUDE_BIN="$(command -v claude)"
   STEWARD_PRECHECK=/opt/steward/bin/pr-steward-precheck
   STEWARD_TICK_TIMEOUT="${PR_STEWARD_TICK_TIMEOUT_SECONDS:-1800}"
+  # Guard against a misconfigured value: `timeout 0` kills the tick instantly
+  # and a negative value errors out, silently breaking every tick.
+  printf '%s' "$STEWARD_TICK_TIMEOUT" | grep -qE '^[1-9][0-9]*$' || STEWARD_TICK_TIMEOUT=1800
   (
     while true; do
       sleep "${PR_STEWARD_SCHEDULE_SECONDS}"

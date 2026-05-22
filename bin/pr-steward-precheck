@@ -28,6 +28,7 @@ export GH_TOKEN
 export GH_PAGER=cat GH_PROMPT_DISABLED=1
 
 repos_count="$(jq '.repos | length' "$CONFIG")"
+errors=0
 i=0
 while [ "$i" -lt "$repos_count" ]; do
   name="$(jq -r ".repos[$i].name" "$CONFIG")"
@@ -40,8 +41,23 @@ while [ "$i" -lt "$repos_count" ]; do
   search=""
   [ -n "$prefix" ] && [ "$prefix" != "null" ] && search="head:$prefix"
 
-  hits="$(gh pr list -R "$name" --state open ${search:+--search "$search"} \
-            --limit 200 --json number,headRefName,labels 2>/dev/null \
+  # Capture gh stderr separately so an API failure (expired token, network,
+  # bad repo) is logged and counted instead of being silently swallowed into
+  # "no work" — a masked failure makes a dead scheduler very hard to diagnose.
+  err="$(mktemp)"
+  if ! raw="$(gh pr list -R "$name" --state open ${search:+--search "$search"} \
+                --limit 200 --json number,headRefName,labels 2>"$err")"; then
+    echo "precheck: gh pr list failed for $name: $(cat "$err")" >&2
+    rm -f "$err"
+    errors=$((errors + 1))
+    continue
+  fi
+  rm -f "$err"
+
+  # --limit 200 without pagination: the precheck only needs ONE non-terminal
+  # in-scope PR, so this is wrong only in the unlikely case where all 200
+  # returned PRs are terminal-labelled while a non-terminal one is paged out.
+  hits="$(printf '%s' "$raw" \
           | jq --arg pfx "$prefix" --arg merged "$TERMINAL_MERGED" --arg esc "$TERMINAL_ESCALATED" \
               '[ .[]
                  | select($pfx == "" or $pfx == "null" or (.headRefName | startswith($pfx)))
@@ -53,6 +69,13 @@ while [ "$i" -lt "$repos_count" ]; do
     exit 0
   fi
 done
+
+# Distinguish a genuine "nothing to do" from "every repo query errored": the
+# latter exits 2 so the caller's log shows the scheduler is broken, not idle.
+if [ "$errors" -gt 0 ]; then
+  echo "precheck: no candidates found, but $errors repo query(ies) errored — treating as broken, not idle" >&2
+  exit 2
+fi
 
 echo "precheck: no in-scope PRs need a tick"
 exit 1
