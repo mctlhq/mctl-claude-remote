@@ -83,23 +83,32 @@ log `action=skip reason=locked` and exit 0. Otherwise write
 For each repo in `repos[]`:
 
 ```sh
-gh pr list -R "$REPO" --state open --json number,headRefName,headRefOid,author,labels,isDraft,mergeStateStatus,statusCheckRollup,url \
+gh pr list -R "$REPO" --state open --limit 200 --json number,headRefName,headRefOid,author,labels,isDraft,mergeStateStatus,statusCheckRollup,url \
   --search "<filter>"
 ```
 
-Build the server-side search from the `pr_filter` keys that map to GitHub search
-qualifiers: `author` → `author:<login>` and each `labels[]` entry → `label:<name>`.
-Skip drafts (`isDraft=true` → `action=wait reason=draft`).
+Build the server-side search from every `pr_filter` key that maps to a GitHub search
+qualifier — push as much filtering server-side as possible so the result set is small
+and pagination-safe:
+- `author` → `author:<login>`
+- each `labels[]` entry → `label:<name>`
+- `head_prefix` → `head:<prefix>` — GitHub's `head:` qualifier matches **by branch-name
+  prefix** (e.g. `head:feat/agents-` matches `feat/agents-foo` but not `fix/...`), so the
+  prefix discriminator belongs in the search, not just client-side.
 
-**`head_prefix` is matched client-side, not via `--search`.** GitHub's `head:`
-qualifier is an exact-branch match with no prefix/wildcard support, so a prefix like
-`feat/agents-` cannot be expressed server-side. After listing, **drop any PR whose
-`headRefName` does not start with `pr_filter.head_prefix`** (string prefix, case-
-sensitive). This is the primary discriminator when an automated author opens PRs under
-the same identity as humans (e.g. an implementer that pushes `feat/agents-<slug>`
-branches via a shared token): the branch prefix is what separates steward-owned PRs
-from human PRs, so when `head_prefix` is set it is a hard gate — a PR that fails it is
-never owned, even if `author`/`labels` would match.
+Pass `--limit 200` (above the 30 default) so that even a permissive filter on a busy
+repo does not silently drop in-scope PRs past the first page. Skip drafts
+(`isDraft=true` → `action=wait reason=draft`).
+
+**`head_prefix` is still re-checked client-side as a hard gate** (defense-in-depth):
+after listing, **drop any PR whose `headRefName` does not start with
+`pr_filter.head_prefix`** (string prefix, case-sensitive). The `head:` search qualifier
+is case-insensitive and could in principle widen on edge cases, so the client-side
+exact-prefix check is the authoritative gate. `head_prefix` is the primary discriminator
+when an automated author opens PRs under the same identity as humans (e.g. an implementer
+that pushes `feat/agents-<slug>` branches via a shared token): the branch prefix is what
+separates steward-owned PRs from human PRs, so when `head_prefix` is set it is a hard
+gate — a PR that fails it is never owned, even if `author`/`labels` would match.
 
 If `pr_filter` has no keys at all, the steward would match every open PR in the repo;
 treat an empty filter as a misconfiguration and `action=skip reason=empty-pr-filter`
