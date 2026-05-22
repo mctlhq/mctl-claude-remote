@@ -17,6 +17,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_NPM_VERSION}"
 
+# GitHub CLI — required by the optional pr-steward skill (gh pr list / comment /
+# repo clone). Installed from GitHub's official apt repo; arch resolved via
+# dpkg so the layer is portable if the build later goes multi-arch. Inert
+# unless pr-steward is enabled.
+RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends gh \
+    && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /workspace
 
 COPY health-proxy.js /opt/health-proxy.js
