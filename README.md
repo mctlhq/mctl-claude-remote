@@ -142,8 +142,10 @@ the App structurally unable to land code. In `merge_mode=when-green` the App *ca
 merge, but only by satisfying that same gate — it waits for the review bot's approval
 of the current head SHA (e.g. a `claude-review.yml` that approves when it finds no
 P1/P2) rather than bypassing protection. Enable **"dismiss stale approvals on push"**
-so each fix commit re-opens the gate until the new head is re-approved. Merging needs
-no extra App permission beyond Pull requests: RW; do **not** grant Administration.
+so each fix commit re-opens the gate until the new head is re-approved. Merging uses
+the App's existing **Contents: RW + Pull requests: RW** (the merge commit on the base
+branch needs Contents write; both are already in the baseline grant) — it needs **no
+extra permission, and specifically no Administration**.
 
 ## Build Model
 
