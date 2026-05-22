@@ -55,7 +55,9 @@ You are running inside a container as a Claude Code remote worker.
 ## Session continuity
 
 Conversation history is not preserved across container restarts.
-If context matters for future sessions, write a summary to a file in `/workspace`.
+Before a planned restart, run `/compact` to write a session summary, then save
+it with a name like `/workspace/session-notes.md` — that file is synced to
+persistent storage and will be available after the container comes back up.
 MD
 fi
 
@@ -117,15 +119,25 @@ fi
 # native build can auto-update without sudo (the npm-global install in
 # /usr/local cannot — `claude doctor` warns about it). Persisted to a
 # volume or external storage if configured, so the update can survive
-# container restarts. `--force` overwrites whatever the workspace restore
-# brought back. Some volume/restore mechanisms drop the exec bit;
-# chmod ensures it's set.
-echo "[entrypoint] installing/refreshing native claude binary"
-claude install latest --force 2>&1 | tail -8 || echo "[entrypoint] WARN native install failed; falling back to npm-global"
-chmod +x /workspace/.local/bin/claude 2>/dev/null || true
-if [ -x /workspace/.local/bin/claude ]; then
+# container restarts.
+#
+# Skip re-download when the binary restored from MinIO is already at the
+# same version as the bundled npm package; saves 30–60 s on normal restarts.
+# Some volume/restore mechanisms drop the exec bit, so chmod always runs.
+NATIVE_CLAUDE="/workspace/.local/bin/claude"
+chmod +x "$NATIVE_CLAUDE" 2>/dev/null || true
+BUNDLED_VER=$(claude --version 2>/dev/null | head -1)
+NATIVE_VER=$("$NATIVE_CLAUDE" --version 2>/dev/null | head -1)
+if [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_VER" ] && [ "$NATIVE_VER" = "$BUNDLED_VER" ]; then
+  echo "[entrypoint] native claude already current ($NATIVE_VER); skipping install"
+else
+  echo "[entrypoint] installing/refreshing native claude binary"
+  claude install latest --force 2>&1 | tail -8 || echo "[entrypoint] WARN native install failed; falling back to npm-global"
+  chmod +x "$NATIVE_CLAUDE" 2>/dev/null || true
+fi
+if [ -x "$NATIVE_CLAUDE" ]; then
   export PATH="/workspace/.local/bin:$PATH"
-  echo "[entrypoint] using native claude: $(/workspace/.local/bin/claude --version 2>&1 | head -1)"
+  echo "[entrypoint] using native claude: $($NATIVE_CLAUDE --version 2>&1 | head -1)"
 else
   echo "[entrypoint] using npm-global claude: $(claude --version 2>&1 | head -1)"
 fi
