@@ -96,8 +96,10 @@ Anything persisted under `/workspace` should be treated as sensitive because it 
 The image ships an **optional, off-by-default** automation that turns the
 persistent session into a pull-request steward: it watches PRs for a code-review
 bot (`claude[bot]` / `chatgpt-codex-connector[bot]`), applies fixes for P1/P2
-findings, re-triggers the review, and **escalates to a human before any merge and
-after N failed fix attempts**. It never merges on its own.
+findings, re-triggers the review, and then — per `merge_mode` — either **escalates
+to a human** (`never`, the default) or **auto-merges once the review is clean and
+approved and CI is green** (`when-green`). It escalates after N failed fix attempts
+either way, and never merges anything failing the clean+approved+green gate.
 
 It is fully generic — every target repo, filter, threshold and the escalation
 channel come from a config file. The driver is your own scheduler (e.g. a Claude
@@ -134,10 +136,16 @@ manifest: non-root, read-only root filesystem, all capabilities dropped,
 `RuntimeDefault` seccomp, tmpfs token volume, and a deny-by-default NetworkPolicy
 (egress should be tightened to your GitHub / Anthropic / escalation endpoints).
 
-**Branch protection prerequisite.** Because the steward pushes fix commits, protect
-the default branch: require a PR, **require human approval**, and require status
-checks — so even though v1 never calls merge, the App is structurally unable to land
-code without a human.
+**Branch protection prerequisite.** Protect the default branch: require a PR, require
+**an approving review**, and require status checks. In `merge_mode=never` this keeps
+the App structurally unable to land code. In `merge_mode=when-green` the App *can*
+merge, but only by satisfying that same gate — it waits for the review bot's approval
+of the current head SHA (e.g. a `claude-review.yml` that approves when it finds no
+P1/P2) rather than bypassing protection. Enable **"dismiss stale approvals on push"**
+so each fix commit re-opens the gate until the new head is re-approved. Merging uses
+the App's existing **Contents: RW + Pull requests: RW** (the merge commit on the base
+branch needs Contents write; both are already in the baseline grant) — it needs **no
+extra permission, and specifically no Administration**.
 
 ## Build Model
 
