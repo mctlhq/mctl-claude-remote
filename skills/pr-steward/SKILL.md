@@ -145,8 +145,19 @@ For each in-scope, non-draft PR compute:
   `merge_method` ?? `"merge"`. Everywhere below, "`merge_mode`" / "`merge_method`" mean
   these per-PR **effective** values — so the merge gate is decided per repo, not globally.
 - `head = headRefOid`
-- `checks_green` = every required check is SUCCESS/NEUTRAL/SKIPPED, from the check status
-  fetched per the **App-token-safe procedure below** (the §4 list no longer carries it)
+- `checks_green` = every check-run on `head` is SUCCESS/NEUTRAL/SKIPPED, **excluding the review
+  bot's own Action check** — the check produced by the review workflow itself (e.g. the `review`
+  check from `claude-review.yml`, or any check whose name/workflow is in `review_bots`' review
+  Action). **That check's verdict is already captured by `approved`** (`reviewDecision==APPROVED`),
+  so counting it again in `checks_green` double-gates the review and, worse, lets the review
+  Action's own flakiness (e.g. a git-auth failure in its checkout step → `review` check =
+  `failure` → `mergeStateStatus=UNSTABLE`) **veto a PR the review already approved and whose
+  required checks all pass.** That is the bug this rule fixes: a non-required check failing —
+  especially the review Action's own check — must NOT block an otherwise-approved, green PR.
+  Evaluate via the App-token-safe procedure below, then drop the review Action's check from the
+  set before deciding. Equivalently: treat `mergeStateStatus=UNSTABLE` (mergeable; only a
+  non-required check red) the same as `CLEAN` for merge purposes — `gh pr merge` will succeed
+  because branch protection (required checks + approval) is satisfied.
 - `mergeable` = `mergeStateStatus` ∈ {`CLEAN`,`HAS_HOOKS`,`UNSTABLE`}
 - `behind` = `mergeStateStatus == "BEHIND"` — head is out of date with base. Under strict
   branch protection (`require branches to be up to date`) this is **auto-fixable** via §8.2
@@ -163,7 +174,12 @@ For each in-scope, non-draft PR compute:
 - `attempt` = highest N from any `${LP}:attempt-N` label (0 if none)
 - review state — via §6 (codex-watch)
 
-**Fetching check status (App-token safe — never hang).** The §4 list omits
+**Fetching check status (App-token safe — never hang).** This procedure is the **fallback for
+when `mergeStateStatus` is `UNKNOWN`** (GitHub still computing) and the input to the §9
+build-failure *diagnosis*. It is **NOT** an independent merge gate: when `mergeStateStatus` is
+authoritative (`CLEAN`/`UNSTABLE`/`BLOCKED`/…), use it for `checks_green` per the definition
+above — do **not** let a non-required check-run conclusion here veto an `UNSTABLE` PR that GitHub
+already deems mergeable. The §4 list omits
 `statusCheckRollup` because the search API denies it to App tokens. Resolve it per-PR with a
 fallback chain, and if it cannot be determined, escalate rather than block:
 1. `gh pr view <N> -R "$REPO" --json statusCheckRollup` — the single-PR node IS readable by
@@ -181,13 +197,16 @@ fallback chain, and if it cannot be determined, escalate rather than block:
    `/status` is a server-side rollup over all legacy statuses, so it needs no
    pagination — use it only as a failure signal, never as a green requirement, since
    a repo with no legacy statuses reports `pending`):
+   **First drop the review Action's own check-run from the set** (the `review` check from the
+   review workflow) — its verdict is `approved`, not a build signal (see the `checks_green`
+   definition above). Then over the **remaining** check-runs:
    - **Failed** (not green → §9 build-failure path): any conclusion in
      {`failure`,`cancelled`,`timed_out`,`action_required`,`startup_failure`}, or
      `.state == "failure"`.
    - **Not green yet** (`action=wait reason=awaiting-checks`): any conclusion is
      `null` (a run still executing reports `conclusion: null`) or `stale`, or the
      check-run set is empty with `.state == "pending"`.
-   - **`checks_green = true`** only when **every** conclusion ∈
+   - **`checks_green = true`** only when **every** remaining conclusion ∈
      {`success`,`neutral`,`skipped`} (none `null`/`stale`) **and** `.state ≠ failure`.
      Treat any conclusion outside that allow-list as not-green — never default an
      unrecognized or in-progress conclusion to green.
@@ -498,3 +517,9 @@ Do not loop — one tick per invocation. The RemoteTrigger routine fires the nex
    needs GitHub to recompute `mergeStateStatus`). Always defer the merge to a later tick
    that re-verifies the fresh head against the full §8 gate. Never weaken the gate to merge
    sooner — bring the branch into compliance instead.
+9. **Double-gating the review via its own check-run.** The review verdict is `approved`
+   (`reviewDecision==APPROVED`). Do NOT also require the review Action's own `review` check to
+   be green in `checks_green` — that Action flakes (e.g. git-auth on checkout → `review` =
+   `failure` → `UNSTABLE`) and would veto a PR the review already approved with required checks
+   green. Exclude the review Action's check from `checks_green`; treat `UNSTABLE` (only a
+   non-required check red) as mergeable.
