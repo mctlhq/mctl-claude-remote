@@ -199,48 +199,154 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
   echo "[entrypoint] pr-steward scheduler pid=$! interval=${PR_STEWARD_SCHEDULE_SECONDS}s gate=precheck"
 fi
 
-# Resume the prior conversation across restarts. The transcript is restored
-# from MinIO by the restore-state initContainer, so without --resume a restart
-# would silently start a blank session and drop all context. Precedence:
-#   RESUME_SESSION=false        -> escape hatch, fresh session (corrupt/unwanted transcript)
-#   RESUME_SESSION_ID=<uuid>    -> resume that exact session (explicit override)
-#   else                        -> resume the newest transcript on disk
-# A fresh restart creates a *newer* blank session, so the explicit
-# RESUME_SESSION_ID is the safe way to pin a known-good session; newest-on-disk
-# is only the convenience default. We log the resolved id (or why resume was
-# skipped) so a post-restart audit can confirm what was loaded.
-RESUME_FLAG=""
-if [ "${RESUME_SESSION:-true}" != "false" ]; then
+# ── Resume resolution ────────────────────────────────────────────────────────
+# Resolve which session to resume and set RESUME_FLAG. Called before EVERY
+# (re)launch so an in-pod relaunch (watchdog/supervisor below) picks up the
+# session that was active. Precedence:
+#   RESUME_SESSION=false      -> fresh session (escape hatch for a bad transcript)
+#   RESUME_SESSION_ID=<uuid>  -> resume that exact session (explicit pin)
+#   else                      -> resume the newest transcript on disk
+# A fresh restart creates a *newer* blank session, so RESUME_SESSION_ID is the
+# safe way to pin a known-good session; newest-on-disk is only the default.
+resolve_resume() {
+  RESUME_FLAG=""
+  if [ "${RESUME_SESSION:-true}" = "false" ]; then
+    echo "[entrypoint] RESUME_SESSION=false; starting fresh session"
+    return 0
+  fi
   RESUME_ID="${RESUME_SESSION_ID:-}"
   if [ -z "$RESUME_ID" ]; then
     NEWEST=$(ls -t /workspace/.claude/projects/*/*.jsonl 2>/dev/null | head -1 || true)
-    [ -n "$NEWEST" ] && RESUME_ID=$(basename "$NEWEST" .jsonl)
+    if [ -n "$NEWEST" ]; then RESUME_ID=$(basename "$NEWEST" .jsonl); fi
   fi
   # Strict canonical-UUID check (NOT a glob): RESUME_ID is interpolated into the
-  # `script -qfc "..."` command string and re-evaluated by the inner shell, so a
-  # loose pattern that admits shell metacharacters would be a command-injection
-  # path (via RESUME_SESSION_ID or a crafted on-disk filename). After this check
-  # RESUME_ID can only contain hex and hyphens, which are shell-safe.
+  # `script -qfc "..."` command and re-evaluated by the inner shell, so a loose
+  # pattern admitting shell metacharacters would be a command-injection path.
   if printf '%s' "$RESUME_ID" | grep -qE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
     RESUME_FLAG="--resume $RESUME_ID"
-    echo "[entrypoint] RESUME_SESSION=true; resuming session $RESUME_ID"
+    echo "[entrypoint] resuming session $RESUME_ID"
   elif [ -z "$RESUME_ID" ]; then
-    echo "[entrypoint] RESUME_SESSION=true but no transcript found; starting fresh session"
+    echo "[entrypoint] no transcript found; starting fresh session"
   else
     echo "[entrypoint] resolved session id '$RESUME_ID' is not a valid UUID; starting fresh session"
   fi
-else
-  echo "[entrypoint] RESUME_SESSION=false; starting fresh session"
+  return 0
+}
+
+# ── Wedge watchdog (in-pod) ──────────────────────────────────────────────────
+# The remote-control event loop can stall (e.g. a blocking poll loop): the
+# process stays alive but stops draining its relay socket, so the websocket dies
+# while the TCP conn lingers ESTABLISHED. We detect the same idle-safe signal the
+# health proxy uses — unread bytes in a :443 socket receive queue (a healthy
+# device, idle or busy, drains instantly) — and once it has been stuck for
+# WATCHDOG_STALL_SECONDS we kill the wedged claude leaf so the supervisor
+# relaunches it WITH --resume in-pod. That is faster than waiting for the kubelet
+# liveness backstop (health-proxy 503 -> pod recreate); the backstop still covers
+# the case where the in-pod relaunch can't recover. Gated by WATCHDOG_ENABLED.
+WATCHDOG_ENABLED="${WATCHDOG_ENABLED:-true}"
+WATCHDOG_INTERVAL_SECONDS="${WATCHDOG_INTERVAL_SECONDS:-15}"
+WATCHDOG_STALL_SECONDS="${WATCHDOG_STALL_SECONDS:-120}"
+
+# True (exit 0) if any ESTABLISHED outbound :443 socket has a non-zero rx_queue.
+# /proc/net/tcp{,6}: col 4 = state (01=ESTABLISHED), col 3 = rem addr (port 443
+# = hex 01BB), col 5 = tx_queue:rx_queue (hex). String compare avoids gawk
+# strtonum (absent in the slim image's awk).
+relay_has_backlog() {
+  awk 'FNR>1 && $4=="01" && $3 ~ /:01BB$/ { split($5,q,":"); if (q[2] !~ /^0+$/) f=1 } END { exit (f?0:1) }' \
+    /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
+# Echo the PID of the remote-control claude leaf — cmdline has --remote-control
+# and is not a script/sh wrapper (nor a `claude -p` steward tick, which has no
+# --remote-control).
+find_claude_pid() {
+  for p in /proc/[0-9]*; do
+    [ -r "$p/cmdline" ] || continue
+    cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
+    case "$cmd" in *--remote-control*) ;; *) continue ;; esac
+    first=${cmd%% *}
+    case "${first##*/}" in script|sh|bash|dash|env) continue ;; esac
+    echo "${p#/proc/}"; return 0
+  done
+  return 1
+}
+
+if [ "$WATCHDOG_ENABLED" = "true" ]; then
+  (
+    stall_start=0
+    while true; do
+      sleep "$WATCHDOG_INTERVAL_SECONDS"
+      if relay_has_backlog; then
+        now=$(date +%s)
+        if [ "$stall_start" -eq 0 ]; then stall_start="$now"; fi
+        if [ $((now - stall_start)) -ge "$WATCHDOG_STALL_SECONDS" ]; then
+          cpid=$(find_claude_pid || true)
+          if [ -n "$cpid" ]; then
+            echo "[watchdog] relay rx stalled >=${WATCHDOG_STALL_SECONDS}s; killing wedged claude pid=$cpid for in-pod relaunch"
+            kill -TERM "$cpid" 2>/dev/null || true
+            sleep 5
+            if kill -0 "$cpid" 2>/dev/null; then
+              echo "[watchdog] claude pid=$cpid alive after TERM; SIGKILL"
+              kill -KILL "$cpid" 2>/dev/null || true
+            fi
+          else
+            echo "[watchdog] relay rx stalled >=${WATCHDOG_STALL_SECONDS}s but no claude leaf found (mid-relaunch?); resetting stall timer"
+          fi
+          stall_start=0
+        fi
+      else
+        stall_start=0
+      fi
+    done
+  ) &
+  echo "[entrypoint] wedge watchdog pid=$! stall=${WATCHDOG_STALL_SECONDS}s interval=${WATCHDOG_INTERVAL_SECONDS}s"
 fi
 
-# `claude --remote-control` needs a PTY (script wrapper),
-# a device name, and skip-permissions to run non-interactively.
-# NOTE: when resuming, claude.ai surfaces the resumed session's display name
-# rather than ${DEVICE_NAME}. Pinning it with --name is a cosmetic follow-up
-# (flag composition not yet verified against --resume + --remote-control).
-#
-# Typescript file is /dev/stdout (NOT /dev/null) so claude's PTY output
-# reaches the container stdout pipe and shows up in container logs.
-# /dev/null swallows the welcome banner and registration errors silently.
-echo "[entrypoint] exec claude --remote-control"
-exec script -qfc "claude --remote-control ${DEVICE_NAME} ${RESUME_FLAG} --dangerously-skip-permissions 2>&1" /dev/stdout
+# ── Supervisor loop ──────────────────────────────────────────────────────────
+# `claude --remote-control` needs a PTY (the `script` wrapper). Rather than
+# exec'ing it (any exit would kill the container), we supervise: on exit — a
+# crash, or the watchdog killing a wedge — we relaunch in-pod with a freshly
+# resolved --resume, skipping the full pod-recreate + MinIO restore cycle.
+# A SIGTERM trap forwards shutdown to claude and exits (lets s3-sync flush on
+# pod termination). A rapid-crash cap avoids masking a hard failure: if claude
+# exits too many times in a short window, exit so the kubelet recreates the pod.
+# Typescript target is /dev/stdout (NOT /dev/null) so claude's PTY output reaches
+# the container logs.
+RELAUNCH_BACKOFF_SECONDS="${RELAUNCH_BACKOFF_SECONDS:-3}"
+RAPID_CRASH_MAX="${RAPID_CRASH_MAX:-5}"
+RAPID_CRASH_WINDOW_SECONDS="${RAPID_CRASH_WINDOW_SECONDS:-60}"
+
+CLAUDE_CHILD=""   # PID of the `script` wrapper currently running claude
+on_term() {
+  echo "[entrypoint] received SIGTERM/INT; stopping claude"
+  [ -n "$CLAUDE_CHILD" ] && kill -TERM "$CLAUDE_CHILD" 2>/dev/null || true
+  exit 0
+}
+trap on_term TERM INT
+
+crash_window_start=$(date +%s)
+crash_count=0
+while true; do
+  resolve_resume
+  echo "[entrypoint] launching claude --remote-control (${RESUME_FLAG:-fresh})"
+  set +e
+  script -qfc "claude --remote-control ${DEVICE_NAME} ${RESUME_FLAG} --dangerously-skip-permissions 2>&1" /dev/stdout &
+  CLAUDE_CHILD=$!
+  wait "$CLAUDE_CHILD"
+  rc=$?
+  set -e
+  CLAUDE_CHILD=""
+  echo "[entrypoint] claude exited (rc=$rc)"
+
+  now=$(date +%s)
+  if [ $((now - crash_window_start)) -ge "$RAPID_CRASH_WINDOW_SECONDS" ]; then
+    crash_window_start="$now"; crash_count=0
+  fi
+  crash_count=$((crash_count + 1))
+  if [ "$crash_count" -ge "$RAPID_CRASH_MAX" ]; then
+    echo "[entrypoint] claude exited ${crash_count}x within ${RAPID_CRASH_WINDOW_SECONDS}s — exiting so kubelet recreates the pod (not masking a hard failure)"
+    exit 1
+  fi
+  echo "[entrypoint] relaunching in ${RELAUNCH_BACKOFF_SECONDS}s"
+  sleep "$RELAUNCH_BACKOFF_SECONDS"
+done

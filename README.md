@@ -45,6 +45,11 @@ docker pull ghcr.io/mctlhq/mctl-claude-remote:0.1.8
 | `PORT` | `8080` | Port the health proxy listens on |
 | `TLS_GRACE_MS` | `60000` | How long `/healthz` tolerates having no established outbound TLS connection (covers transient relay reconnects, e.g. large uploads) before returning 503 |
 | `RELAY_STALL_MS` | `120000` | How long unread relay data may sit in a `:443` socket receive queue before `/healthz` declares the event loop wedged and returns 503. Must exceed the time a healthy loop needs to drain a large burst |
+| `WATCHDOG_ENABLED` | `true` | In-pod watchdog: on a sustained relay stall, kill the wedged claude so the supervisor relaunches it with `--resume` in-pod (faster than the kubelet pod-recreate backstop). Set `false` to disable |
+| `WATCHDOG_STALL_SECONDS` | `120` | How long the relay rx queue must stay backed up before the watchdog kills+relaunches claude. Same idle-safe signal as `/healthz` |
+| `WATCHDOG_INTERVAL_SECONDS` | `15` | Watchdog poll interval |
+| `RELAUNCH_BACKOFF_SECONDS` | `3` | Supervisor delay between claude relaunches |
+| `RAPID_CRASH_MAX` / `RAPID_CRASH_WINDOW_SECONDS` | `5` / `60` | If claude exits this many times within the window, the container exits so the kubelet recreates the pod (don't mask a hard failure) |
 
 ## Health Check
 
