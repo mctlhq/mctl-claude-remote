@@ -34,6 +34,8 @@ Keys (see `pr-steward.config.example.json`):
 | `merge_mode` | `"never"` (default — escalate ready-to-merge to a human, no merge call) or `"when-green"` (auto-merge once the §8 gate holds). Any unrecognized value → treat as `"never"` and log a warning. **Per-repo override:** a `repos[]` entry MAY set its own `merge_mode`; the effective mode for a PR is `repo.merge_mode ?? merge_mode ?? "never"` — so different repos can run different modes (e.g. one repo `when-green`, the rest `never`). |
 | `merge_method` | Merge style for `when-green`: `"merge"` (default), `"squash"`, or `"rebase"`. Default `"merge"` — keep the feature branch visible in the graph unless a repo opts out. **Per-repo override:** a `repos[]` entry MAY set its own `merge_method`; the effective method is `repo.merge_method ?? merge_method ?? "merge"`. |
 | `max_attempts` | Max fix iterations per PR before escalating (default 3). |
+| `max_update_attempts` | Max `gh pr update-branch` attempts on a `BEHIND` PR before terminal escalation (default 5). Bounds the update→re-check→behind-again race on a high-velocity base branch: after this many auto-updates without a merge, the PR can't keep up with `main` churn → escalate for a human (§8.2). |
+| `auto_resolve_bot_threads` | `true` (default) → on a `when-green` PR that is `BLOCKED` **solely** by unresolved review threads where every unresolved thread is authored by a `review_bots[]` login and carries no P1/P2, the steward resolves those threads so `required_conversation_resolution` branch protection doesn't wedge an approved PR on the bot's own non-blocking nits (§8.3). NEVER resolves a human-authored thread or a P1/P2 thread — those escalate. `false` → always escalate on `BLOCKED`. |
 | `max_files_changed` | Per-fix-attempt cap: if a fix would touch more than this many files, escalate instead of pushing (default 10). |
 | `max_diff_lines` | Per-fix-attempt cap on total added+removed lines; exceed → escalate, no push (default 300). |
 | `forbidden_paths[]` | Glob paths a fix must never touch (default `[".github/workflows/**", "**/secrets/**", "deploy/**", "**/values.yaml", "**/values.yaml.tpl"]`). A finding that can only be fixed by editing one of these → escalate (out of scope). |
@@ -146,6 +148,13 @@ For each in-scope, non-draft PR compute:
 - `checks_green` = every required check is SUCCESS/NEUTRAL/SKIPPED, from the check status
   fetched per the **App-token-safe procedure below** (the §4 list no longer carries it)
 - `mergeable` = `mergeStateStatus` ∈ {`CLEAN`,`HAS_HOOKS`,`UNSTABLE`}
+- `behind` = `mergeStateStatus == "BEHIND"` — head is out of date with base. Under strict
+  branch protection (`require branches to be up to date`) this is **auto-fixable** via §8.2
+  (`gh pr update-branch`); it is NOT a conflict and must NOT be terminally escalated.
+- `blocked` = `mergeStateStatus == "BLOCKED"` — a branch-protection rule is unmet (often
+  `required_conversation_resolution` with unresolved review threads). May be auto-fixable
+  via §8.3 when the only blockers are the review bot's own non-blocking threads.
+- `dirty` = `mergeStateStatus == "DIRTY"` — a real merge conflict. Needs a human → §9.
 - `approved` = `reviewDecision == "APPROVED"` — branch protection's required-review
   verdict. The review bot's APPROVED review (e.g. `claude-review.yml` approving when
   it finds no P1/P2) is what flips this. This is the merge gate that lets the App
@@ -195,7 +204,10 @@ Apply, in order:
 | **P1/P2 findings at current `head`** | if `attempt >= max_attempts` → **escalate (max-attempt)**, add `${LP}:escalated`, stop. Else → **§7 apply fix** |
 | no P1/P2, `mergeable`, `checks_green`, `approved`, **`effective_merge_mode=when-green`** | **§8 merge** — re-verify at head, then `gh pr merge`. |
 | no P1/P2, `mergeable`, `checks_green` (and either `effective_merge_mode=never` or not yet `approved`) | **§8 ready-to-merge escalation** — add `${LP}:ready-to-merge`, ping once, **DO NOT MERGE** |
-| no P1/P2 findings but not mergeable / checks not green / build failure NOT from review | **§9 non-review escalation** |
+| no P1/P2, `checks_green`, `approved`, `effective_merge_mode=when-green`, in-scope, **`behind`** (and not `dirty`) | **§8.2 bring branch up to date** — `gh pr update-branch`; do NOT merge this tick |
+| no P1/P2, `checks_green`, `effective_merge_mode=when-green`, **`blocked`**, and `auto_resolve_bot_threads` is true | **§8.3 evaluate blocking threads** — §8.3 classifies the unresolved threads, resolves them if all are bot-only nits, else escalates; do NOT merge this tick |
+| no P1/P2, **`behind` or `blocked`** in a repo whose `effective_merge_mode` is **not** `when-green` | **§9 ready-to-merge / non-review escalation** — the steward does not auto-advance branches it will not merge; a human merges (and updates the branch). Treat like the `never` ready-to-merge path. |
+| no P1/P2 findings but `dirty` (real conflict) / checks not green / build failure NOT from review / `blocked` for any other (non-thread) reason | **§9 non-review escalation** |
 | watcher timed out | §6 timeout handling |
 
 Only ever match findings **at the current head SHA**. codex-watch's trigger-timestamp
@@ -329,11 +341,102 @@ Target file: `<gitops.agents_state_path>/<service>/proposals/<slug>/.status.yaml
    The read-only reconciler in mctl-agents will repair the drift later. Do not retry
    destructively.
 
+## 8.2 Bring a BEHIND branch up to date (when-green only)
+
+A PR reaches this section when it has **no P1/P2 at head, `checks_green`, `approved`,
+`effective_merge_mode=when-green`, passed the ownership gate, and `behind`** (head out of
+date with base) — but is otherwise mergeable. This is the common case under strict branch
+protection on a high-velocity base branch: `main` advanced between approval and this tick.
+The steward brings the branch current rather than merging stale code or escalating — it
+**never weakens the gate**, it makes the branch satisfy it.
+
+`update_attempt` = highest N from any `${LP}:update-attempt-N` label (0 if none).
+
+1. **Cap check FIRST** (before any de-escalation — order matters). If
+   `update_attempt >= max_update_attempts`, do NOT update again: the PR keeps losing the race
+   to base churn → `action=escalate reason=behind-max-update-attempts`. Add `${LP}:escalated`
+   **idempotently** — if it is already present, do NOT remove-then-re-add it and do NOT re-ping
+   (the §9 dedupe pings only on the transition *into* escalated). Stop for this PR. Doing the
+   cap check before de-escalation is what prevents a flip-flop (de-escalate → immediately
+   re-escalate) that would re-ping the human every tick once the cap is hit.
+2. **De-escalate (only reached when under the cap).** If the PR carries `${LP}:escalated` from
+   a prior tick that escalated this same BEHIND state (now auto-fixable), remove it — the PR is
+   no longer human-stuck. Keep `${LP}:owned`.
+3. **Update the branch — merge base into head, never rebase/force:**
+   ```sh
+   gh pr update-branch <N> -R "$REPO"
+   ```
+   This creates a merge commit of base into the PR head via the GitHub API (App
+   `contents:write`). It is a `synchronize` event: with "dismiss stale approvals on push",
+   the bot approval is dropped and `claude-review.yml` + required checks re-run on the new
+   head. **Do NOT merge this tick** — the head just changed and is unreviewed/unchecked
+   until the bot re-approves and checks go green. A later tick re-evaluates the refreshed
+   head and merges via §8 when clean+green+approved+`CLEAN`.
+4. On success: bump the attempt label (remove `${LP}:update-attempt-{n}`, add
+   `${LP}:update-attempt-{n+1}`), keep `${LP}:owned`,
+   `action=update-branch result=updated attempt=<n+1>`.
+5. On failure:
+   - "merge conflict" / the API reports the branch is actually `DIRTY` → this is a real
+     conflict, not a stale branch → §9 escalate (reason `conflict`).
+   - "already up to date" / not behind → the head moved since §5 → `action=wait reason=head-moved`,
+     next tick re-evaluates. Do NOT loop within the tick.
+   - `HTTP 401` → re-read the token once and retry per §2; if still failing, `auth_error`.
+   - any other error → `action=escalate reason=update-branch-failed`, ONE §9 escalation.
+
+## 8.3 Resolve bot-only blocking threads (when-green only)
+
+A PR reaches this section when `effective_merge_mode=when-green`, no P1/P2 at head,
+`checks_green`, and `blocked` (and `auto_resolve_bot_threads` is true). `BLOCKED` under
+`required_conversation_resolution` means an unresolved review thread is wedging an approved
+PR — typically the review bot's own non-blocking nit (e.g. a P3 it left while approving).
+
+1. **Fetch ALL review threads — paginate; never decide on a partial set.** A `first:50`
+   snapshot can hide a human/P1-P2 thread past position 50, which would let the steward
+   resolve bot nits and loop forever without ever seeing (or escalating) the real blocker.
+   Page through `reviewThreads` via `pageInfo.endCursor` until `hasNextPage == false`,
+   accumulating every node. Fetch **all** comments per thread (paginate `comments` too if a
+   thread has `>100`), because a thread can start as a bot nit and gain a human reply or a
+   P1/P2 follow-up — classification must see the whole thread, not just the opening comment.
+   ```sh
+   gh api graphql -f query='
+     query($owner:String!,$repo:String!,$num:Int!,$cursor:String){
+       repository(owner:$owner,name:$repo){ pullRequest(number:$num){
+         reviewThreads(first:100, after:$cursor){
+           pageInfo{ hasNextPage endCursor }
+           nodes{ id isResolved
+             comments(first:100){ nodes{ author{login} body } } } } } } }' \
+     -F owner=<owner> -F repo=<repo> -F num=<N> -F cursor=<endCursor-or-omit>
+   ```
+   If pagination cannot complete (an API error mid-paging) → do NOT auto-resolve on the
+   partial set: `action=escalate reason=threads-unenumerable`, §9, stop for this PR.
+2. Consider only `isResolved == false` threads. Classify each across **every** comment in it:
+   - **needs-human** if **any** comment in the thread has an author login NOT in
+     `review_bots[]`, OR **any** comment carries a P1/P2 marker (`![P1`/`![P2` badge or
+     `P1 —`/`P2 —` lead). Human involvement or a P1/P2 anywhere in the thread → human.
+   - **bot-nit** otherwise = every comment is from a `review_bots[]` login and none carries
+     a P1/P2 marker.
+3. **Decision:**
+   - If there are unresolved threads and **every** one is a bot-nit → resolve each:
+     ```sh
+     gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -F id=<threadId>
+     ```
+     De-escalate if `${LP}:escalated` is present (remove it, as in §8.2 step 2). Keep `${LP}:owned`.
+     **Do NOT merge this tick** — re-evaluate next tick (the PR should become `CLEAN`, or
+     `behind` → §8.2). `action=resolve-threads result=resolved count=<n>`.
+   - If **any** unresolved thread is needs-human → `action=escalate reason=unresolved-threads`,
+     add `${LP}:escalated`, ONE §9 escalation. A human resolves P1/P2 / human threads.
+   - If `blocked` but there are **no** unresolved threads (blocked for some other reason —
+     missing required check, etc.) → `action=escalate reason=blocked-other`, §9.
+
 ## 9. Non-review / stuck escalation
 
-For: CI/build failure not originating from a review finding, merge conflict
-(`mergeStateStatus=DIRTY`/`BEHIND`), bot silent twice, or an owned PR with no head
-progress for `> stuck_hours`:
+For: CI/build failure not originating from a review finding, a real merge conflict
+(`mergeStateStatus=DIRTY`), bot silent twice, or an owned PR with no head progress for
+`> stuck_hours`. **`BEHIND` is NOT a §9 escalation — it is auto-advanced in §8.2; a
+`BLOCKED` PR whose only blockers are the review bot's own non-blocking threads is
+auto-advanced in §8.3.** A `BEHIND`/`BLOCKED` PR only reaches §9 when §8.2/§8.3 explicitly
+route here (a real conflict, `max_update_attempts` exhausted, an unresolved human/P1-P2
+thread, or a block for some other reason):
 - Add `${LP}:escalated` (idempotent — ping only on the transition into this state).
 - Send ONE escalation (§10, template `non-review` or `max-attempt` as appropriate).
 - Stop acting on this PR until a human removes `${LP}:escalated`.
@@ -384,3 +487,14 @@ Do not loop — one tick per invocation. The RemoteTrigger routine fires the nex
 4. **Burning an attempt on a transient failure.** Only deterministic outcomes count.
 5. **Re-pinging on every tick.** Escalations are gated by labels; one ping per transition.
 6. **Running while disabled.** Honor `PR_STEWARD_ENABLED` and the lockfile.
+7. **Terminally escalating a transient `BEHIND` / bot-thread block.** A `BEHIND` PR is
+   brought current with `gh pr update-branch` (§8.2); a `BLOCKED` PR wedged only by the
+   review bot's own non-blocking threads has them resolved (§8.3). Only a real conflict
+   (`DIRTY`), exhausted `max_update_attempts`, an unresolved human/P1-P2 thread, or another
+   block reason gets the terminal `${LP}:escalated`. Auto-advance states keep `${LP}:owned`
+   (non-terminal) so the precheck keeps surfacing them across ticks until they merge.
+8. **Merging in the same tick as an update-branch or thread-resolve.** Both change the
+   mergeability inputs (a new head dismisses approval + re-runs checks; resolving a thread
+   needs GitHub to recompute `mergeStateStatus`). Always defer the merge to a later tick
+   that re-verifies the fresh head against the full §8 gate. Never weaken the gate to merge
+   sooner — bring the branch into compliance instead.

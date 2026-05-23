@@ -2,6 +2,8 @@
   "merge_mode": "never",
   "merge_method": "merge",
   "max_attempts": 3,
+  "max_update_attempts": 5,
+  "auto_resolve_bot_threads": true,
   "max_files_changed": 10,
   "max_diff_lines": 300,
   "forbidden_paths": [
