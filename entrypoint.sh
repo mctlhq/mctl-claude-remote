@@ -190,24 +190,25 @@ fi
 # is only the convenience default. We log the resolved id (or why resume was
 # skipped) so a post-restart audit can confirm what was loaded.
 RESUME_FLAG=""
-if [ "${RESUME_SESSION:-true}" = "true" ]; then
+if [ "${RESUME_SESSION:-true}" != "false" ]; then
   RESUME_ID="${RESUME_SESSION_ID:-}"
   if [ -z "$RESUME_ID" ]; then
     NEWEST=$(ls -t /workspace/.claude/projects/*/*.jsonl 2>/dev/null | head -1 || true)
     [ -n "$NEWEST" ] && RESUME_ID=$(basename "$NEWEST" .jsonl)
   fi
-  case "$RESUME_ID" in
-    [0-9a-fA-F]*-*-*-*-*)
-      RESUME_FLAG="--resume $RESUME_ID"
-      echo "[entrypoint] RESUME_SESSION=true; resuming session $RESUME_ID"
-      ;;
-    "")
-      echo "[entrypoint] RESUME_SESSION=true but no transcript found; starting fresh session"
-      ;;
-    *)
-      echo "[entrypoint] RESUME_SESSION_ID '$RESUME_ID' is not a valid session id; starting fresh session"
-      ;;
-  esac
+  # Strict canonical-UUID check (NOT a glob): RESUME_ID is interpolated into the
+  # `script -qfc "..."` command string and re-evaluated by the inner shell, so a
+  # loose pattern that admits shell metacharacters would be a command-injection
+  # path (via RESUME_SESSION_ID or a crafted on-disk filename). After this check
+  # RESUME_ID can only contain hex and hyphens, which are shell-safe.
+  if printf '%s' "$RESUME_ID" | grep -qE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+    RESUME_FLAG="--resume $RESUME_ID"
+    echo "[entrypoint] RESUME_SESSION=true; resuming session $RESUME_ID"
+  elif [ -z "$RESUME_ID" ]; then
+    echo "[entrypoint] RESUME_SESSION=true but no transcript found; starting fresh session"
+  else
+    echo "[entrypoint] resolved session id '$RESUME_ID' is not a valid UUID; starting fresh session"
+  fi
 else
   echo "[entrypoint] RESUME_SESSION=false; starting fresh session"
 fi
