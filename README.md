@@ -43,6 +43,8 @@ docker pull ghcr.io/mctlhq/mctl-claude-remote:0.1.8
 | `RESUME_SESSION` | `true` | Resume the prior conversation on restart (transcripts are restored from persistent storage). Set to `false` to force a fresh session, e.g. if a transcript is corrupt |
 | `RESUME_SESSION_ID` | _(unset)_ | Pin an explicit session UUID to resume. When unset, the newest transcript on disk is resumed. Use this to avoid resuming a newer blank session created by an intervening fresh start |
 | `PORT` | `8080` | Port the health proxy listens on |
+| `TLS_GRACE_MS` | `60000` | How long `/healthz` tolerates having no established outbound TLS connection (covers transient relay reconnects, e.g. large uploads) before returning 503 |
+| `RELAY_STALL_MS` | `120000` | How long unread relay data may sit in a `:443` socket receive queue before `/healthz` declares the event loop wedged and returns 503. Must exceed the time a healthy loop needs to drain a large burst |
 
 ## Health Check
 
@@ -50,8 +52,10 @@ docker pull ghcr.io/mctlhq/mctl-claude-remote:0.1.8
 
 | Status | Meaning |
 |---|---|
-| `200 OK` | Claude process is running **and** has an established outbound TLS connection |
-| `503 Service Unavailable` | Either check failed (starting up, or relay disconnected) |
+| `200 OK` | Claude process is running, has an established outbound TLS connection, and is draining its relay socket |
+| `503 Service Unavailable` | Process gone, no TLS connection (beyond the grace window), **or** relay data has sat unread for `RELAY_STALL_MS` — the event loop is wedged (the "Remote Control disconnected while the process is alive" failure mode) |
+
+The relay-backlog check is idle-safe: a healthy device drains its receive queue instantly whether idle or busy, so only a genuinely stalled event loop trips it. Combined with the probe `failureThreshold`, a restart fires only on a sustained stall — and on `0.5.0+` the restart resumes the session.
 
 Designed for Kubernetes readiness/liveness probes, but usable with any HTTP health check.
 
