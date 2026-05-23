@@ -252,7 +252,7 @@ WATCHDOG_STALL_SECONDS="${WATCHDOG_STALL_SECONDS:-120}"
 # = hex 01BB), col 5 = tx_queue:rx_queue (hex). String compare avoids gawk
 # strtonum (absent in the slim image's awk).
 relay_has_backlog() {
-  awk 'NR>1 && $4=="01" && $3 ~ /:01BB$/ { split($5,q,":"); if (q[2] !~ /^0+$/) f=1 } END { exit (f?0:1) }' \
+  awk 'FNR>1 && $4=="01" && $3 ~ /:01BB$/ { split($5,q,":"); if (q[2] !~ /^0+$/) f=1 } END { exit (f?0:1) }' \
     /proc/net/tcp /proc/net/tcp6 2>/dev/null
 }
 
@@ -289,6 +289,8 @@ if [ "$WATCHDOG_ENABLED" = "true" ]; then
               echo "[watchdog] claude pid=$cpid alive after TERM; SIGKILL"
               kill -KILL "$cpid" 2>/dev/null || true
             fi
+          else
+            echo "[watchdog] relay rx stalled >=${WATCHDOG_STALL_SECONDS}s but no claude leaf found (mid-relaunch?); resetting stall timer"
           fi
           stall_start=0
         fi
