@@ -40,6 +40,8 @@ docker pull ghcr.io/mctlhq/mctl-claude-remote:0.1.8
 | Variable | Default | Description |
 |---|---|---|
 | `CLAUDE_DEVICE_NAME` | `claude-remote` | Device name shown in the Claude remote session list. Allowed characters: letters, numbers, `.`, `_`, `-`; must not start with `-` |
+| `RESUME_SESSION` | `true` | Resume the prior conversation on restart (transcripts are restored from persistent storage). Set to `false` to force a fresh session, e.g. if a transcript is corrupt |
+| `RESUME_SESSION_ID` | _(unset)_ | Pin an explicit session UUID to resume. When unset, the newest transcript on disk is resumed. Use this to avoid resuming a newer blank session created by an intervening fresh start |
 | `PORT` | `8080` | Port the health proxy listens on |
 
 ## Health Check

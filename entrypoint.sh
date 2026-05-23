@@ -54,10 +54,13 @@ You are running inside a container as a Claude Code remote worker.
 
 ## Session continuity
 
-Conversation history is not preserved across container restarts.
-Before a planned restart, ask Claude to write a summary to a file in
-`/workspace`, e.g. `/workspace/session-notes.md` — that file is synced to
-persistent storage and will be available after the container comes back up.
+Conversation history IS preserved across container restarts: the workspace
+(including `.claude/projects/*.jsonl` transcripts) is synced to persistent
+storage, and on restart the entrypoint resumes the prior session via
+`--resume` (controlled by `RESUME_SESSION` / `RESUME_SESSION_ID`). Set
+`RESUME_SESSION=false` to force a fresh session if a transcript is corrupt.
+A long-lived workspace file like `/workspace/session-notes.md` is still a good
+durable scratchpad, since it survives even a fresh (non-resumed) start.
 MD
 fi
 
@@ -167,8 +170,12 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
       sleep "${PR_STEWARD_SCHEDULE_SECONDS}"
       if [ -x "$STEWARD_PRECHECK" ] && "$STEWARD_PRECHECK" >>"$STEWARD_SCHED_LOG" 2>&1; then
         echo "[scheduler $(date -u +%FT%TZ)] work found; firing tick" >>"$STEWARD_SCHED_LOG"
+        # --no-session-persistence: headless steward ticks must NOT write their
+        # own transcript into /workspace/.claude/projects, or the resume-on-restart
+        # "newest on disk" heuristic would resolve to a steward tick instead of the
+        # operator's interactive remote-control session, silently defeating resume.
         timeout "$STEWARD_TICK_TIMEOUT" "$STEWARD_CLAUDE_BIN" -p "Run the pr-steward skill" \
-          --dangerously-skip-permissions >>"$STEWARD_SCHED_LOG" 2>&1 \
+          --no-session-persistence --dangerously-skip-permissions >>"$STEWARD_SCHED_LOG" 2>&1 \
           || echo "[scheduler $(date -u +%FT%TZ)] tick exited non-zero (timeout/error)" >>"$STEWARD_SCHED_LOG"
       fi
     done
@@ -176,11 +183,48 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
   echo "[entrypoint] pr-steward scheduler pid=$! interval=${PR_STEWARD_SCHEDULE_SECONDS}s gate=precheck"
 fi
 
+# Resume the prior conversation across restarts. The transcript is restored
+# from MinIO by the restore-state initContainer, so without --resume a restart
+# would silently start a blank session and drop all context. Precedence:
+#   RESUME_SESSION=false        -> escape hatch, fresh session (corrupt/unwanted transcript)
+#   RESUME_SESSION_ID=<uuid>    -> resume that exact session (explicit override)
+#   else                        -> resume the newest transcript on disk
+# A fresh restart creates a *newer* blank session, so the explicit
+# RESUME_SESSION_ID is the safe way to pin a known-good session; newest-on-disk
+# is only the convenience default. We log the resolved id (or why resume was
+# skipped) so a post-restart audit can confirm what was loaded.
+RESUME_FLAG=""
+if [ "${RESUME_SESSION:-true}" != "false" ]; then
+  RESUME_ID="${RESUME_SESSION_ID:-}"
+  if [ -z "$RESUME_ID" ]; then
+    NEWEST=$(ls -t /workspace/.claude/projects/*/*.jsonl 2>/dev/null | head -1 || true)
+    [ -n "$NEWEST" ] && RESUME_ID=$(basename "$NEWEST" .jsonl)
+  fi
+  # Strict canonical-UUID check (NOT a glob): RESUME_ID is interpolated into the
+  # `script -qfc "..."` command string and re-evaluated by the inner shell, so a
+  # loose pattern that admits shell metacharacters would be a command-injection
+  # path (via RESUME_SESSION_ID or a crafted on-disk filename). After this check
+  # RESUME_ID can only contain hex and hyphens, which are shell-safe.
+  if printf '%s' "$RESUME_ID" | grep -qE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
+    RESUME_FLAG="--resume $RESUME_ID"
+    echo "[entrypoint] RESUME_SESSION=true; resuming session $RESUME_ID"
+  elif [ -z "$RESUME_ID" ]; then
+    echo "[entrypoint] RESUME_SESSION=true but no transcript found; starting fresh session"
+  else
+    echo "[entrypoint] resolved session id '$RESUME_ID' is not a valid UUID; starting fresh session"
+  fi
+else
+  echo "[entrypoint] RESUME_SESSION=false; starting fresh session"
+fi
+
 # `claude --remote-control` needs a PTY (script wrapper),
 # a device name, and skip-permissions to run non-interactively.
+# NOTE: when resuming, claude.ai surfaces the resumed session's display name
+# rather than ${DEVICE_NAME}. Pinning it with --name is a cosmetic follow-up
+# (flag composition not yet verified against --resume + --remote-control).
 #
 # Typescript file is /dev/stdout (NOT /dev/null) so claude's PTY output
 # reaches the container stdout pipe and shows up in container logs.
 # /dev/null swallows the welcome banner and registration errors silently.
 echo "[entrypoint] exec claude --remote-control"
-exec script -qfc "claude --remote-control ${DEVICE_NAME} --dangerously-skip-permissions 2>&1" /dev/stdout
+exec script -qfc "claude --remote-control ${DEVICE_NAME} ${RESUME_FLAG} --dangerously-skip-permissions 2>&1" /dev/stdout
