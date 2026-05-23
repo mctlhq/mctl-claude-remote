@@ -205,8 +205,9 @@ Apply, in order:
 | no P1/P2, `mergeable`, `checks_green`, `approved`, **`effective_merge_mode=when-green`** | **§8 merge** — re-verify at head, then `gh pr merge`. |
 | no P1/P2, `mergeable`, `checks_green` (and either `effective_merge_mode=never` or not yet `approved`) | **§8 ready-to-merge escalation** — add `${LP}:ready-to-merge`, ping once, **DO NOT MERGE** |
 | no P1/P2, `checks_green`, `approved`, `effective_merge_mode=when-green`, in-scope, **`behind`** (and not `dirty`) | **§8.2 bring branch up to date** — `gh pr update-branch`; do NOT merge this tick |
-| no P1/P2, `checks_green`, `effective_merge_mode=when-green`, **`blocked`** and `auto_resolve_bot_threads`, blockers are only resolvable bot threads (§8.3) | **§8.3 resolve bot threads** — do NOT merge this tick |
-| no P1/P2 findings but `dirty` (real conflict) / checks not green / build failure NOT from review / `blocked` for any other reason | **§9 non-review escalation** |
+| no P1/P2, `checks_green`, `effective_merge_mode=when-green`, **`blocked`**, and `auto_resolve_bot_threads` is true | **§8.3 evaluate blocking threads** — §8.3 classifies the unresolved threads, resolves them if all are bot-only nits, else escalates; do NOT merge this tick |
+| no P1/P2, **`behind` or `blocked`** in a repo whose `effective_merge_mode` is **not** `when-green` | **§9 ready-to-merge / non-review escalation** — the steward does not auto-advance branches it will not merge; a human merges (and updates the branch). Treat like the `never` ready-to-merge path. |
+| no P1/P2 findings but `dirty` (real conflict) / checks not green / build failure NOT from review / `blocked` for any other (non-thread) reason | **§9 non-review escalation** |
 | watcher timed out | §6 timeout handling |
 
 Only ever match findings **at the current head SHA**. codex-watch's trigger-timestamp
@@ -351,12 +352,16 @@ The steward brings the branch current rather than merging stale code or escalati
 
 `update_attempt` = highest N from any `${LP}:update-attempt-N` label (0 if none).
 
-1. **De-escalate if needed.** If the PR carries `${LP}:escalated` (from a prior tick that
-   escalated this same BEHIND/blocked state under older logic), remove it now — the blocking
-   condition is auto-fixable, so the PR is no longer human-stuck. Keep `${LP}:owned`.
-2. **Cap check.** If `update_attempt >= max_update_attempts`, do NOT update again: the PR
-   keeps losing the race to base churn → `action=escalate reason=behind-max-update-attempts`,
-   add `${LP}:escalated`, send ONE §9 `non-review` escalation, stop for this PR.
+1. **Cap check FIRST** (before any de-escalation — order matters). If
+   `update_attempt >= max_update_attempts`, do NOT update again: the PR keeps losing the race
+   to base churn → `action=escalate reason=behind-max-update-attempts`. Add `${LP}:escalated`
+   **idempotently** — if it is already present, do NOT remove-then-re-add it and do NOT re-ping
+   (the §9 dedupe pings only on the transition *into* escalated). Stop for this PR. Doing the
+   cap check before de-escalation is what prevents a flip-flop (de-escalate → immediately
+   re-escalate) that would re-ping the human every tick once the cap is hit.
+2. **De-escalate (only reached when under the cap).** If the PR carries `${LP}:escalated` from
+   a prior tick that escalated this same BEHIND state (now auto-fixable), remove it — the PR is
+   no longer human-stuck. Keep `${LP}:owned`.
 3. **Update the branch — merge base into head, never rebase/force:**
    ```sh
    gh pr update-branch <N> -R "$REPO"
@@ -385,26 +390,37 @@ A PR reaches this section when `effective_merge_mode=when-green`, no P1/P2 at he
 `required_conversation_resolution` means an unresolved review thread is wedging an approved
 PR — typically the review bot's own non-blocking nit (e.g. a P3 it left while approving).
 
-1. **Fetch unresolved threads** (App-token-readable GraphQL node query):
+1. **Fetch ALL review threads — paginate; never decide on a partial set.** A `first:50`
+   snapshot can hide a human/P1-P2 thread past position 50, which would let the steward
+   resolve bot nits and loop forever without ever seeing (or escalating) the real blocker.
+   Page through `reviewThreads` via `pageInfo.endCursor` until `hasNextPage == false`,
+   accumulating every node. Fetch **all** comments per thread (paginate `comments` too if a
+   thread has `>100`), because a thread can start as a bot nit and gain a human reply or a
+   P1/P2 follow-up — classification must see the whole thread, not just the opening comment.
    ```sh
    gh api graphql -f query='
-     query($owner:String!,$repo:String!,$num:Int!){
+     query($owner:String!,$repo:String!,$num:Int!,$cursor:String){
        repository(owner:$owner,name:$repo){ pullRequest(number:$num){
-         reviewThreads(first:50){ nodes{
-           id isResolved
-           comments(first:1){ nodes{ author{login} body } } } } } } }' \
-     -F owner=<owner> -F repo=<repo> -F num=<N>
+         reviewThreads(first:100, after:$cursor){
+           pageInfo{ hasNextPage endCursor }
+           nodes{ id isResolved
+             comments(first:100){ nodes{ author{login} body } } } } } } }' \
+     -F owner=<owner> -F repo=<repo> -F num=<N> -F cursor=<endCursor-or-omit>
    ```
-2. Consider only `isResolved == false` threads. Classify each by its first comment:
-   - **bot-nit** = author login ∈ `review_bots[]` AND body carries no P1/P2 marker
-     (no `![P1`/`![P2` badge, no `P1 —`/`P2 —` lead).
-   - **needs-human** = author NOT in `review_bots[]`, OR body carries a P1/P2 marker.
+   If pagination cannot complete (an API error mid-paging) → do NOT auto-resolve on the
+   partial set: `action=escalate reason=threads-unenumerable`, §9, stop for this PR.
+2. Consider only `isResolved == false` threads. Classify each across **every** comment in it:
+   - **needs-human** if **any** comment in the thread has an author login NOT in
+     `review_bots[]`, OR **any** comment carries a P1/P2 marker (`![P1`/`![P2` badge or
+     `P1 —`/`P2 —` lead). Human involvement or a P1/P2 anywhere in the thread → human.
+   - **bot-nit** otherwise = every comment is from a `review_bots[]` login and none carries
+     a P1/P2 marker.
 3. **Decision:**
    - If there are unresolved threads and **every** one is a bot-nit → resolve each:
      ```sh
      gh api graphql -f query='mutation($id:ID!){resolveReviewThread(input:{threadId:$id}){thread{isResolved}}}' -F id=<threadId>
      ```
-     De-escalate if `${LP}:escalated` is present (§8.2 step 1). Keep `${LP}:owned`.
+     De-escalate if `${LP}:escalated` is present (remove it, as in §8.2 step 2). Keep `${LP}:owned`.
      **Do NOT merge this tick** — re-evaluate next tick (the PR should become `CLEAN`, or
      `behind` → §8.2). `action=resolve-threads result=resolved count=<n>`.
    - If **any** unresolved thread is needs-human → `action=escalate reason=unresolved-threads`,
