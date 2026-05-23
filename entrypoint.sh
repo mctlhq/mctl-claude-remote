@@ -170,8 +170,12 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
       sleep "${PR_STEWARD_SCHEDULE_SECONDS}"
       if [ -x "$STEWARD_PRECHECK" ] && "$STEWARD_PRECHECK" >>"$STEWARD_SCHED_LOG" 2>&1; then
         echo "[scheduler $(date -u +%FT%TZ)] work found; firing tick" >>"$STEWARD_SCHED_LOG"
+        # --no-session-persistence: headless steward ticks must NOT write their
+        # own transcript into /workspace/.claude/projects, or the resume-on-restart
+        # "newest on disk" heuristic would resolve to a steward tick instead of the
+        # operator's interactive remote-control session, silently defeating resume.
         timeout "$STEWARD_TICK_TIMEOUT" "$STEWARD_CLAUDE_BIN" -p "Run the pr-steward skill" \
-          --dangerously-skip-permissions >>"$STEWARD_SCHED_LOG" 2>&1 \
+          --no-session-persistence --dangerously-skip-permissions >>"$STEWARD_SCHED_LOG" 2>&1 \
           || echo "[scheduler $(date -u +%FT%TZ)] tick exited non-zero (timeout/error)" >>"$STEWARD_SCHED_LOG"
       fi
     done
