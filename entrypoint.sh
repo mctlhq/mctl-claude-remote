@@ -52,6 +52,22 @@ You are running inside a container as a Claude Code remote worker.
 - Mode: `--remote-control` with `--dangerously-skip-permissions`
 - All file operations work under `/workspace`; git is available
 
+## Stay responsive — never block the event loop
+
+Remote Control is a live connection that must keep being serviced. If your turn
+blocks on a long-running foreground command, the relay stops getting heartbeats
+and the session is dropped ("Remote Control disconnected" while the process is
+still alive) — and recovering it requires a restart.
+
+- Do NOT run long foreground `sleep`s or blocking poll loops (e.g. a
+  `while ...; do ...; sleep N; done` that waits minutes for a PR comment, a
+  workflow, or a file to appear).
+- To wait for something, prefer a short background poll that returns promptly,
+  then check back on a later turn — or just stop and report, letting the
+  operator (or a scheduled tick) resume the wait.
+- Keep individual tool calls bounded; if a command might run long, cap it with
+  `timeout` and return rather than waiting open-endedly.
+
 ## Session continuity
 
 Conversation history IS preserved across container restarts: the workspace

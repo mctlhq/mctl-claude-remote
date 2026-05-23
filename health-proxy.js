@@ -8,6 +8,16 @@ const PORT = parseInt(process.env.PORT || '8080', 10);
 // triggered by large payloads (e.g. image uploads from the mobile app).
 const TLS_GRACE_MS = parseInt(process.env.TLS_GRACE_MS || '60000', 10);
 
+// Wedge detector: if relay data sits UNREAD in a socket's receive queue for
+// this long, the claude event loop is stalled (not draining I/O) — the failure
+// mode behind "Remote Control disconnected" while the process stays alive. We
+// fail the probe so kubelet restarts the pod (0.5.0+ then resumes the session).
+// This is idle-safe: a healthy device, idle or busy, drains rx instantly
+// (rx_queue≈0); only a blocked loop lets bytes pile up. Must exceed the time it
+// takes a healthy loop to drain a large burst, so it never trips on a busy
+// device — pair it with the probe failureThreshold for a sustained-only restart.
+const RELAY_STALL_MS = parseInt(process.env.RELAY_STALL_MS || '120000', 10);
+
 // Returns true if any process has "remote-control" in its cmdline.
 function isClaudeRunning() {
   try {
@@ -42,16 +52,56 @@ function hasOutboundTls() {
   return false;
 }
 
+// Largest receive-queue backlog (bytes) across ESTABLISHED outbound :443
+// sockets. Healthy sockets drain to ~0 between reads; a sustained positive
+// value means the owning process is not reading, i.e. its event loop is wedged.
+// /proc/net/tcp column 5 is "tx_queue:rx_queue" in hex; port 443 = hex 01BB.
+function relayRxBacklog() {
+  let max = 0;
+  for (const f of ['/proc/net/tcp6', '/proc/net/tcp']) {
+    try {
+      const lines = fs.readFileSync(f, 'utf8').split('\n').slice(1);
+      for (const line of lines) {
+        const cols = line.trim().split(/\s+/);
+        if (cols.length < 5) continue;
+        if (cols[3] !== '01') continue;
+        if ((cols[2].split(':')[1] || '').toUpperCase() !== '01BB') continue;
+        const rxq = parseInt((cols[4].split(':')[1] || '0'), 16);
+        if (Number.isFinite(rxq) && rxq > max) max = rxq;
+      }
+    } catch (_) {}
+  }
+  return max;
+}
+
 // Timestamp of the last probe that observed an ESTABLISHED TLS connection.
 // Starts at 0 so a brand-new container that has never had a connection fails
 // immediately (the startup probe covers the initial connect window).
 let lastGoodTls = 0;
+// Timestamp when a relay rx backlog was first observed (0 = none). Reset to 0
+// the moment the queue drains, so only a *sustained* stall fails the probe.
+let backlogSince = 0;
 
 http.createServer((req, res) => {
   if (!isClaudeRunning()) {
     res.writeHead(503, { 'Content-Type': 'text/plain' });
     res.end('claude process not found\n');
     return;
+  }
+
+  // Wedge check runs before the TLS check: a stalled session still holds an
+  // ESTABLISHED :443 socket, so hasOutboundTls() alone would report it healthy.
+  const backlog = relayRxBacklog();
+  if (backlog > 0) {
+    if (backlogSince === 0) backlogSince = Date.now();
+    const stalled = Date.now() - backlogSince;
+    if (stalled >= RELAY_STALL_MS) {
+      res.writeHead(503, { 'Content-Type': 'text/plain' });
+      res.end(`relay rx backlog ${backlog}B unread for ${Math.round(stalled / 1000)}s — event loop wedged\n`);
+      return;
+    }
+  } else {
+    backlogSince = 0;
   }
 
   if (hasOutboundTls()) {
