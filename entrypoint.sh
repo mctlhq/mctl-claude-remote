@@ -28,15 +28,37 @@ fi
 # Always ensure settings.json suppresses the bypass-permissions warning dialog.
 # Without skipDangerousModePermissionPrompt, --dangerously-skip-permissions
 # blocks at a "Yes, I accept" prompt that we can't answer non-interactively.
+# resumeReturnDismissed is a belt-and-suspenders modal suppressor: it persists
+# the "don't ask me again" choice for the resume-from-summary modal, so a headless
+# (stdin=/dev/null) --remote-control bridge never wedges on it even if a future
+# Claude Code update renames the CLAUDE_CODE_RESUME_* env-var gate.
 if [ ! -f /workspace/.claude/settings.json ] || \
    ! grep -q '"skipDangerousModePermissionPrompt"[[:space:]]*:[[:space:]]*true' /workspace/.claude/settings.json; then
   cat > /workspace/.claude/settings.json <<'JSON'
 {
   "permissions": { "defaultMode": "auto", "allow_bypass_permissions": true },
   "skipDangerousModePermissionPrompt": true,
-  "skipAutoPermissionPrompt": true
+  "skipAutoPermissionPrompt": true,
+  "resumeReturnDismissed": true
 }
 JSON
+fi
+
+# Idempotently FORCE resumeReturnDismissed=true on a settings.json that already
+# exists from an earlier image (the heredoc above only seeds fresh installs).
+# We check the actual value (not just key presence): a persisted "false" — e.g.
+# Claude writing its default before this image runs — must be flipped to true,
+# otherwise the resume modal stays enabled for exactly the existing-workspace
+# case this block exists to repair. jq set preserves any operator-added keys.
+if [ -f /workspace/.claude/settings.json ]; then
+  cur=$(jq -r '.resumeReturnDismissed // empty' /workspace/.claude/settings.json 2>/dev/null || echo "")
+  if [ "$cur" != "true" ]; then
+    if merged=$(jq '.resumeReturnDismissed = true' /workspace/.claude/settings.json 2>/dev/null) && \
+       [ -n "$merged" ]; then
+      printf '%s\n' "$merged" > /workspace/.claude/settings.json
+      echo "[entrypoint] settings: set resumeReturnDismissed=true (was '${cur:-absent}')"
+    fi
+  fi
 fi
 
 # Seed a CLAUDE.md if the workspace doesn't have one yet. This gives Claude
@@ -199,37 +221,179 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
   echo "[entrypoint] pr-steward scheduler pid=$! interval=${PR_STEWARD_SCHEDULE_SECONDS}s gate=precheck"
 fi
 
-# ── Resume resolution ────────────────────────────────────────────────────────
-# Resolve which session to resume and set RESUME_FLAG. Called before EVERY
-# (re)launch so an in-pod relaunch (watchdog/supervisor below) picks up the
-# session that was active. Precedence:
-#   RESUME_SESSION=false      -> fresh session (escape hatch for a bad transcript)
-#   RESUME_SESSION_ID=<uuid>  -> resume that exact session (explicit pin)
-#   else                      -> resume the newest transcript on disk
-# A fresh restart creates a *newer* blank session, so RESUME_SESSION_ID is the
-# safe way to pin a known-good session; newest-on-disk is only the default.
+# ── Session rotation + resume resolution ─────────────────────────────────────
+# A persistent operator device must keep its memory across restarts (resume the
+# same session) without the session growing unbounded into the "Resume from
+# summary?" modal that wedges a headless (stdin=/dev/null) bridge. We manage the
+# session id ourselves in a state file and rotate to a fresh session once the
+# transcript crosses a size cap — the same scheme the Mac launchd bridges use.
+#   SESSION_ROTATE_MAX_MB    transcript size (MB) at which we mint a new session.
+#   SESSION_RETENTION_KEEP   how many newest transcripts to keep on disk (the
+#                            rest are pruned so the persistent volume / MinIO
+#                            mirror does not grow forever). Default 4 = current
+#                            session + 3 prior.
+# Normalize a numeric env var to a positive integer, falling back to a default
+# with a warning. A bad operator value must not brick the device (a non-integer
+# in `$(( ))` aborts dash under set -e) nor silently break a feature (0 == always
+# rotate / keep nothing). Mirrors the PR_STEWARD_TICK_TIMEOUT normalization above.
+norm_posint() {  # $1 = var name, $2 = default
+  eval "_v=\"\${$1}\""
+  case "$_v" in
+    '' | *[!0-9]* | 0)
+      echo "[entrypoint] WARN $1='$_v' is not a positive integer; using default $2"
+      eval "$1=$2" ;;
+  esac
+}
+
+SESSION_ROTATE_MAX_MB="${SESSION_ROTATE_MAX_MB:-20}"
+SESSION_RETENTION_KEEP="${SESSION_RETENTION_KEEP:-4}"
+norm_posint SESSION_ROTATE_MAX_MB 20
+norm_posint SESSION_RETENTION_KEEP 4
+SESSION_STATE_DIR="/workspace/.claude/remote-control-state"
+SESSION_STATE_FILE="$SESSION_STATE_DIR/${DEVICE_NAME}.session"
+PROJECTS_DIR="/workspace/.claude/projects"
+mkdir -p "$SESSION_STATE_DIR"
+
+# Strict canonical-UUID check (NOT a glob): the id is interpolated into the
+# `script -qfc "..."` command and re-evaluated by the inner shell, so a loose
+# pattern admitting shell metacharacters would be a command-injection path.
+valid_uuid() {
+  printf '%s' "$1" | grep -qE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+}
+
+# Generate a lowercase UUID. /proc is always present on Linux; uuidgen (util-linux)
+# is the fallback. We mint the id ourselves so the state file can track it exactly.
+gen_uuid() {
+  if [ -r /proc/sys/kernel/random/uuid ]; then
+    cat /proc/sys/kernel/random/uuid
+  else
+    uuidgen | tr 'A-Z' 'a-z'
+  fi
+}
+
+# Path of the transcript for a given (validated) session id, or empty.
+find_jsonl() {
+  ls "$PROJECTS_DIR"/*/"$1".jsonl 2>/dev/null | head -1
+}
+
+# Keep only the SESSION_RETENTION_KEEP newest transcripts; never delete the
+# active session's transcript (passed in, may not exist yet right after a mint).
+prune_transcripts() {
+  active="$1"
+  ls -t "$PROJECTS_DIR"/*/*.jsonl 2>/dev/null | tail -n +"$((SESSION_RETENTION_KEEP + 1))" | while read -r f; do
+    [ "$(basename "$f" .jsonl)" = "$active" ] && continue
+    rm -f "$f" && echo "[entrypoint] pruned old transcript $(basename "$f")"
+  done
+  return 0   # never let a prune failure trip the caller's set -e
+}
+
+# Mint a fresh managed session: new uuid, recorded in the state file, launched
+# with --session-id (creates the session with that exact id).
+mint_fresh_session() {
+  RESUME_UUID=$(gen_uuid)
+  printf '%s %s\n' "$RESUME_UUID" "$(date +%s)" > "$SESSION_STATE_FILE"
+  RESUME_FLAG="--session-id $RESUME_UUID"
+  echo "[entrypoint] starting fresh managed session $RESUME_UUID"
+}
+
+# Resolve which session to launch and set RESUME_FLAG + RESUME_UUID. Called
+# before EVERY (re)launch. Precedence (an explicit operator choice always wins
+# over the managed/backstop machinery):
+#   RESUME_SESSION=false      -> mint fresh (escape hatch for a bad transcript)
+#   RESUME_SESSION_ID=<uuid>  -> resume that exact session, NO rotation, and
+#                               clear any stale force-fresh sentinel so a pinned
+#                               session is never abandoned (keeps a deploy a
+#                               no-op while the pin remains set)
+#   force-fresh sentinel      -> mint fresh (set by the startup-wedge backstop;
+#                               only reached in managed mode, never under a pin)
+#   else (managed)            -> state-file session, rotating on size; if there is
+#                               no state file yet, adopt the newest transcript on
+#                               disk so an existing pinned session is preserved.
 resolve_resume() {
   RESUME_FLAG=""
+  RESUME_UUID=""
+
   if [ "${RESUME_SESSION:-true}" = "false" ]; then
     echo "[entrypoint] RESUME_SESSION=false; starting fresh session"
+    mint_fresh_session
+    prune_transcripts "$RESUME_UUID"
     return 0
   fi
-  RESUME_ID="${RESUME_SESSION_ID:-}"
-  if [ -z "$RESUME_ID" ]; then
-    NEWEST=$(ls -t /workspace/.claude/projects/*/*.jsonl 2>/dev/null | head -1 || true)
-    if [ -n "$NEWEST" ]; then RESUME_ID=$(basename "$NEWEST" .jsonl); fi
+
+  # Explicit operator pin: resume exactly this session, no managed rotation. This
+  # is checked BEFORE the force-fresh sentinel so the startup-wedge backstop can
+  # never rotate away an operator-pinned session (the no-op-until-gitops case).
+  if [ -n "${RESUME_SESSION_ID:-}" ]; then
+    if valid_uuid "$RESUME_SESSION_ID"; then
+      rm -f "$FORCE_FRESH_SENTINEL"   # a pin must not be overridden by a stale sentinel
+      RESUME_UUID="$RESUME_SESSION_ID"
+      RESUME_FLAG="--resume $RESUME_UUID"
+      echo "[entrypoint] resuming pinned session $RESUME_UUID (RESUME_SESSION_ID set; rotation disabled)"
+    else
+      echo "[entrypoint] RESUME_SESSION_ID '$RESUME_SESSION_ID' is not a valid UUID; falling back to managed session"
+    fi
+    [ -n "$RESUME_UUID" ] && return 0
   fi
-  # Strict canonical-UUID check (NOT a glob): RESUME_ID is interpolated into the
-  # `script -qfc "..."` command and re-evaluated by the inner shell, so a loose
-  # pattern admitting shell metacharacters would be a command-injection path.
-  if printf '%s' "$RESUME_ID" | grep -qE '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'; then
-    RESUME_FLAG="--resume $RESUME_ID"
-    echo "[entrypoint] resuming session $RESUME_ID"
-  elif [ -z "$RESUME_ID" ]; then
-    echo "[entrypoint] no transcript found; starting fresh session"
-  else
-    echo "[entrypoint] resolved session id '$RESUME_ID' is not a valid UUID; starting fresh session"
+
+  if [ -f "$FORCE_FRESH_SENTINEL" ]; then
+    rm -f "$FORCE_FRESH_SENTINEL"
+    echo "[entrypoint] force-fresh sentinel present; rotating to a new session"
+    mint_fresh_session
+    prune_transcripts "$RESUME_UUID"
+    return 0
   fi
+
+  # Managed path: read the state file. Only the session id is needed at resume
+  # time — the recorded epoch is the second field (kept for the on-disk format /
+  # future age policy) and is intentionally ignored here (rotation is size-based).
+  STATE_UUID=""
+  [ -f "$SESSION_STATE_FILE" ] && read -r STATE_UUID _ < "$SESSION_STATE_FILE" || true
+
+  if [ -n "$STATE_UUID" ] && valid_uuid "$STATE_UUID"; then
+    JSONL=$(find_jsonl "$STATE_UUID")
+    if [ -n "$JSONL" ] && [ -f "$JSONL" ]; then
+      SZ_MB=$(( $(stat -c %s "$JSONL" 2>/dev/null || echo 0) / 1048576 ))
+      if [ "$SZ_MB" -lt "$SESSION_ROTATE_MAX_MB" ]; then
+        RESUME_UUID="$STATE_UUID"
+        RESUME_FLAG="--resume $RESUME_UUID"
+        echo "[entrypoint] resuming managed session $RESUME_UUID (${SZ_MB}MB < ${SESSION_ROTATE_MAX_MB}MB)"
+        prune_transcripts "$RESUME_UUID"
+        return 0
+      fi
+      echo "[entrypoint] managed session $STATE_UUID is ${SZ_MB}MB >= ${SESSION_ROTATE_MAX_MB}MB; rotating"
+      mint_fresh_session
+      prune_transcripts "$RESUME_UUID"
+      return 0
+    fi
+    # State file points at a session with no transcript on disk yet (e.g. minted
+    # but the container stopped before claude wrote the .jsonl, or the transcript
+    # was pruned). A transcript IS the session, so --resume would fail / loop on
+    # "session not found"; relaunch with --session-id to (re)create it with the
+    # same managed id, preserving continuity of the tracked id.
+    RESUME_UUID="$STATE_UUID"
+    RESUME_FLAG="--session-id $RESUME_UUID"
+    echo "[entrypoint] managed session $RESUME_UUID has no transcript yet; launching with --session-id"
+    return 0
+  fi
+
+  # No usable state file. Adopt the newest transcript on disk so a previously
+  # pinned/auto session is preserved when first switching to managed mode; only
+  # mint a brand-new session if the device has no transcripts at all.
+  NEWEST=$(ls -t "$PROJECTS_DIR"/*/*.jsonl 2>/dev/null | head -1 || true)
+  if [ -n "$NEWEST" ]; then
+    ADOPT=$(basename "$NEWEST" .jsonl)
+    if valid_uuid "$ADOPT"; then
+      MTIME=$(stat -c %Y "$NEWEST" 2>/dev/null || date +%s)
+      printf '%s %s\n' "$ADOPT" "$MTIME" > "$SESSION_STATE_FILE"
+      RESUME_UUID="$ADOPT"
+      RESUME_FLAG="--resume $RESUME_UUID"
+      echo "[entrypoint] adopting newest transcript $RESUME_UUID into managed state"
+      prune_transcripts "$RESUME_UUID"
+      return 0
+    fi
+  fi
+  echo "[entrypoint] no transcript found; starting fresh managed session"
+  mint_fresh_session
   return 0
 }
 
@@ -302,6 +466,84 @@ if [ "$WATCHDOG_ENABLED" = "true" ]; then
   echo "[entrypoint] wedge watchdog pid=$! stall=${WATCHDOG_STALL_SECONDS}s interval=${WATCHDOG_INTERVAL_SECONDS}s"
 fi
 
+# ── Startup-wedge backstop ───────────────────────────────────────────────────
+# The rx-backlog watchdog above catches a session that connected and then
+# stalled. It CANNOT catch the resume-from-summary modal: that blocks startup
+# *before* the relay connects, so there is no :443 socket to inspect — the device
+# silently never registers ("Remote Control failed to connect: /login"). The
+# CLAUDE_CODE_RESUME_* env vars + resumeReturnDismissed setting suppress that
+# modal today, but a future Claude Code auto-update could rename the gate and
+# re-expose it. This backstop is the safety net: after each launch, if the relay
+# has not come up within the grace window (health-proxy /healthz != 200) while
+# claude is still alive, we relaunch the SAME session once (covers a transient
+# relay/network blip); if the SAME session fails to connect a second time we set
+# a force-fresh sentinel (resolve_resume rotates to a new session, escaping a bad
+# transcript / modal) and fire a Telegram alert so a wedge becomes auto-recover +
+# ping instead of a silent hang.
+STARTUP_WEDGE_ENABLED="${STARTUP_WEDGE_ENABLED:-true}"
+STARTUP_WEDGE_GRACE_SECONDS="${STARTUP_WEDGE_GRACE_SECONDS:-75}"
+norm_posint STARTUP_WEDGE_GRACE_SECONDS 75
+FORCE_FRESH_SENTINEL="/workspace/.claude/.force-fresh-next"
+WEDGE_ATTEMPTS_FILE="/workspace/.claude/.wedge-attempts"
+
+# HTTP status of the local health proxy (200 = relay up). curl is in the image.
+healthz_code() {
+  curl -s -o /dev/null -m 5 -w '%{http_code}' "http://127.0.0.1:${PORT:-8080}/healthz" 2>/dev/null || echo 000
+}
+
+# Best-effort Telegram alert. Gated on TELEGRAM_BOT_TOKEN + STARTUP_WEDGE_ALERT_CHAT_ID;
+# logs loudly and returns 0 when unconfigured so the recovery path never blocks.
+send_wedge_alert() {
+  code="$1"; uuid="$2"
+  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${STARTUP_WEDGE_ALERT_CHAT_ID:-}" ]; then
+    echo "[startup-wedge] TELEGRAM_BOT_TOKEN/STARTUP_WEDGE_ALERT_CHAT_ID not set; skipping alert"
+    return 0
+  fi
+  text="[$DEVICE_NAME] startup wedge: relay never came up (healthz=$code) for session $uuid — forced a FRESH session. Resume-modal suppression may have broken (Claude Code update?); check CLAUDE_CODE_RESUME_* env."
+  curl -s -m 10 -o /dev/null \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${STARTUP_WEDGE_ALERT_CHAT_ID}" \
+    --data-urlencode "text=${text}" \
+    && echo "[startup-wedge] alert sent to chat ${STARTUP_WEDGE_ALERT_CHAT_ID}" \
+    || echo "[startup-wedge] alert send failed"
+}
+
+# One-shot per-launch probe. Args: <claude_child_pid> <session_uuid>.
+startup_wedge_probe() {
+  child="$1"; uuid="$2"
+  sleep "$STARTUP_WEDGE_GRACE_SECONDS"
+  kill -0 "$child" 2>/dev/null || return 0          # already exited; supervisor handles it
+  code=$(healthz_code)
+  if [ "$code" = "200" ]; then
+    rm -f "$WEDGE_ATTEMPTS_FILE" 2>/dev/null || true  # connected — clear any streak
+    return 0
+  fi
+  # Relay not up and claude still alive → wedge candidate. Use a per-uuid streak
+  # counter so a transient blip only costs one relaunch of the same session.
+  prev_uuid=""; prev_n=0
+  [ -f "$WEDGE_ATTEMPTS_FILE" ] && read -r prev_uuid prev_n < "$WEDGE_ATTEMPTS_FILE" || true
+  if [ "$prev_uuid" = "$uuid" ] && [ "${prev_n:-0}" -ge 1 ]; then
+    # Second consecutive failure of the same session.
+    rm -f "$WEDGE_ATTEMPTS_FILE" 2>/dev/null || true
+    if [ -n "${RESUME_SESSION_ID:-}" ]; then
+      # Operator pin: never abandon it — relaunch the SAME pinned session and do
+      # not write the force-fresh sentinel (resolve_resume would honor the pin
+      # anyway, but skipping the write keeps the no-op-until-gitops guarantee and
+      # avoids alert spam during a real relay/network outage).
+      echo "[startup-wedge] pinned session $uuid failed to connect $((prev_n + 1))x (healthz=$code); RESUME_SESSION_ID set — relaunching same, NOT rotating"
+    else
+      echo "[startup-wedge] session $uuid failed to connect $((prev_n + 1))x (healthz=$code); forcing FRESH session + alert"
+      : > "$FORCE_FRESH_SENTINEL"
+      send_wedge_alert "$code" "$uuid"
+    fi
+  else
+    if [ "$prev_uuid" = "$uuid" ]; then n=$((prev_n + 1)); else n=1; fi
+    printf '%s %s\n' "$uuid" "$n" > "$WEDGE_ATTEMPTS_FILE"
+    echo "[startup-wedge] session $uuid not connected (healthz=$code), attempt $n; relaunching same session (transient guard)"
+  fi
+  kill -TERM "$child" 2>/dev/null || true
+}
+
 # ── Supervisor loop ──────────────────────────────────────────────────────────
 # `claude --remote-control` needs a PTY (the `script` wrapper). Rather than
 # exec'ing it (any exit would kill the container), we supervise: on exit — a
@@ -317,8 +559,10 @@ RAPID_CRASH_MAX="${RAPID_CRASH_MAX:-5}"
 RAPID_CRASH_WINDOW_SECONDS="${RAPID_CRASH_WINDOW_SECONDS:-60}"
 
 CLAUDE_CHILD=""   # PID of the `script` wrapper currently running claude
+WEDGE_PROBE_PID="" # PID of the per-launch startup-wedge probe, if any
 on_term() {
   echo "[entrypoint] received SIGTERM/INT; stopping claude"
+  [ -n "$WEDGE_PROBE_PID" ] && kill "$WEDGE_PROBE_PID" 2>/dev/null || true
   [ -n "$CLAUDE_CHILD" ] && kill -TERM "$CLAUDE_CHILD" 2>/dev/null || true
   exit 0
 }
@@ -332,9 +576,20 @@ while true; do
   set +e
   script -qfc "claude --remote-control ${DEVICE_NAME} ${RESUME_FLAG} --dangerously-skip-permissions 2>&1" /dev/stdout &
   CLAUDE_CHILD=$!
+  # Per-launch startup-wedge backstop: detects a relay that never comes up (e.g.
+  # a resume modal blocking startup) and rotates to a fresh session + alerts.
+  WEDGE_PROBE_PID=""
+  if [ "$STARTUP_WEDGE_ENABLED" = "true" ] && [ -n "$RESUME_UUID" ]; then
+    startup_wedge_probe "$CLAUDE_CHILD" "$RESUME_UUID" &
+    WEDGE_PROBE_PID=$!
+  fi
   wait "$CLAUDE_CHILD"
   rc=$?
   set -e
+  # The probe is one-shot; stop it if claude exited on its own before the grace
+  # window elapsed, so a stale probe can't kill the NEXT launch.
+  [ -n "$WEDGE_PROBE_PID" ] && kill "$WEDGE_PROBE_PID" 2>/dev/null || true
+  WEDGE_PROBE_PID=""
   CLAUDE_CHILD=""
   echo "[entrypoint] claude exited (rc=$rc)"
 
