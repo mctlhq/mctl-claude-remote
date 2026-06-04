@@ -44,16 +44,20 @@ if [ ! -f /workspace/.claude/settings.json ] || \
 JSON
 fi
 
-# Idempotently ensure resumeReturnDismissed on a settings.json that already
+# Idempotently FORCE resumeReturnDismissed=true on a settings.json that already
 # exists from an earlier image (the heredoc above only seeds fresh installs).
-# jq merge preserves any operator-added keys; no-op if jq fails or the key is
-# already present.
-if [ -f /workspace/.claude/settings.json ] && \
-   ! grep -q '"resumeReturnDismissed"' /workspace/.claude/settings.json; then
-  if merged=$(jq '. + {resumeReturnDismissed: true}' /workspace/.claude/settings.json 2>/dev/null) && \
-     [ -n "$merged" ]; then
-    printf '%s\n' "$merged" > /workspace/.claude/settings.json
-    echo "[entrypoint] settings: added resumeReturnDismissed=true"
+# We check the actual value (not just key presence): a persisted "false" — e.g.
+# Claude writing its default before this image runs — must be flipped to true,
+# otherwise the resume modal stays enabled for exactly the existing-workspace
+# case this block exists to repair. jq set preserves any operator-added keys.
+if [ -f /workspace/.claude/settings.json ]; then
+  cur=$(jq -r '.resumeReturnDismissed // empty' /workspace/.claude/settings.json 2>/dev/null || echo "")
+  if [ "$cur" != "true" ]; then
+    if merged=$(jq '.resumeReturnDismissed = true' /workspace/.claude/settings.json 2>/dev/null) && \
+       [ -n "$merged" ]; then
+      printf '%s\n' "$merged" > /workspace/.claude/settings.json
+      echo "[entrypoint] settings: set resumeReturnDismissed=true (was '${cur:-absent}')"
+    fi
   fi
 fi
 
@@ -228,8 +232,23 @@ fi
 #                            rest are pruned so the persistent volume / MinIO
 #                            mirror does not grow forever). Default 4 = current
 #                            session + 3 prior.
+# Normalize a numeric env var to a positive integer, falling back to a default
+# with a warning. A bad operator value must not brick the device (a non-integer
+# in `$(( ))` aborts dash under set -e) nor silently break a feature (0 == always
+# rotate / keep nothing). Mirrors the PR_STEWARD_TICK_TIMEOUT normalization above.
+norm_posint() {  # $1 = var name, $2 = default
+  eval "_v=\"\${$1}\""
+  case "$_v" in
+    '' | *[!0-9]* | 0)
+      echo "[entrypoint] WARN $1='$_v' is not a positive integer; using default $2"
+      eval "$1=$2" ;;
+  esac
+}
+
 SESSION_ROTATE_MAX_MB="${SESSION_ROTATE_MAX_MB:-20}"
 SESSION_RETENTION_KEEP="${SESSION_RETENTION_KEEP:-4}"
+norm_posint SESSION_ROTATE_MAX_MB 20
+norm_posint SESSION_RETENTION_KEEP 4
 SESSION_STATE_DIR="/workspace/.claude/remote-control-state"
 SESSION_STATE_FILE="$SESSION_STATE_DIR/${DEVICE_NAME}.session"
 PROJECTS_DIR="/workspace/.claude/projects"
@@ -278,25 +297,21 @@ mint_fresh_session() {
 }
 
 # Resolve which session to launch and set RESUME_FLAG + RESUME_UUID. Called
-# before EVERY (re)launch. Precedence:
-#   force-fresh sentinel      -> mint fresh (set by the startup-wedge backstop)
+# before EVERY (re)launch. Precedence (an explicit operator choice always wins
+# over the managed/backstop machinery):
 #   RESUME_SESSION=false      -> mint fresh (escape hatch for a bad transcript)
-#   RESUME_SESSION_ID=<uuid>  -> resume that exact session, NO rotation
-#                               (explicit operator pin; bypasses managed rotation)
+#   RESUME_SESSION_ID=<uuid>  -> resume that exact session, NO rotation, and
+#                               clear any stale force-fresh sentinel so a pinned
+#                               session is never abandoned (keeps a deploy a
+#                               no-op while the pin remains set)
+#   force-fresh sentinel      -> mint fresh (set by the startup-wedge backstop;
+#                               only reached in managed mode, never under a pin)
 #   else (managed)            -> state-file session, rotating on size; if there is
 #                               no state file yet, adopt the newest transcript on
 #                               disk so an existing pinned session is preserved.
 resolve_resume() {
   RESUME_FLAG=""
   RESUME_UUID=""
-
-  if [ -f "$FORCE_FRESH_SENTINEL" ]; then
-    rm -f "$FORCE_FRESH_SENTINEL"
-    echo "[entrypoint] force-fresh sentinel present; rotating to a new session"
-    mint_fresh_session
-    prune_transcripts "$RESUME_UUID"
-    return 0
-  fi
 
   if [ "${RESUME_SESSION:-true}" = "false" ]; then
     echo "[entrypoint] RESUME_SESSION=false; starting fresh session"
@@ -305,9 +320,12 @@ resolve_resume() {
     return 0
   fi
 
-  # Explicit operator pin: resume exactly this session, no managed rotation.
+  # Explicit operator pin: resume exactly this session, no managed rotation. This
+  # is checked BEFORE the force-fresh sentinel so the startup-wedge backstop can
+  # never rotate away an operator-pinned session (the no-op-until-gitops case).
   if [ -n "${RESUME_SESSION_ID:-}" ]; then
     if valid_uuid "$RESUME_SESSION_ID"; then
+      rm -f "$FORCE_FRESH_SENTINEL"   # a pin must not be overridden by a stale sentinel
       RESUME_UUID="$RESUME_SESSION_ID"
       RESUME_FLAG="--resume $RESUME_UUID"
       echo "[entrypoint] resuming pinned session $RESUME_UUID (RESUME_SESSION_ID set; rotation disabled)"
@@ -315,6 +333,14 @@ resolve_resume() {
       echo "[entrypoint] RESUME_SESSION_ID '$RESUME_SESSION_ID' is not a valid UUID; falling back to managed session"
     fi
     [ -n "$RESUME_UUID" ] && return 0
+  fi
+
+  if [ -f "$FORCE_FRESH_SENTINEL" ]; then
+    rm -f "$FORCE_FRESH_SENTINEL"
+    echo "[entrypoint] force-fresh sentinel present; rotating to a new session"
+    mint_fresh_session
+    prune_transcripts "$RESUME_UUID"
+    return 0
   fi
 
   # Managed path: read the state file. Only the session id is needed at resume
@@ -339,11 +365,14 @@ resolve_resume() {
       prune_transcripts "$RESUME_UUID"
       return 0
     fi
-    # state file points at a session with no transcript yet (e.g. minted but never
-    # launched) — resume it; claude will create the transcript.
+    # State file points at a session with no transcript on disk yet (e.g. minted
+    # but the container stopped before claude wrote the .jsonl, or the transcript
+    # was pruned). A transcript IS the session, so --resume would fail / loop on
+    # "session not found"; relaunch with --session-id to (re)create it with the
+    # same managed id, preserving continuity of the tracked id.
     RESUME_UUID="$STATE_UUID"
-    RESUME_FLAG="--resume $RESUME_UUID"
-    echo "[entrypoint] resuming managed session $RESUME_UUID (no transcript on disk yet)"
+    RESUME_FLAG="--session-id $RESUME_UUID"
+    echo "[entrypoint] managed session $RESUME_UUID has no transcript yet; launching with --session-id"
     return 0
   fi
 
@@ -453,6 +482,7 @@ fi
 # ping instead of a silent hang.
 STARTUP_WEDGE_ENABLED="${STARTUP_WEDGE_ENABLED:-true}"
 STARTUP_WEDGE_GRACE_SECONDS="${STARTUP_WEDGE_GRACE_SECONDS:-75}"
+norm_posint STARTUP_WEDGE_GRACE_SECONDS 75
 FORCE_FRESH_SENTINEL="/workspace/.claude/.force-fresh-next"
 WEDGE_ATTEMPTS_FILE="/workspace/.claude/.wedge-attempts"
 
@@ -493,10 +523,19 @@ startup_wedge_probe() {
   prev_uuid=""; prev_n=0
   [ -f "$WEDGE_ATTEMPTS_FILE" ] && read -r prev_uuid prev_n < "$WEDGE_ATTEMPTS_FILE" || true
   if [ "$prev_uuid" = "$uuid" ] && [ "${prev_n:-0}" -ge 1 ]; then
-    echo "[startup-wedge] session $uuid failed to connect $((prev_n + 1))x (healthz=$code); forcing FRESH session + alert"
-    : > "$FORCE_FRESH_SENTINEL"
+    # Second consecutive failure of the same session.
     rm -f "$WEDGE_ATTEMPTS_FILE" 2>/dev/null || true
-    send_wedge_alert "$code" "$uuid"
+    if [ -n "${RESUME_SESSION_ID:-}" ]; then
+      # Operator pin: never abandon it — relaunch the SAME pinned session and do
+      # not write the force-fresh sentinel (resolve_resume would honor the pin
+      # anyway, but skipping the write keeps the no-op-until-gitops guarantee and
+      # avoids alert spam during a real relay/network outage).
+      echo "[startup-wedge] pinned session $uuid failed to connect $((prev_n + 1))x (healthz=$code); RESUME_SESSION_ID set — relaunching same, NOT rotating"
+    else
+      echo "[startup-wedge] session $uuid failed to connect $((prev_n + 1))x (healthz=$code); forcing FRESH session + alert"
+      : > "$FORCE_FRESH_SENTINEL"
+      send_wedge_alert "$code" "$uuid"
+    fi
   else
     if [ "$prev_uuid" = "$uuid" ]; then n=$((prev_n + 1)); else n=1; fi
     printf '%s %s\n' "$uuid" "$n" > "$WEDGE_ATTEMPTS_FILE"
