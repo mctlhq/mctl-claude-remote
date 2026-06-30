@@ -407,9 +407,22 @@ resolve_resume() {
 # relaunches it WITH --resume in-pod. That is faster than waiting for the kubelet
 # liveness backstop (health-proxy 503 -> pod recreate); the backstop still covers
 # the case where the in-pod relaunch can't recover. Gated by WATCHDOG_ENABLED.
+#
+# A second, distinct failure mode lives here too: the relay's outbound :443
+# connection can disappear outright (not wedged-with-backlog, just gone) and
+# never reconnect on its own. Measured in prod (2026-06-30): an idle managed
+# session loses its last ESTABLISHED :443 socket on a near-exact ~10min cadence
+# (almost certainly a network-path idle timeout upstream of the relay, not a
+# claude crash — the process stays alive and responsive), and 3/3 observed
+# cycles took the kubelet liveness path (health-proxy TLS_GRACE_MS=60s, then
+# the failureThreshold budget) ~210-235s after the socket vanished to kill and
+# fully recreate the pod (native-binary reinstall, steward rebootstrap, etc.).
+# TLS_DEAD_SECONDS catches this in-pod, well inside that budget, so we get the
+# cheap --resume relaunch instead of a full pod recreate.
 WATCHDOG_ENABLED="${WATCHDOG_ENABLED:-true}"
 WATCHDOG_INTERVAL_SECONDS="${WATCHDOG_INTERVAL_SECONDS:-15}"
 WATCHDOG_STALL_SECONDS="${WATCHDOG_STALL_SECONDS:-120}"
+TLS_DEAD_SECONDS="${TLS_DEAD_SECONDS:-75}"
 
 # True (exit 0) if any ESTABLISHED outbound :443 socket has a non-zero rx_queue.
 # /proc/net/tcp{,6}: col 4 = state (01=ESTABLISHED), col 3 = rem addr (port 443
@@ -417,6 +430,13 @@ WATCHDOG_STALL_SECONDS="${WATCHDOG_STALL_SECONDS:-120}"
 # strtonum (absent in the slim image's awk).
 relay_has_backlog() {
   awk 'FNR>1 && $4=="01" && $3 ~ /:01BB$/ { split($5,q,":"); if (q[2] !~ /^0+$/) f=1 } END { exit (f?0:1) }' \
+    /proc/net/tcp /proc/net/tcp6 2>/dev/null
+}
+
+# True (exit 0) if there is at least one ESTABLISHED outbound :443 socket.
+# Mirrors health-proxy.js's hasOutboundTls() check.
+relay_tls_established() {
+  awk 'FNR>1 && $4=="01" && $3 ~ /:01BB$/ { f=1 } END { exit (f?0:1) }' \
     /proc/net/tcp /proc/net/tcp6 2>/dev/null
 }
 
@@ -435,35 +455,56 @@ find_claude_pid() {
   return 1
 }
 
+# Kill the remote-control claude leaf (TERM, then KILL if it survives 5s) so the
+# supervisor loop relaunches it with --resume in-pod. $1 is a log-only reason.
+kill_claude_leaf() {
+  cpid=$(find_claude_pid || true)
+  if [ -n "$cpid" ]; then
+    echo "[watchdog] $1; killing claude pid=$cpid for in-pod relaunch"
+    kill -TERM "$cpid" 2>/dev/null || true
+    sleep 5
+    if kill -0 "$cpid" 2>/dev/null; then
+      echo "[watchdog] claude pid=$cpid alive after TERM; SIGKILL"
+      kill -KILL "$cpid" 2>/dev/null || true
+    fi
+  else
+    echo "[watchdog] $1 but no claude leaf found (mid-relaunch?)"
+  fi
+}
+
 if [ "$WATCHDOG_ENABLED" = "true" ]; then
   (
     stall_start=0
+    tls_dead_since=0
     while true; do
       sleep "$WATCHDOG_INTERVAL_SECONDS"
+      now=$(date +%s)
+
       if relay_has_backlog; then
-        now=$(date +%s)
         if [ "$stall_start" -eq 0 ]; then stall_start="$now"; fi
         if [ $((now - stall_start)) -ge "$WATCHDOG_STALL_SECONDS" ]; then
-          cpid=$(find_claude_pid || true)
-          if [ -n "$cpid" ]; then
-            echo "[watchdog] relay rx stalled >=${WATCHDOG_STALL_SECONDS}s; killing wedged claude pid=$cpid for in-pod relaunch"
-            kill -TERM "$cpid" 2>/dev/null || true
-            sleep 5
-            if kill -0 "$cpid" 2>/dev/null; then
-              echo "[watchdog] claude pid=$cpid alive after TERM; SIGKILL"
-              kill -KILL "$cpid" 2>/dev/null || true
-            fi
-          else
-            echo "[watchdog] relay rx stalled >=${WATCHDOG_STALL_SECONDS}s but no claude leaf found (mid-relaunch?); resetting stall timer"
-          fi
+          kill_claude_leaf "relay rx stalled >=${WATCHDOG_STALL_SECONDS}s"
           stall_start=0
+          tls_dead_since=0
+          continue
         fi
       else
         stall_start=0
       fi
+
+      if relay_tls_established; then
+        tls_dead_since=0
+      else
+        if [ "$tls_dead_since" -eq 0 ]; then tls_dead_since="$now"; fi
+        if [ $((now - tls_dead_since)) -ge "$TLS_DEAD_SECONDS" ]; then
+          kill_claude_leaf "relay TLS connection gone >=${TLS_DEAD_SECONDS}s"
+          tls_dead_since=0
+          stall_start=0
+        fi
+      fi
     done
   ) &
-  echo "[entrypoint] wedge watchdog pid=$! stall=${WATCHDOG_STALL_SECONDS}s interval=${WATCHDOG_INTERVAL_SECONDS}s"
+  echo "[entrypoint] wedge watchdog pid=$! stall=${WATCHDOG_STALL_SECONDS}s tls_dead=${TLS_DEAD_SECONDS}s interval=${WATCHDOG_INTERVAL_SECONDS}s"
 fi
 
 # ── Startup-wedge backstop ───────────────────────────────────────────────────
