@@ -476,9 +476,26 @@ if [ "$WATCHDOG_ENABLED" = "true" ]; then
   (
     stall_start=0
     tls_dead_since=0
+    last_pid=""
     while true; do
       sleep "$WATCHDOG_INTERVAL_SECONDS"
       now=$(date +%s)
+
+      # A launch can exit for reasons unrelated to this watchdog (a crash, the
+      # supervisor's own relaunch, or startup_wedge_probe killing a first
+      # no-connect attempt at its 75s grace mark). If the claude leaf's pid
+      # changed since the last tick, any backlog/TLS-down streak we were
+      # timing belonged to the PREVIOUS process — carrying it over would let a
+      # brand-new launch inherit an already-expired timer and get killed
+      # within one poll interval, before it has had any chance to connect,
+      # short-circuiting startup_wedge_probe's own grace window and 2-strike
+      # same-session-then-rotate logic.
+      cur_pid=$(find_claude_pid || true)
+      if [ "$cur_pid" != "$last_pid" ]; then
+        stall_start=0
+        tls_dead_since=0
+        last_pid="$cur_pid"
+      fi
 
       if relay_has_backlog; then
         if [ "$stall_start" -eq 0 ]; then stall_start="$now"; fi
