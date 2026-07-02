@@ -1,6 +1,9 @@
 FROM node:22-slim
 
-ARG CLAUDE_CODE_NPM_VERSION=latest
+# Pinned by default — the harness version must not float between rebuilds
+# (June's relay-TLS incidents were version-specific behavior). Bump via an
+# explicit commit, or override with --build-arg for a one-off (see issue #27).
+ARG CLAUDE_CODE_NPM_VERSION=2.1.198
 
 LABEL org.opencontainers.image.title="mctl-claude-remote" \
       org.opencontainers.image.description="Containerized Claude Code remote-control device for headless environments" \

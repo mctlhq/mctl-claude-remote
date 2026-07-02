@@ -186,7 +186,7 @@ extra permission, and specifically no Administration**.
 
 ## Build Model
 
-The Dockerfile defaults to installing the latest `@anthropic-ai/claude-code` npm package at image build time, then refreshes the native Claude binary on container startup when possible. To build against a specific npm package version:
+The Dockerfile pins `@anthropic-ai/claude-code` to a specific version (the `CLAUDE_CODE_NPM_VERSION` build arg); on container startup the native Claude binary is installed at that same version, so the harness does not float between rebuilds or restarts. Bump the pin via an explicit commit, or override for a one-off build:
 
 ```sh
 docker build \

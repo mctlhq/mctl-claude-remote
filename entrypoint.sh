@@ -172,8 +172,12 @@ NATIVE_VER=$("$NATIVE_CLAUDE" --version 2>/dev/null | head -1)
 if [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_VER" ] && [ "$NATIVE_VER" = "$BUNDLED_VER" ]; then
   echo "[entrypoint] native claude already current ($NATIVE_VER); skipping install"
 else
-  echo "[entrypoint] installing/refreshing native claude binary"
-  claude install latest --force 2>&1 | tail -8 || echo "[entrypoint] WARN native install failed; falling back to npm-global"
+  # Install the bundled (pinned) version, not `latest` — otherwise the runtime
+  # harness floats past the image pin on every restart. Fall back to latest
+  # only when the bundled version cannot be determined.
+  TARGET_VER=$(printf '%s' "$BUNDLED_VER" | awk '{print $1}')
+  echo "[entrypoint] installing/refreshing native claude binary (${TARGET_VER:-latest})"
+  claude install "${TARGET_VER:-latest}" --force 2>&1 | tail -8 || echo "[entrypoint] WARN native install failed; falling back to npm-global"
   chmod +x "$NATIVE_CLAUDE" 2>/dev/null || true
 fi
 if [ -x "$NATIVE_CLAUDE" ]; then
