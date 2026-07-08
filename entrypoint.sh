@@ -7,6 +7,21 @@ export HOME=/workspace
 mkdir -p /workspace/.claude
 echo "[entrypoint] HOME=$HOME"
 
+# kubectl resolves a kubeconfig (env var, then $HOME/.kube/config) BEFORE
+# falling back to in-cluster auto-detection. Since $HOME is the persistent
+# workspace, a kubeconfig written there by a previous interactive session
+# (e.g. someone running `kubectl config set-cluster` to point at an external
+# cluster) would silently persist across restarts and permanently override
+# the in-cluster ServiceAccount identity/RBAC. Unset any inherited
+# KUBECONFIG on every start so in-cluster auto-detection always wins;
+# $HOME/.kube is deliberately left alone (not force-deleted) since only an
+# explicit kubectl invocation would ever create it — warn instead so it's
+# visible in logs rather than silently changing kubectl's behavior.
+unset KUBECONFIG
+if [ -f "$HOME/.kube/config" ]; then
+  echo "[entrypoint] WARN \$HOME/.kube/config exists; kubectl will use it instead of in-cluster auto-detection" >&2
+fi
+
 # Seed first-run config if onboarding hasn't been completed yet. Required
 # because no human is here to press keys at the theme/trust prompts.
 # We re-seed when a persisted workspace restore brought back a partial config
@@ -100,17 +115,31 @@ storage, and on restart the entrypoint resumes the prior session via
 A long-lived workspace file like `/workspace/session-notes.md` is still a good
 durable scratchpad, since it survives even a fresh (non-resumed) start.
 
-## Cluster access (read-only)
+## Cluster access (if granted)
 
-`kubectl` is available and needs no kubeconfig — it auto-detects the in-cluster
-config from this pod's own ServiceAccount token. RBAC is READ-ONLY (get/list/
-watch, no create/update/patch/delete) on namespaces, resourcequotas, pods,
-deployments, and argoproj.io workflows/applications, cluster-wide (not just
-this namespace). The API server will reject any write attempt. Use this for
-diagnostics the mctl control plane doesn't cover directly — e.g. a tenant
-onboarding workflow that reached the cluster (namespace/quota created) but
-never finished registering, or checking real Argo Workflow / Application
-status.
+`kubectl` is installed. Whether it can actually reach the API server depends
+on how this pod was deployed:
+
+- Needs `automountServiceAccountToken` NOT disabled on the pod spec — the
+  reference `deploy/pr-steward.example.yaml` disables it by default (no
+  cluster access out of the box). If it's off, every kubectl call fails with
+  `Unauthorized`.
+- Needs RBAC bound to this pod's ServiceAccount — without a
+  ClusterRole/RoleBinding, an authenticated call still gets `Forbidden`.
+- When both are present, kubectl needs no kubeconfig: it auto-detects the
+  in-cluster config from the mounted ServiceAccount token. Run
+  `kubectl auth can-i --list` to see exactly what's actually granted, rather
+  than assuming.
+- A leftover kubeconfig at `$HOME/.kube/config` (e.g. from a prior
+  `kubectl config set-cluster`) or an inherited `KUBECONFIG` env var takes
+  precedence over in-cluster auto-detection — the entrypoint unsets
+  `KUBECONFIG` on every start, but a config *file* is left alone and would
+  still win, so avoid creating one unless you mean to point elsewhere.
+
+Use this for diagnostics the mctl control plane doesn't cover directly — e.g.
+a tenant onboarding workflow that reached the cluster (namespace/quota
+created) but never finished registering, or checking real Argo Workflow /
+Application status.
 MD
 fi
 
