@@ -65,6 +65,13 @@ spec:
     metadata:
       labels: { app: claude-remote }
     spec:
+      # Secure default: no cluster API access. kubectl is installed in the
+      # image but auto-detects in-cluster config from the mounted SA token —
+      # with automount off (this default), kubectl has no credentials and
+      # every call fails with Unauthorized. To grant read-only cluster
+      # diagnostics, flip this to true (or omit the field) and bind whatever
+      # RBAC you want to this pod's ServiceAccount separately; scope it to
+      # get/list/watch only unless you have a specific reason for more.
       automountServiceAccountToken: false
       securityContext:
         runAsNonRoot: true

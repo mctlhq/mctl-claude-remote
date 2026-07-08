@@ -7,6 +7,22 @@ export HOME=/workspace
 mkdir -p /workspace/.claude
 echo "[entrypoint] HOME=$HOME"
 
+# kubectl resolves a kubeconfig (env var, then $HOME/.kube/config) BEFORE
+# falling back to in-cluster auto-detection. Since $HOME is the persistent
+# workspace, a kubeconfig written there by a previous interactive session
+# (e.g. someone running `kubectl config set-cluster` to point at an external
+# cluster) would silently persist across restarts and permanently override
+# the in-cluster ServiceAccount identity/RBAC. An inherited env var alone
+# isn't enough to fix — a leftover $HOME/.kube/config file would still win.
+# Point KUBECONFIG at /dev/null instead: an empty/unreadable explicit
+# kubeconfig makes kubectl's config loader find no usable context, and it
+# falls through to in-cluster auto-detection (the standard technique for
+# forcing in-cluster auth regardless of what's on disk).
+export KUBECONFIG=/dev/null
+if [ -f "$HOME/.kube/config" ]; then
+  echo "[entrypoint] WARN \$HOME/.kube/config exists but KUBECONFIG=/dev/null forces in-cluster auto-detection" >&2
+fi
+
 # Seed first-run config if onboarding hasn't been completed yet. Required
 # because no human is here to press keys at the theme/trust prompts.
 # We re-seed when a persisted workspace restore brought back a partial config
@@ -99,6 +115,31 @@ storage, and on restart the entrypoint resumes the prior session via
 `RESUME_SESSION=false` to force a fresh session if a transcript is corrupt.
 A long-lived workspace file like `/workspace/session-notes.md` is still a good
 durable scratchpad, since it survives even a fresh (non-resumed) start.
+
+## Cluster access (if granted)
+
+`kubectl` is installed. Whether it can actually reach the API server depends
+on how this pod was deployed:
+
+- Needs `automountServiceAccountToken` NOT disabled on the pod spec — the
+  reference `deploy/pr-steward.example.yaml` disables it by default (no
+  cluster access out of the box). If it's off, every kubectl call fails with
+  `Unauthorized`.
+- Needs RBAC bound to this pod's ServiceAccount — without a
+  ClusterRole/RoleBinding, an authenticated call still gets `Forbidden`.
+- When both are present, kubectl needs no kubeconfig: it auto-detects the
+  in-cluster config from the mounted ServiceAccount token. Run
+  `kubectl auth can-i --list` to see exactly what's actually granted, rather
+  than assuming.
+- The entrypoint forces `KUBECONFIG=/dev/null` on every start, so kubectl
+  always uses in-cluster auto-detection regardless of any kubeconfig left in
+  `$HOME/.kube/config` by a prior session — that file, if present, is inert
+  and ignored, not a way to point kubectl elsewhere from inside a session.
+
+Use this for diagnostics the mctl control plane doesn't cover directly — e.g.
+a tenant onboarding workflow that reached the cluster (namespace/quota
+created) but never finished registering, or checking real Argo Workflow /
+Application status.
 MD
 fi
 
