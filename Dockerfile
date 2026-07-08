@@ -5,6 +5,11 @@ FROM node:22-slim
 # explicit commit, or override with --build-arg for a one-off (see issue #27).
 ARG CLAUDE_CODE_NPM_VERSION=2.1.198
 
+# Matches the k3s-preview cluster's server version (kube.tf install_k3s_version
+# = v1.33.13+k3s1). kubectl tolerates +/-1 minor version skew from the server,
+# but pinning to the same minor avoids relying on that skew policy.
+ARG KUBECTL_VERSION=1.33.13
+
 LABEL org.opencontainers.image.title="mctl-claude-remote" \
       org.opencontainers.image.description="Containerized Claude Code remote-control device for headless environments" \
       org.opencontainers.image.source="https://github.com/mctlhq/mctl-claude-remote" \
@@ -32,6 +37,15 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
     && apt-get update \
     && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
+
+# kubectl — read-only cluster diagnostics via the pod's in-cluster ServiceAccount
+# (RBAC granted in mctl-gitops; get/list/watch only, no write verbs). No
+# kubeconfig needed: kubectl auto-detects in-cluster config from the mounted SA
+# token when KUBERNETES_SERVICE_HOST is set. dpkg --print-architecture keeps the
+# download portable if the build later goes multi-arch (mirrors the gh install).
+RUN curl -fsSL -o /usr/local/bin/kubectl \
+      "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/$(dpkg --print-architecture)/kubectl" \
+    && chmod +x /usr/local/bin/kubectl
 
 WORKDIR /workspace
 

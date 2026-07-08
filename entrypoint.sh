@@ -99,6 +99,18 @@ storage, and on restart the entrypoint resumes the prior session via
 `RESUME_SESSION=false` to force a fresh session if a transcript is corrupt.
 A long-lived workspace file like `/workspace/session-notes.md` is still a good
 durable scratchpad, since it survives even a fresh (non-resumed) start.
+
+## Cluster access (read-only)
+
+`kubectl` is available and needs no kubeconfig — it auto-detects the in-cluster
+config from this pod's own ServiceAccount token. RBAC is READ-ONLY (get/list/
+watch, no create/update/patch/delete) on namespaces, resourcequotas, pods,
+deployments, and argoproj.io workflows/applications, cluster-wide (not just
+this namespace). The API server will reject any write attempt. Use this for
+diagnostics the mctl control plane doesn't cover directly — e.g. a tenant
+onboarding workflow that reached the cluster (namespace/quota created) but
+never finished registering, or checking real Argo Workflow / Application
+status.
 MD
 fi
 
