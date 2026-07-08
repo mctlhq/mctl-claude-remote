@@ -43,8 +43,15 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
 # kubeconfig needed: kubectl auto-detects in-cluster config from the mounted SA
 # token when KUBERNETES_SERVICE_HOST is set. dpkg --print-architecture keeps the
 # download portable if the build later goes multi-arch (mirrors the gh install).
-RUN curl -fsSL -o /usr/local/bin/kubectl \
-      "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/$(dpkg --print-architecture)/kubectl" \
+# Checksum-verified against dl.k8s.io's published sha256, same as any other
+# binary pulled straight from the internet into the image.
+RUN ARCH="$(dpkg --print-architecture)" \
+    && curl -fsSL -o /usr/local/bin/kubectl \
+         "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl" \
+    && curl -fsSL -o /tmp/kubectl.sha256 \
+         "https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux/${ARCH}/kubectl.sha256" \
+    && echo "$(cat /tmp/kubectl.sha256)  /usr/local/bin/kubectl" | sha256sum -c - \
+    && rm -f /tmp/kubectl.sha256 \
     && chmod +x /usr/local/bin/kubectl
 
 WORKDIR /workspace
