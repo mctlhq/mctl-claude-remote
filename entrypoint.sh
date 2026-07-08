@@ -12,14 +12,15 @@ echo "[entrypoint] HOME=$HOME"
 # workspace, a kubeconfig written there by a previous interactive session
 # (e.g. someone running `kubectl config set-cluster` to point at an external
 # cluster) would silently persist across restarts and permanently override
-# the in-cluster ServiceAccount identity/RBAC. Unset any inherited
-# KUBECONFIG on every start so in-cluster auto-detection always wins;
-# $HOME/.kube is deliberately left alone (not force-deleted) since only an
-# explicit kubectl invocation would ever create it — warn instead so it's
-# visible in logs rather than silently changing kubectl's behavior.
-unset KUBECONFIG
+# the in-cluster ServiceAccount identity/RBAC. An inherited env var alone
+# isn't enough to fix — a leftover $HOME/.kube/config file would still win.
+# Point KUBECONFIG at /dev/null instead: an empty/unreadable explicit
+# kubeconfig makes kubectl's config loader find no usable context, and it
+# falls through to in-cluster auto-detection (the standard technique for
+# forcing in-cluster auth regardless of what's on disk).
+export KUBECONFIG=/dev/null
 if [ -f "$HOME/.kube/config" ]; then
-  echo "[entrypoint] WARN \$HOME/.kube/config exists; kubectl will use it instead of in-cluster auto-detection" >&2
+  echo "[entrypoint] WARN \$HOME/.kube/config exists but KUBECONFIG=/dev/null forces in-cluster auto-detection" >&2
 fi
 
 # Seed first-run config if onboarding hasn't been completed yet. Required
@@ -130,11 +131,10 @@ on how this pod was deployed:
   in-cluster config from the mounted ServiceAccount token. Run
   `kubectl auth can-i --list` to see exactly what's actually granted, rather
   than assuming.
-- A leftover kubeconfig at `$HOME/.kube/config` (e.g. from a prior
-  `kubectl config set-cluster`) or an inherited `KUBECONFIG` env var takes
-  precedence over in-cluster auto-detection — the entrypoint unsets
-  `KUBECONFIG` on every start, but a config *file* is left alone and would
-  still win, so avoid creating one unless you mean to point elsewhere.
+- The entrypoint forces `KUBECONFIG=/dev/null` on every start, so kubectl
+  always uses in-cluster auto-detection regardless of any kubeconfig left in
+  `$HOME/.kube/config` by a prior session — that file, if present, is inert
+  and ignored, not a way to point kubectl elsewhere from inside a session.
 
 Use this for diagnostics the mctl control plane doesn't cover directly — e.g.
 a tenant onboarding workflow that reached the cluster (namespace/quota
