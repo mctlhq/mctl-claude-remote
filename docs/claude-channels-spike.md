@@ -32,7 +32,11 @@ Contract (verified against the docs and a Go prototype):
 1. **The flags exist in the pinned runtime.** `--channels <servers...>` and
    `--dangerously-load-development-channels <servers...>` are present (though
    hidden from `--help`) in Claude Code **2.1.198** (the image pin) and
-   2.1.209. Headless `-p` mode does **not** support channels.
+   2.1.209. `-p`/`--print` (non-interactive) mode is documented to support
+   channels — the real constraint is that `-p` is one-shot: the process
+   exits after its turn, so a channel notification only reaches it if
+   something is already invoking `-p` per event, not because channels and
+   `-p` are incompatible.
 
 2. **A Go / `mark3labs/mcp-go` server is accepted as a channel.** A minimal
    Go stdio server declaring the `claude/channel` experimental capability and
@@ -83,8 +87,12 @@ by content rather than by fixed sleeps.
 ## Options
 
 - **Option A — separate Channels process/deployment.** A dedicated
-  `mctl-communication-agent` pod runs `claude --channels server:agent-channel
-  [--remote-control …]`; the Go `cmd/agent-channel` bridge long-polls the
+  `mctl-communication-agent` pod runs `claude
+  --dangerously-load-development-channels server:agent-channel
+  [--remote-control …]` — **not** `--channels`, which per the docs is for
+  allowlisted `plugin:<name>@<marketplace>` entries and will not register a
+  bare `.mcp.json` server like `agent-channel`; combining both flags does not
+  extend the bypass either. The Go `cmd/agent-channel` bridge long-polls the
   mctl-telegram agent API and pushes `notifications/claude/channel`. Requires
   solving the per-launch dev-channel confirm in the headless entrypoint (a PTY
   driver in `entrypoint.sh` that answers the dialog, or an approved-allowlist
