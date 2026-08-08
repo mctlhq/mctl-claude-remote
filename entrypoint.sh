@@ -33,6 +33,9 @@ if [ ! -f /workspace/.claude.json ] || \
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
+  "hasDismissedFullscreenRendererPrompt": true,
+  "preferredRenderer": "standard",
+  "useFullscreenRenderer": false,
   "autoUpdates": true,
   "projects": {
     "/workspace": { "hasTrustDialogAccepted": true }
@@ -41,7 +44,7 @@ if [ ! -f /workspace/.claude.json ] || \
 JSON
 fi
 
-# Always ensure settings.json suppresses the bypass-permissions warning dialog.
+# Always ensure settings.json suppresses the bypass-permissions warning dialog and renderer prompts.
 # Without skipDangerousModePermissionPrompt, --dangerously-skip-permissions
 # blocks at a "Yes, I accept" prompt that we can't answer non-interactively.
 # resumeReturnDismissed is a belt-and-suspenders modal suppressor: it persists
@@ -55,25 +58,29 @@ if [ ! -f /workspace/.claude/settings.json ] || \
   "permissions": { "defaultMode": "auto", "allow_bypass_permissions": true },
   "skipDangerousModePermissionPrompt": true,
   "skipAutoPermissionPrompt": true,
+  "hasDismissedFullscreenRendererPrompt": true,
+  "preferredRenderer": "standard",
+  "useFullscreenRenderer": false,
   "resumeReturnDismissed": true
 }
 JSON
 fi
 
-# Idempotently FORCE resumeReturnDismissed=true on a settings.json that already
-# exists from an earlier image (the heredoc above only seeds fresh installs).
-# We check the actual value (not just key presence): a persisted "false" — e.g.
-# Claude writing its default before this image runs — must be flipped to true,
-# otherwise the resume modal stays enabled for exactly the existing-workspace
-# case this block exists to repair. jq set preserves any operator-added keys.
+# Idempotently FORCE resumeReturnDismissed=true and fullscreen renderer suppression on a settings.json / .claude.json
+# that already exists from an earlier image or restored from S3 storage.
 if [ -f /workspace/.claude/settings.json ]; then
-  cur=$(jq -r '.resumeReturnDismissed // empty' /workspace/.claude/settings.json 2>/dev/null || echo "")
-  if [ "$cur" != "true" ]; then
-    if merged=$(jq '.resumeReturnDismissed = true' /workspace/.claude/settings.json 2>/dev/null) && \
-       [ -n "$merged" ]; then
-      printf '%s\n' "$merged" > /workspace/.claude/settings.json
-      echo "[entrypoint] settings: set resumeReturnDismissed=true (was '${cur:-absent}')"
-    fi
+  if merged=$(jq '.resumeReturnDismissed = true | .hasDismissedFullscreenRendererPrompt = true | .preferredRenderer = "standard" | .useFullscreenRenderer = false' /workspace/.claude/settings.json 2>/dev/null) && \
+     [ -n "$merged" ]; then
+    printf '%s\n' "$merged" > /workspace/.claude/settings.json
+    echo "[entrypoint] settings: set resumeReturnDismissed=true & renderer prompt suppressed"
+  fi
+fi
+
+if [ -f /workspace/.claude.json ]; then
+  if merged=$(jq '.hasDismissedFullscreenRendererPrompt = true | .preferredRenderer = "standard" | .useFullscreenRenderer = false' /workspace/.claude.json 2>/dev/null) && \
+     [ -n "$merged" ]; then
+    printf '%s\n' "$merged" > /workspace/.claude.json
+    echo "[entrypoint] config: set renderer prompt suppressed in .claude.json"
   fi
 fi
 
