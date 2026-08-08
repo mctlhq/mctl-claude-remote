@@ -1,0 +1,17 @@
+name: Agy PR review
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, ready_for_review]
+
+permissions: {}
+
+jobs:
+  agy-review:
+    uses: mctlhq/.github/.github/workflows/agy-review.yml@main
+    permissions:
+      contents: read
+      pull-requests: write
+    with:
+      conventions: |
+        Focus on: Shell script safety & POSIX compliance (`entrypoint.sh`), Node.js health proxy event-loop & socket handling (`health-proxy.js`), Dockerfile multi-stage build & container security hardening (non-root, capability drop), GitHub App token minting & secret hygiene (`bin/gh-app-token`), pr-steward automation correctness, and healthz endpoint probe reliability.
