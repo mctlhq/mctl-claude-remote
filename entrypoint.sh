@@ -33,9 +33,7 @@ if [ ! -f /workspace/.claude.json ] || \
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
-  "hasDismissedFullscreenRendererPrompt": true,
-  "preferredRenderer": "standard",
-  "useFullscreenRenderer": false,
+  "fullscreenUpsellSeenCount": 3,
   "autoUpdates": true,
   "projects": {
     "/workspace": { "hasTrustDialogAccepted": true }
@@ -51,6 +49,17 @@ fi
 # the "don't ask me again" choice for the resume-from-summary modal, so a headless
 # (stdin=/dev/null) --remote-control bridge never wedges on it even if a future
 # Claude Code update renames the CLAUDE_CODE_RESUME_* env-var gate.
+#
+# "tui" is what actually suppresses the "Try the new fullscreen renderer?" dialog.
+# Its gate reads, verified in the pinned 2.1.198 binary:
+#   if (kr().tui !== void 0) return false;                        <- settings.json
+#   if ((Ot().fullscreenUpsellSeenCount ?? 0) >= 3) return false; <- .claude.json
+# The schema is tui: enum(["default","fullscreen"]).optional(), so "default" is the
+# only value that pins the current renderer. An earlier attempt at this fix wrote
+# hasDismissedFullscreenRendererPrompt / preferredRenderer / useFullscreenRenderer;
+# none of those three strings occur anywhere in the binary, so the dialog kept firing
+# and parked the headless session (deployed 0.10.1 wedged on it in labs on 2026-08-23).
+# Grep the shipped binary before changing these keys again.
 if [ ! -f /workspace/.claude/settings.json ] || \
    ! grep -q '"skipDangerousModePermissionPrompt"[[:space:]]*:[[:space:]]*true' /workspace/.claude/settings.json; then
   cat > /workspace/.claude/settings.json <<'JSON'
@@ -58,29 +67,54 @@ if [ ! -f /workspace/.claude/settings.json ] || \
   "permissions": { "defaultMode": "auto", "allow_bypass_permissions": true },
   "skipDangerousModePermissionPrompt": true,
   "skipAutoPermissionPrompt": true,
-  "hasDismissedFullscreenRendererPrompt": true,
-  "preferredRenderer": "standard",
-  "useFullscreenRenderer": false,
+  "tui": "default",
   "resumeReturnDismissed": true
 }
 JSON
 fi
 
-# Idempotently FORCE resumeReturnDismissed=true and fullscreen renderer suppression on a settings.json / .claude.json
-# that already exists from an earlier image or restored from S3 storage.
+# Idempotently FORCE the modal suppressors on a settings.json / .claude.json that
+# already exists from an earlier image or was restored from S3 storage (the heredocs
+# above only seed fresh installs). We check the actual values, not just key presence:
+# a persisted "false" — e.g. Claude writing its default before this image runs — must
+# be flipped, otherwise the modal stays enabled for exactly the existing-workspace case
+# these blocks exist to repair. Skipping the write when nothing changes keeps the
+# s3-sync sidecar from re-uploading the file on every restart. jq set preserves any
+# operator-added keys. Also drop the three no-op keys a previous fix wrote, so a
+# workspace restored from MinIO stops carrying settings Claude Code does not read.
 if [ -f /workspace/.claude/settings.json ]; then
-  if merged=$(jq '.resumeReturnDismissed = true | .hasDismissedFullscreenRendererPrompt = true | .preferredRenderer = "standard" | .useFullscreenRenderer = false' /workspace/.claude/settings.json 2>/dev/null) && \
-     [ -n "$merged" ]; then
-    printf '%s\n' "$merged" > /workspace/.claude/settings.json
-    echo "[entrypoint] settings: set resumeReturnDismissed=true & renderer prompt suppressed"
+  needs_fix=$(jq -r 'if (.resumeReturnDismissed == true and .tui != null
+                         and has("hasDismissedFullscreenRendererPrompt") == false
+                         and has("preferredRenderer") == false
+                         and has("useFullscreenRenderer") == false)
+                     then "no" else "yes" end' /workspace/.claude/settings.json 2>/dev/null || echo "yes")
+  if [ "$needs_fix" = "yes" ]; then
+    if merged=$(jq '.resumeReturnDismissed = true
+                    | .tui = (.tui // "default")
+                    | del(.hasDismissedFullscreenRendererPrompt, .preferredRenderer, .useFullscreenRenderer)' \
+                  /workspace/.claude/settings.json 2>/dev/null) && [ -n "$merged" ]; then
+      printf '%s\n' "$merged" > /workspace/.claude/settings.json
+      echo "[entrypoint] settings: resumeReturnDismissed=true, tui pinned, stale renderer keys removed"
+    fi
   fi
 fi
 
+# Belt-and-suspenders for the same dialog via its other gate: the seen-count in the
+# global config. 3 is the threshold (Ges in the binary); max() so a real count that
+# already reached it is never lowered.
 if [ -f /workspace/.claude.json ]; then
-  if merged=$(jq '.hasDismissedFullscreenRendererPrompt = true | .preferredRenderer = "standard" | .useFullscreenRenderer = false' /workspace/.claude.json 2>/dev/null) && \
-     [ -n "$merged" ]; then
-    printf '%s\n' "$merged" > /workspace/.claude.json
-    echo "[entrypoint] config: set renderer prompt suppressed in .claude.json"
+  needs_fix=$(jq -r 'if ((.fullscreenUpsellSeenCount // 0) >= 3
+                         and has("hasDismissedFullscreenRendererPrompt") == false
+                         and has("preferredRenderer") == false
+                         and has("useFullscreenRenderer") == false)
+                     then "no" else "yes" end' /workspace/.claude.json 2>/dev/null || echo "yes")
+  if [ "$needs_fix" = "yes" ]; then
+    if merged=$(jq '.fullscreenUpsellSeenCount = ([(.fullscreenUpsellSeenCount // 0), 3] | max)
+                    | del(.hasDismissedFullscreenRendererPrompt, .preferredRenderer, .useFullscreenRenderer)' \
+                  /workspace/.claude.json 2>/dev/null) && [ -n "$merged" ]; then
+      printf '%s\n' "$merged" > /workspace/.claude.json
+      echo "[entrypoint] config: fullscreenUpsellSeenCount>=3, stale renderer keys removed"
+    fi
   fi
 fi
 
