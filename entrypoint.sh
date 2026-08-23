@@ -23,13 +23,42 @@ if [ -f "$HOME/.kube/config" ]; then
   echo "[entrypoint] WARN \$HOME/.kube/config exists but KUBECONFIG=/dev/null forces in-cluster auto-detection" >&2
 fi
 
+FULLSCREEN_UPSELL_THRESHOLD=3   # Ges in the pinned binary; the dialog stops at >=
+# Atomic config write: temp file in the SAME directory as the destination, then mv.
+# A plain `> file` truncates to 0 bytes before the new content lands, and the s3-sync
+# sidecar mirrors /workspace on a 60 s timer, so a tick sampling inside that window
+# uploads an empty config to MinIO — which restore-state then hands back on the next
+# restart. mv within one directory is atomic, so a reader sees only the old or the new
+# file. Same reasoning covers a pod killed mid-write.
+#
+# mktemp (not "$1.$$.<stamp>"): it creates the file O_EXCL with an unguessable name and
+# mode 600, so there is no window for a pre-created symlink and no reliance on $$ — which
+# is always 1 here, since this script is the container's PID 1. The template keeps the
+# .tmp SUFFIX because the sidecar's mirror passes `--exclude '*.tmp'` and that glob only
+# matches a trailing extension; a mirror tick inside the write window would otherwise
+# upload the temp file to MinIO as a permanent stray object.
+write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on failure
+  _wja_dst="$1"
+  _wja_tmp=$(mktemp "$_wja_dst.XXXXXX.tmp" 2>/dev/null) || return 1
+  # mv replaces the destination inode, so the new file would otherwise keep mktemp's
+  # 600 instead of whatever the destination had. Copy the mode across when the
+  # destination exists; a freshly seeded file keeps mktemp's restrictive default.
+  _wja_mode=$(stat -c '%a' "$_wja_dst" 2>/dev/null || echo 600)
+  if cat > "$_wja_tmp" && [ -s "$_wja_tmp" ] \
+     && chmod "$_wja_mode" "$_wja_tmp" && mv -f "$_wja_tmp" "$_wja_dst"; then
+    return 0
+  fi
+  rm -f "$_wja_tmp"
+  return 1
+}
+
 # Seed first-run config if onboarding hasn't been completed yet. Required
 # because no human is here to press keys at the theme/trust prompts.
 # We re-seed when a persisted workspace restore brought back a partial config
 # written before a previous crash.
 if [ ! -f /workspace/.claude.json ] || \
    ! grep -q '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true' /workspace/.claude.json; then
-  cat > /workspace/.claude.json <<'JSON'
+  if ! write_json_atomic /workspace/.claude.json <<'JSON'
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
@@ -40,6 +69,9 @@ if [ ! -f /workspace/.claude.json ] || \
   }
 }
 JSON
+  then
+    echo "[entrypoint] WARN could not seed .claude.json" >&2
+  fi
 fi
 
 # Always ensure settings.json suppresses the bypass-permissions warning dialog and renderer prompts.
@@ -66,7 +98,7 @@ fi
 # Grep the shipped binary before changing these keys again.
 if [ ! -f /workspace/.claude/settings.json ] || \
    ! grep -q '"skipDangerousModePermissionPrompt"[[:space:]]*:[[:space:]]*true' /workspace/.claude/settings.json; then
-  cat > /workspace/.claude/settings.json <<'JSON'
+  if ! write_json_atomic /workspace/.claude/settings.json <<'JSON'
 {
   "permissions": { "defaultMode": "auto", "allow_bypass_permissions": true },
   "skipDangerousModePermissionPrompt": true,
@@ -75,6 +107,9 @@ if [ ! -f /workspace/.claude/settings.json ] || \
   "resumeReturnDismissed": true
 }
 JSON
+  then
+    echo "[entrypoint] WARN could not seed settings.json" >&2
+  fi
 fi
 
 # Idempotently FORCE the modal suppressors on a settings.json / .claude.json that
@@ -93,26 +128,6 @@ fi
 # one in MinIO — and restore-state would hand it back on the next restart. mv within
 # the same directory is atomic, so a reader only ever sees the old or the new file.
 # Same reasoning covers a pod killed mid-write.
-FULLSCREEN_UPSELL_THRESHOLD=3   # Ges in the pinned binary; the dialog stops at >=
-write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on failure
-  # $$ is 1 for this script (it is the container's PID 1), so it is not unique on
-  # its own; add a nanosecond stamp. mktemp is avoided so the temp file lands in the
-  # SAME directory as the destination — mv is only atomic within one filesystem.
-  # The name must END in .tmp: the s3-sync sidecar's mirror passes `--exclude '*.tmp'`,
-  # and that glob only matches a trailing extension. A middle-infix name like
-  # "settings.json.tmp.1.<ns>" is NOT excluded, so a mirror tick landing inside the
-  # write window would upload the temp file to MinIO as a permanent stray object.
-  _wja_tmp="$1.$$.$(date -u +%s%N).tmp"
-  # mv replaces the destination inode, so the new file would otherwise carry the
-  # umask-derived mode instead of whatever the destination had. Copy it across.
-  _wja_mode=$(stat -c '%a' "$1" 2>/dev/null || echo 600)
-  if cat > "$_wja_tmp" && [ -s "$_wja_tmp" ] \
-     && chmod "$_wja_mode" "$_wja_tmp" && mv -f "$_wja_tmp" "$1"; then
-    return 0
-  fi
-  rm -f "$_wja_tmp"
-  return 1
-}
 if [ -f /workspace/.claude/settings.json ]; then
   needs_fix=$(jq -r 'if (.resumeReturnDismissed == true
                          and (.tui == "default" or .tui == "fullscreen")
