@@ -55,7 +55,11 @@ fi
 #   if (kr().tui !== void 0) return false;                        <- settings.json
 #   if ((Ot().fullscreenUpsellSeenCount ?? 0) >= 3) return false; <- .claude.json
 # The schema is tui: enum(["default","fullscreen"]).optional(), so "default" is the
-# only value that pins the current renderer. An earlier attempt at this fix wrote
+# only value that pins the current renderer. Both the needs-fix guard and the repair
+# test against that enum rather than mere presence: a presence check (.tui != null)
+# would report "already correct" for tui:false or a bogus tui:"standard" while the
+# repair one block below would happily have fixed it — the guard and the repair must
+# never disagree, which is the same desync class as the duplicated threshold above. An earlier attempt at this fix wrote
 # hasDismissedFullscreenRendererPrompt / preferredRenderer / useFullscreenRenderer;
 # none of those three strings occur anywhere in the binary, so the dialog kept firing
 # and parked the headless session (deployed 0.10.1 wedged on it in labs on 2026-08-23).
@@ -110,14 +114,15 @@ write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on f
   return 1
 }
 if [ -f /workspace/.claude/settings.json ]; then
-  needs_fix=$(jq -r 'if (.resumeReturnDismissed == true and .tui != null
+  needs_fix=$(jq -r 'if (.resumeReturnDismissed == true
+                         and (.tui == "default" or .tui == "fullscreen")
                          and has("hasDismissedFullscreenRendererPrompt") == false
                          and has("preferredRenderer") == false
                          and has("useFullscreenRenderer") == false)
                      then "no" else "yes" end' /workspace/.claude/settings.json 2>/dev/null || echo "yes")
   if [ "$needs_fix" = "yes" ]; then
     if merged=$(jq '.resumeReturnDismissed = true
-                    | .tui = (.tui // "default")
+                    | .tui = (if (.tui == "default" or .tui == "fullscreen") then .tui else "default" end)
                     | del(.hasDismissedFullscreenRendererPrompt, .preferredRenderer, .useFullscreenRenderer)' \
                   /workspace/.claude/settings.json 2>/dev/null) && [ -n "$merged" ]; then
       if printf '%s\n' "$merged" | write_json_atomic /workspace/.claude/settings.json; then
