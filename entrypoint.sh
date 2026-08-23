@@ -23,25 +23,55 @@ if [ -f "$HOME/.kube/config" ]; then
   echo "[entrypoint] WARN \$HOME/.kube/config exists but KUBECONFIG=/dev/null forces in-cluster auto-detection" >&2
 fi
 
+FULLSCREEN_UPSELL_THRESHOLD=3   # Ges in the pinned binary; the dialog stops at >=
+# Atomic config write: temp file in the SAME directory as the destination, then mv.
+# A plain `> file` truncates to 0 bytes before the new content lands, and the s3-sync
+# sidecar mirrors /workspace on a 60 s timer, so a tick sampling inside that window
+# uploads an empty config to MinIO — which restore-state then hands back on the next
+# restart. mv within one directory is atomic, so a reader sees only the old or the new
+# file. Same reasoning covers a pod killed mid-write.
+#
+# mktemp (not "$1.$$.<stamp>"): it creates the file O_EXCL with an unguessable name and
+# mode 600, so there is no window for a pre-created symlink and no reliance on $$ — which
+# is always 1 here, since this script is the container's PID 1. The template keeps the
+# .tmp SUFFIX because the sidecar's mirror passes `--exclude '*.tmp'` and that glob only
+# matches a trailing extension; a mirror tick inside the write window would otherwise
+# upload the temp file to MinIO as a permanent stray object.
+write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on failure
+  _wja_dst="$1"
+  _wja_tmp=$(mktemp "$_wja_dst.XXXXXX.tmp" 2>/dev/null) || return 1
+  # mv replaces the destination inode, so the new file would otherwise keep mktemp's
+  # 600 instead of whatever the destination had. Copy the mode across when the
+  # destination exists; a freshly seeded file keeps mktemp's restrictive default.
+  _wja_mode=$(stat -c '%a' "$_wja_dst" 2>/dev/null || echo 600)
+  if cat > "$_wja_tmp" && [ -s "$_wja_tmp" ] \
+     && chmod "$_wja_mode" "$_wja_tmp" && mv -f "$_wja_tmp" "$_wja_dst"; then
+    return 0
+  fi
+  rm -f "$_wja_tmp"
+  return 1
+}
+
 # Seed first-run config if onboarding hasn't been completed yet. Required
 # because no human is here to press keys at the theme/trust prompts.
 # We re-seed when a persisted workspace restore brought back a partial config
 # written before a previous crash.
 if [ ! -f /workspace/.claude.json ] || \
    ! grep -q '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true' /workspace/.claude.json; then
-  cat > /workspace/.claude.json <<'JSON'
+  if ! write_json_atomic /workspace/.claude.json <<'JSON'
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
-  "hasDismissedFullscreenRendererPrompt": true,
-  "preferredRenderer": "standard",
-  "useFullscreenRenderer": false,
+  "fullscreenUpsellSeenCount": 3,
   "autoUpdates": true,
   "projects": {
     "/workspace": { "hasTrustDialogAccepted": true }
   }
 }
 JSON
+  then
+    echo "[entrypoint] WARN could not seed .claude.json" >&2
+  fi
 fi
 
 # Always ensure settings.json suppresses the bypass-permissions warning dialog and renderer prompts.
@@ -51,36 +81,94 @@ fi
 # the "don't ask me again" choice for the resume-from-summary modal, so a headless
 # (stdin=/dev/null) --remote-control bridge never wedges on it even if a future
 # Claude Code update renames the CLAUDE_CODE_RESUME_* env-var gate.
+#
+# "tui" is what actually suppresses the "Try the new fullscreen renderer?" dialog.
+# Its gate reads, verified in the pinned 2.1.198 binary:
+#   if (kr().tui !== void 0) return false;                        <- settings.json
+#   if ((Ot().fullscreenUpsellSeenCount ?? 0) >= 3) return false; <- .claude.json
+# The schema is tui: enum(["default","fullscreen"]).optional(), so "default" is the
+# only value that pins the current renderer. Both the needs-fix guard and the repair
+# test against that enum rather than mere presence: a presence check (.tui != null)
+# would report "already correct" for tui:false or a bogus tui:"standard" while the
+# repair one block below would happily have fixed it — the guard and the repair must
+# never disagree, which is the same desync class as the duplicated threshold above. An earlier attempt at this fix wrote
+# hasDismissedFullscreenRendererPrompt / preferredRenderer / useFullscreenRenderer;
+# none of those three strings occur anywhere in the binary, so the dialog kept firing
+# and parked the headless session (deployed 0.10.1 wedged on it in labs on 2026-08-23).
+# Grep the shipped binary before changing these keys again.
 if [ ! -f /workspace/.claude/settings.json ] || \
    ! grep -q '"skipDangerousModePermissionPrompt"[[:space:]]*:[[:space:]]*true' /workspace/.claude/settings.json; then
-  cat > /workspace/.claude/settings.json <<'JSON'
+  if ! write_json_atomic /workspace/.claude/settings.json <<'JSON'
 {
   "permissions": { "defaultMode": "auto", "allow_bypass_permissions": true },
   "skipDangerousModePermissionPrompt": true,
   "skipAutoPermissionPrompt": true,
-  "hasDismissedFullscreenRendererPrompt": true,
-  "preferredRenderer": "standard",
-  "useFullscreenRenderer": false,
+  "tui": "default",
   "resumeReturnDismissed": true
 }
 JSON
-fi
-
-# Idempotently FORCE resumeReturnDismissed=true and fullscreen renderer suppression on a settings.json / .claude.json
-# that already exists from an earlier image or restored from S3 storage.
-if [ -f /workspace/.claude/settings.json ]; then
-  if merged=$(jq '.resumeReturnDismissed = true | .hasDismissedFullscreenRendererPrompt = true | .preferredRenderer = "standard" | .useFullscreenRenderer = false' /workspace/.claude/settings.json 2>/dev/null) && \
-     [ -n "$merged" ]; then
-    printf '%s\n' "$merged" > /workspace/.claude/settings.json
-    echo "[entrypoint] settings: set resumeReturnDismissed=true & renderer prompt suppressed"
+  then
+    echo "[entrypoint] WARN could not seed settings.json" >&2
   fi
 fi
 
+# Idempotently FORCE the modal suppressors on a settings.json / .claude.json that
+# already exists from an earlier image or was restored from S3 storage (the heredocs
+# above only seed fresh installs). We check the actual values, not just key presence:
+# a persisted "false" — e.g. Claude writing its default before this image runs — must
+# be flipped, otherwise the modal stays enabled for exactly the existing-workspace case
+# these blocks exist to repair. Skipping the write when nothing changes keeps the
+# s3-sync sidecar from re-uploading the file on every restart. jq set preserves any
+# operator-added keys. Also drop the three no-op keys a previous fix wrote, so a
+# workspace restored from MinIO stops carrying settings Claude Code does not read.
+#
+# Writes go through a temp file + mv. `> file` truncates to 0 bytes before the new
+# content lands, and the s3-sync sidecar mirrors /workspace on a 60 s timer, so a
+# tick that samples inside that window would upload an empty config over the good
+# one in MinIO — and restore-state would hand it back on the next restart. mv within
+# the same directory is atomic, so a reader only ever sees the old or the new file.
+# Same reasoning covers a pod killed mid-write.
+if [ -f /workspace/.claude/settings.json ]; then
+  needs_fix=$(jq -r 'if (.resumeReturnDismissed == true
+                         and (.tui == "default" or .tui == "fullscreen")
+                         and has("hasDismissedFullscreenRendererPrompt") == false
+                         and has("preferredRenderer") == false
+                         and has("useFullscreenRenderer") == false)
+                     then "no" else "yes" end' /workspace/.claude/settings.json 2>/dev/null || echo "yes")
+  if [ "$needs_fix" = "yes" ]; then
+    if merged=$(jq '.resumeReturnDismissed = true
+                    | .tui = (if (.tui == "default" or .tui == "fullscreen") then .tui else "default" end)
+                    | del(.hasDismissedFullscreenRendererPrompt, .preferredRenderer, .useFullscreenRenderer)' \
+                  /workspace/.claude/settings.json 2>/dev/null) && [ -n "$merged" ]; then
+      if printf '%s\n' "$merged" | write_json_atomic /workspace/.claude/settings.json; then
+        echo "[entrypoint] settings: resumeReturnDismissed=true, tui pinned, stale renderer keys removed"
+      else
+        echo "[entrypoint] WARN could not rewrite settings.json; left as-is" >&2
+      fi
+    fi
+  fi
+fi
+
+# Belt-and-suspenders for the same dialog via its other gate: the seen-count in the
+# global config. The threshold lives in FULLSCREEN_UPSELL_THRESHOLD above (Ges in the
+# binary) and is passed to both jq programs, so the needs-fix check and the repair can
+# never disagree; max() so a real count that already reached it is never lowered.
 if [ -f /workspace/.claude.json ]; then
-  if merged=$(jq '.hasDismissedFullscreenRendererPrompt = true | .preferredRenderer = "standard" | .useFullscreenRenderer = false' /workspace/.claude.json 2>/dev/null) && \
-     [ -n "$merged" ]; then
-    printf '%s\n' "$merged" > /workspace/.claude.json
-    echo "[entrypoint] config: set renderer prompt suppressed in .claude.json"
+  needs_fix=$(jq -r --argjson t "$FULLSCREEN_UPSELL_THRESHOLD" 'if ((.fullscreenUpsellSeenCount // 0) >= $t
+                         and has("hasDismissedFullscreenRendererPrompt") == false
+                         and has("preferredRenderer") == false
+                         and has("useFullscreenRenderer") == false)
+                     then "no" else "yes" end' /workspace/.claude.json 2>/dev/null || echo "yes")
+  if [ "$needs_fix" = "yes" ]; then
+    if merged=$(jq --argjson t "$FULLSCREEN_UPSELL_THRESHOLD" '.fullscreenUpsellSeenCount = ([(.fullscreenUpsellSeenCount // 0), $t] | max)
+                    | del(.hasDismissedFullscreenRendererPrompt, .preferredRenderer, .useFullscreenRenderer)' \
+                  /workspace/.claude.json 2>/dev/null) && [ -n "$merged" ]; then
+      if printf '%s\n' "$merged" | write_json_atomic /workspace/.claude.json; then
+        echo "[entrypoint] config: fullscreenUpsellSeenCount pinned, stale renderer keys removed"
+      else
+        echo "[entrypoint] WARN could not rewrite .claude.json; left as-is" >&2
+      fi
+    fi
   fi
 fi
 
