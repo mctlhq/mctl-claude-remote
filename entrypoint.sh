@@ -91,8 +91,16 @@ fi
 # Same reasoning covers a pod killed mid-write.
 FULLSCREEN_UPSELL_THRESHOLD=3   # Ges in the pinned binary; the dialog stops at >=
 write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on failure
-  _wja_tmp="$1.tmp.$$"
-  if cat > "$_wja_tmp" && [ -s "$_wja_tmp" ] && mv -f "$_wja_tmp" "$1"; then
+  # $$ is 1 for this script (it is the container's PID 1), so it is not unique on
+  # its own; add the destination basename and a nanosecond stamp. mktemp is avoided
+  # so the temp file lands in the SAME directory as the destination — mv is only
+  # atomic within one filesystem.
+  _wja_tmp="$1.tmp.$$.$(date -u +%s%N)"
+  # mv replaces the destination inode, so the new file would otherwise carry the
+  # umask-derived mode instead of whatever the destination had. Copy it across.
+  _wja_mode=$(stat -c '%a' "$1" 2>/dev/null || echo 600)
+  if cat > "$_wja_tmp" && [ -s "$_wja_tmp" ] \
+     && chmod "$_wja_mode" "$_wja_tmp" && mv -f "$_wja_tmp" "$1"; then
     return 0
   fi
   rm -f "$_wja_tmp"
