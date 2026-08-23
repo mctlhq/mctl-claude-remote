@@ -92,10 +92,13 @@ fi
 FULLSCREEN_UPSELL_THRESHOLD=3   # Ges in the pinned binary; the dialog stops at >=
 write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on failure
   # $$ is 1 for this script (it is the container's PID 1), so it is not unique on
-  # its own; add the destination basename and a nanosecond stamp. mktemp is avoided
-  # so the temp file lands in the SAME directory as the destination — mv is only
-  # atomic within one filesystem.
-  _wja_tmp="$1.tmp.$$.$(date -u +%s%N)"
+  # its own; add a nanosecond stamp. mktemp is avoided so the temp file lands in the
+  # SAME directory as the destination — mv is only atomic within one filesystem.
+  # The name must END in .tmp: the s3-sync sidecar's mirror passes `--exclude '*.tmp'`,
+  # and that glob only matches a trailing extension. A middle-infix name like
+  # "settings.json.tmp.1.<ns>" is NOT excluded, so a mirror tick landing inside the
+  # write window would upload the temp file to MinIO as a permanent stray object.
+  _wja_tmp="$1.$$.$(date -u +%s%N).tmp"
   # mv replaces the destination inode, so the new file would otherwise carry the
   # umask-derived mode instead of whatever the destination had. Copy it across.
   _wja_mode=$(stat -c '%a' "$1" 2>/dev/null || echo 600)
