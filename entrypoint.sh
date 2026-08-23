@@ -82,6 +82,22 @@ fi
 # s3-sync sidecar from re-uploading the file on every restart. jq set preserves any
 # operator-added keys. Also drop the three no-op keys a previous fix wrote, so a
 # workspace restored from MinIO stops carrying settings Claude Code does not read.
+#
+# Writes go through a temp file + mv. `> file` truncates to 0 bytes before the new
+# content lands, and the s3-sync sidecar mirrors /workspace on a 60 s timer, so a
+# tick that samples inside that window would upload an empty config over the good
+# one in MinIO — and restore-state would hand it back on the next restart. mv within
+# the same directory is atomic, so a reader only ever sees the old or the new file.
+# Same reasoning covers a pod killed mid-write.
+FULLSCREEN_UPSELL_THRESHOLD=3   # Ges in the pinned binary; the dialog stops at >=
+write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on failure
+  _wja_tmp="$1.tmp.$$"
+  if cat > "$_wja_tmp" && [ -s "$_wja_tmp" ] && mv -f "$_wja_tmp" "$1"; then
+    return 0
+  fi
+  rm -f "$_wja_tmp"
+  return 1
+}
 if [ -f /workspace/.claude/settings.json ]; then
   needs_fix=$(jq -r 'if (.resumeReturnDismissed == true and .tui != null
                          and has("hasDismissedFullscreenRendererPrompt") == false
@@ -93,27 +109,34 @@ if [ -f /workspace/.claude/settings.json ]; then
                     | .tui = (.tui // "default")
                     | del(.hasDismissedFullscreenRendererPrompt, .preferredRenderer, .useFullscreenRenderer)' \
                   /workspace/.claude/settings.json 2>/dev/null) && [ -n "$merged" ]; then
-      printf '%s\n' "$merged" > /workspace/.claude/settings.json
-      echo "[entrypoint] settings: resumeReturnDismissed=true, tui pinned, stale renderer keys removed"
+      if printf '%s\n' "$merged" | write_json_atomic /workspace/.claude/settings.json; then
+        echo "[entrypoint] settings: resumeReturnDismissed=true, tui pinned, stale renderer keys removed"
+      else
+        echo "[entrypoint] WARN could not rewrite settings.json; left as-is" >&2
+      fi
     fi
   fi
 fi
 
 # Belt-and-suspenders for the same dialog via its other gate: the seen-count in the
-# global config. 3 is the threshold (Ges in the binary); max() so a real count that
-# already reached it is never lowered.
+# global config. The threshold lives in FULLSCREEN_UPSELL_THRESHOLD above (Ges in the
+# binary) and is passed to both jq programs, so the needs-fix check and the repair can
+# never disagree; max() so a real count that already reached it is never lowered.
 if [ -f /workspace/.claude.json ]; then
-  needs_fix=$(jq -r 'if ((.fullscreenUpsellSeenCount // 0) >= 3
+  needs_fix=$(jq -r --argjson t "$FULLSCREEN_UPSELL_THRESHOLD" 'if ((.fullscreenUpsellSeenCount // 0) >= $t
                          and has("hasDismissedFullscreenRendererPrompt") == false
                          and has("preferredRenderer") == false
                          and has("useFullscreenRenderer") == false)
                      then "no" else "yes" end' /workspace/.claude.json 2>/dev/null || echo "yes")
   if [ "$needs_fix" = "yes" ]; then
-    if merged=$(jq '.fullscreenUpsellSeenCount = ([(.fullscreenUpsellSeenCount // 0), 3] | max)
+    if merged=$(jq --argjson t "$FULLSCREEN_UPSELL_THRESHOLD" '.fullscreenUpsellSeenCount = ([(.fullscreenUpsellSeenCount // 0), $t] | max)
                     | del(.hasDismissedFullscreenRendererPrompt, .preferredRenderer, .useFullscreenRenderer)' \
                   /workspace/.claude.json 2>/dev/null) && [ -n "$merged" ]; then
-      printf '%s\n' "$merged" > /workspace/.claude.json
-      echo "[entrypoint] config: fullscreenUpsellSeenCount>=3, stale renderer keys removed"
+      if printf '%s\n' "$merged" | write_json_atomic /workspace/.claude.json; then
+        echo "[entrypoint] config: fullscreenUpsellSeenCount pinned, stale renderer keys removed"
+      else
+        echo "[entrypoint] WARN could not rewrite .claude.json; left as-is" >&2
+      fi
     fi
   fi
 fi
