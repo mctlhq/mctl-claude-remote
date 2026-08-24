@@ -46,7 +46,16 @@ write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on f
     echo "[entrypoint] WARN $_wja_dst is a directory; refusing to write" >&2
     return 1
   fi
-  _wja_tmp=$(mktemp "$_wja_dst.XXXXXX.tmp" 2>/dev/null) || return 1
+  # GNU mktemp (this image is node:22-slim) accepts X's before a suffix, verified
+  # against the shipped image. BusyBox/BSD mktemp require them to be trailing, so
+  # fall back to a trailing-X template and rename — the name must keep the .tmp
+  # suffix either way, because the s3-sync mirror's `--exclude '*.tmp'` only
+  # matches a trailing extension.
+  _wja_tmp=$(mktemp "$_wja_dst.XXXXXX.tmp" 2>/dev/null) || {
+    _wja_base=$(mktemp "$_wja_dst.XXXXXX" 2>/dev/null) || return 1
+    _wja_tmp="$_wja_base.tmp"
+    mv -f "$_wja_base" "$_wja_tmp" 2>/dev/null || { rm -f "$_wja_base"; return 1; }
+  }
   # mv replaces the destination inode, so the new file would otherwise keep mktemp's
   # 600 instead of whatever the destination had. Copy the mode across when the
   # destination exists; a freshly seeded file keeps mktemp's restrictive default.
@@ -71,7 +80,7 @@ write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on f
 # to false was enough to wipe `projects` trust state and every operator-added
 # setting. See issue #39.
 ensure_json() {  # $1 dst, $2 jq program -> "ok"/"no", $3 jq merge filter; stdin = seed
-  _ej_dst="$1"; _ej_ok="$2"; _ej_merge="$3"
+  _ej_dst="$1"; _ej_ok="$2"; _ej_merge="$3"; _ej_bak=""
   _ej_seed=$(cat)
   if [ -f "$_ej_dst" ] && jq -e . "$_ej_dst" >/dev/null 2>&1; then
     if [ "$(jq -r "$_ej_ok" "$_ej_dst" 2>/dev/null || echo no)" = "ok" ]; then
@@ -110,6 +119,14 @@ ensure_json() {  # $1 dst, $2 jq program -> "ok"/"no", $3 jq merge filter; stdin
     return 0
   fi
   echo "[entrypoint] WARN could not seed $_ej_dst" >&2
+  # The original was already moved aside, so a failed write here would leave the
+  # workspace with NO config at all — worse than the state we started from. Put
+  # it back; a bad config still beats a missing one, and the WARN above says why.
+  if [ -n "$_ej_bak" ] && [ -e "$_ej_bak" ] && [ ! -e "$_ej_dst" ]; then
+    if mv -f "$_ej_bak" "$_ej_dst" 2>/dev/null; then
+      echo "[entrypoint] WARN restored the previous $_ej_dst after the failed seed" >&2
+    fi
+  fi
   return 1
 }
 
