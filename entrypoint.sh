@@ -125,6 +125,11 @@ ensure_json() {  # $1 dst, $2 jq program -> "ok"/"no", $3 jq merge filter; stdin
   if [ -n "$_ej_bak" ] && [ -e "$_ej_bak" ] && [ ! -e "$_ej_dst" ]; then
     if mv -f "$_ej_bak" "$_ej_dst" 2>/dev/null; then
       echo "[entrypoint] WARN restored the previous $_ej_dst after the failed seed" >&2
+    else
+      # Both the seed and the restore failed. Say where the only surviving copy
+      # is: without this the operator sees "could not seed" and no hint that the
+      # previous config is sitting next to it under a .corrupt name.
+      echo "[entrypoint] WARN $_ej_dst is MISSING; the previous copy is at $_ej_bak" >&2
     fi
   fi
   return 1
