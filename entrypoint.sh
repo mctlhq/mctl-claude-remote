@@ -39,6 +39,13 @@ FULLSCREEN_UPSELL_THRESHOLD=3   # Ges in the pinned binary; the dialog stops at 
 # upload the temp file to MinIO as a permanent stray object.
 write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on failure
   _wja_dst="$1"
+  # A directory at the destination would make `mv` move the temp file INTO it and
+  # exit 0, so the caller would believe it had written a config that does not
+  # exist. Callers are expected to move a directory aside first; refuse here too.
+  if [ -d "$_wja_dst" ]; then
+    echo "[entrypoint] WARN $_wja_dst is a directory; refusing to write" >&2
+    return 1
+  fi
   _wja_tmp=$(mktemp "$_wja_dst.XXXXXX.tmp" 2>/dev/null) || return 1
   # mv replaces the destination inode, so the new file would otherwise keep mktemp's
   # 600 instead of whatever the destination had. Copy the mode across when the
@@ -75,13 +82,27 @@ ensure_json() {  # $1 dst, $2 jq program -> "ok"/"no", $3 jq merge filter; stdin
       echo "[entrypoint] merged required keys into $_ej_dst (existing settings preserved)"
       return 0
     fi
-    echo "[entrypoint] WARN could not merge required keys into $_ej_dst; left as-is" >&2
-    return 1
+    # Valid JSON, but the merge could not be applied — e.g. the root is an array,
+    # or a key's parent is the wrong type (`.projects` a string, `.permissions`
+    # false), which makes jq exit with a type error. Leaving the file as-is would
+    # start the agent without the dialog suppressors and wedge it headlessly, and
+    # the grep-based predecessor DID overwrite this case. Fall through to
+    # preserve-and-seed rather than regress on it.
+    echo "[entrypoint] WARN $_ej_dst has an incompatible structure; preserving it and re-seeding" >&2
   fi
-  if [ -f "$_ej_dst" ]; then
+  # Anything still at the destination that we could not merge into — unparseable,
+  # structurally incompatible, or a DIRECTORY (mv would otherwise move the temp
+  # file INTO it and report success) — is set aside, never discarded.
+  if [ -e "$_ej_dst" ]; then
     _ej_bak="$_ej_dst.corrupt.$(date -u +%s)"
     if mv -f "$_ej_dst" "$_ej_bak" 2>/dev/null; then
-      echo "[entrypoint] WARN $_ej_dst was unparseable; kept it as $_ej_bak" >&2
+      echo "[entrypoint] WARN kept the previous $_ej_dst as $_ej_bak" >&2
+    else
+      # Could not set it aside; do NOT overwrite it blind — that would destroy the
+      # very thing this branch exists to keep. A same-directory rename failing
+      # means the directory is not writable, so the seed below would fail anyway.
+      echo "[entrypoint] WARN could not preserve $_ej_dst; refusing to overwrite it" >&2
+      return 1
     fi
   fi
   if printf '%s\n' "$_ej_seed" | write_json_atomic "$_ej_dst"; then
