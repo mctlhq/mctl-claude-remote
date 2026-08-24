@@ -39,7 +39,23 @@ FULLSCREEN_UPSELL_THRESHOLD=3   # Ges in the pinned binary; the dialog stops at 
 # upload the temp file to MinIO as a permanent stray object.
 write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on failure
   _wja_dst="$1"
-  _wja_tmp=$(mktemp "$_wja_dst.XXXXXX.tmp" 2>/dev/null) || return 1
+  # A directory at the destination would make `mv` move the temp file INTO it and
+  # exit 0, so the caller would believe it had written a config that does not
+  # exist. Callers are expected to move a directory aside first; refuse here too.
+  if [ -d "$_wja_dst" ]; then
+    echo "[entrypoint] WARN $_wja_dst is a directory; refusing to write" >&2
+    return 1
+  fi
+  # GNU mktemp (this image is node:22-slim) accepts X's before a suffix, verified
+  # against the shipped image. BusyBox/BSD mktemp require them to be trailing, so
+  # fall back to a trailing-X template and rename — the name must keep the .tmp
+  # suffix either way, because the s3-sync mirror's `--exclude '*.tmp'` only
+  # matches a trailing extension.
+  _wja_tmp=$(mktemp "$_wja_dst.XXXXXX.tmp" 2>/dev/null) || {
+    _wja_base=$(mktemp "$_wja_dst.XXXXXX" 2>/dev/null) || return 1
+    _wja_tmp="$_wja_base.tmp"
+    mv -f "$_wja_base" "$_wja_tmp" 2>/dev/null || { rm -f "$_wja_base"; return 1; }
+  }
   # mv replaces the destination inode, so the new file would otherwise keep mktemp's
   # 600 instead of whatever the destination had. Copy the mode across when the
   # destination exists; a freshly seeded file keeps mktemp's restrictive default.
@@ -52,13 +68,83 @@ write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on f
   return 1
 }
 
+# Ensure a config file has the keys we require, WITHOUT destroying anything else
+# in it. Three cases, in order:
+#   absent      -> seed from the template on stdin
+#   unparseable -> keep a .corrupt.<epoch> copy, then seed (this is the
+#                  crash-repair case the old grep check was really catching)
+#   present+valid -> merge the required keys with jq; every other key survives
+#
+# The previous shape decided all of this with a line-oriented `grep` for one key
+# and, on a miss, overwrote the WHOLE file from the template. A key explicitly set
+# to false was enough to wipe `projects` trust state and every operator-added
+# setting. See issue #39.
+ensure_json() {  # $1 dst, $2 jq program -> "ok"/"no", $3 jq merge filter; stdin = seed
+  _ej_dst="$1"; _ej_ok="$2"; _ej_merge="$3"; _ej_bak=""
+  _ej_seed=$(cat)
+  if [ -f "$_ej_dst" ] && jq -e . "$_ej_dst" >/dev/null 2>&1; then
+    if [ "$(jq -r "$_ej_ok" "$_ej_dst" 2>/dev/null || echo no)" = "ok" ]; then
+      return 0
+    fi
+    if _ej_merged=$(jq "$_ej_merge" "$_ej_dst" 2>/dev/null) && [ -n "$_ej_merged" ] \
+       && printf '%s\n' "$_ej_merged" | write_json_atomic "$_ej_dst"; then
+      echo "[entrypoint] merged required keys into $_ej_dst (existing settings preserved)"
+      return 0
+    fi
+    # Valid JSON, but the merge could not be applied — e.g. the root is an array,
+    # or a key's parent is the wrong type (`.projects` a string, `.permissions`
+    # false), which makes jq exit with a type error. Leaving the file as-is would
+    # start the agent without the dialog suppressors and wedge it headlessly, and
+    # the grep-based predecessor DID overwrite this case. Fall through to
+    # preserve-and-seed rather than regress on it.
+    echo "[entrypoint] WARN $_ej_dst has an incompatible structure; preserving it and re-seeding" >&2
+  fi
+  # Anything still at the destination that we could not merge into — unparseable,
+  # structurally incompatible, or a DIRECTORY (mv would otherwise move the temp
+  # file INTO it and report success) — is set aside, never discarded.
+  if [ -e "$_ej_dst" ]; then
+    _ej_bak="$_ej_dst.corrupt.$(date -u +%s)"
+    if mv -f "$_ej_dst" "$_ej_bak" 2>/dev/null; then
+      echo "[entrypoint] WARN kept the previous $_ej_dst as $_ej_bak" >&2
+    else
+      # Could not set it aside; do NOT overwrite it blind — that would destroy the
+      # very thing this branch exists to keep. A same-directory rename failing
+      # means the directory is not writable, so the seed below would fail anyway.
+      echo "[entrypoint] WARN could not preserve $_ej_dst; refusing to overwrite it" >&2
+      return 1
+    fi
+  fi
+  if printf '%s\n' "$_ej_seed" | write_json_atomic "$_ej_dst"; then
+    echo "[entrypoint] seeded $_ej_dst"
+    return 0
+  fi
+  echo "[entrypoint] WARN could not seed $_ej_dst" >&2
+  # The original was already moved aside, so a failed write here would leave the
+  # workspace with NO config at all — worse than the state we started from. Put
+  # it back; a bad config still beats a missing one, and the WARN above says why.
+  if [ -n "$_ej_bak" ] && [ -e "$_ej_bak" ] && [ ! -e "$_ej_dst" ]; then
+    if mv -f "$_ej_bak" "$_ej_dst" 2>/dev/null; then
+      echo "[entrypoint] WARN restored the previous $_ej_dst after the failed seed" >&2
+    else
+      # Both the seed and the restore failed. Say where the only surviving copy
+      # is: without this the operator sees "could not seed" and no hint that the
+      # previous config is sitting next to it under a .corrupt name.
+      echo "[entrypoint] WARN $_ej_dst is MISSING; the previous copy is at $_ej_bak" >&2
+    fi
+  fi
+  return 1
+}
+
 # Seed first-run config if onboarding hasn't been completed yet. Required
 # because no human is here to press keys at the theme/trust prompts.
 # We re-seed when a persisted workspace restore brought back a partial config
 # written before a previous crash.
-if [ ! -f /workspace/.claude.json ] || \
-   ! grep -q '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true' /workspace/.claude.json; then
-  if ! write_json_atomic /workspace/.claude.json <<'JSON'
+ensure_json /workspace/.claude.json \
+  'if (.hasCompletedOnboarding == true
+       and (.projects["/workspace"].hasTrustDialogAccepted? == true))
+   then "ok" else "no" end' \
+  '.hasCompletedOnboarding = true
+   | .projects["/workspace"].hasTrustDialogAccepted = true' <<'JSON' || true
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
@@ -69,10 +155,6 @@ if [ ! -f /workspace/.claude.json ] || \
   }
 }
 JSON
-  then
-    echo "[entrypoint] WARN could not seed .claude.json" >&2
-  fi
-fi
 
 # Always ensure settings.json suppresses the bypass-permissions warning dialog and renderer prompts.
 # Without skipDangerousModePermissionPrompt, --dangerously-skip-permissions
@@ -96,9 +178,16 @@ fi
 # none of those three strings occur anywhere in the binary, so the dialog kept firing
 # and parked the headless session (deployed 0.10.1 wedged on it in labs on 2026-08-23).
 # Grep the shipped binary before changing these keys again.
-if [ ! -f /workspace/.claude/settings.json ] || \
-   ! grep -q '"skipDangerousModePermissionPrompt"[[:space:]]*:[[:space:]]*true' /workspace/.claude/settings.json; then
-  if ! write_json_atomic /workspace/.claude/settings.json <<'JSON'
+ensure_json /workspace/.claude/settings.json \
+  'if (.skipDangerousModePermissionPrompt == true
+       and .skipAutoPermissionPrompt == true
+       and .permissions.defaultMode? == "auto"
+       and .permissions.allow_bypass_permissions? == true)
+   then "ok" else "no" end' \
+  '.skipDangerousModePermissionPrompt = true
+   | .skipAutoPermissionPrompt = true
+   | .permissions.defaultMode = "auto"
+   | .permissions.allow_bypass_permissions = true' <<'JSON' || true
 {
   "permissions": { "defaultMode": "auto", "allow_bypass_permissions": true },
   "skipDangerousModePermissionPrompt": true,
@@ -107,10 +196,6 @@ if [ ! -f /workspace/.claude/settings.json ] || \
   "resumeReturnDismissed": true
 }
 JSON
-  then
-    echo "[entrypoint] WARN could not seed settings.json" >&2
-  fi
-fi
 
 # Idempotently FORCE the modal suppressors on a settings.json / .claude.json that
 # already exists from an earlier image or was restored from S3 storage (the heredocs
