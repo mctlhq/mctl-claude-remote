@@ -52,13 +52,56 @@ write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on f
   return 1
 }
 
+# Ensure a config file has the keys we require, WITHOUT destroying anything else
+# in it. Three cases, in order:
+#   absent      -> seed from the template on stdin
+#   unparseable -> keep a .corrupt.<epoch> copy, then seed (this is the
+#                  crash-repair case the old grep check was really catching)
+#   present+valid -> merge the required keys with jq; every other key survives
+#
+# The previous shape decided all of this with a line-oriented `grep` for one key
+# and, on a miss, overwrote the WHOLE file from the template. A key explicitly set
+# to false was enough to wipe `projects` trust state and every operator-added
+# setting. See issue #39.
+ensure_json() {  # $1 dst, $2 jq program -> "ok"/"no", $3 jq merge filter; stdin = seed
+  _ej_dst="$1"; _ej_ok="$2"; _ej_merge="$3"
+  _ej_seed=$(cat)
+  if [ -f "$_ej_dst" ] && jq -e . "$_ej_dst" >/dev/null 2>&1; then
+    if [ "$(jq -r "$_ej_ok" "$_ej_dst" 2>/dev/null || echo no)" = "ok" ]; then
+      return 0
+    fi
+    if _ej_merged=$(jq "$_ej_merge" "$_ej_dst" 2>/dev/null) && [ -n "$_ej_merged" ] \
+       && printf '%s\n' "$_ej_merged" | write_json_atomic "$_ej_dst"; then
+      echo "[entrypoint] merged required keys into $_ej_dst (existing settings preserved)"
+      return 0
+    fi
+    echo "[entrypoint] WARN could not merge required keys into $_ej_dst; left as-is" >&2
+    return 1
+  fi
+  if [ -f "$_ej_dst" ]; then
+    _ej_bak="$_ej_dst.corrupt.$(date -u +%s)"
+    if mv -f "$_ej_dst" "$_ej_bak" 2>/dev/null; then
+      echo "[entrypoint] WARN $_ej_dst was unparseable; kept it as $_ej_bak" >&2
+    fi
+  fi
+  if printf '%s\n' "$_ej_seed" | write_json_atomic "$_ej_dst"; then
+    echo "[entrypoint] seeded $_ej_dst"
+    return 0
+  fi
+  echo "[entrypoint] WARN could not seed $_ej_dst" >&2
+  return 1
+}
+
 # Seed first-run config if onboarding hasn't been completed yet. Required
 # because no human is here to press keys at the theme/trust prompts.
 # We re-seed when a persisted workspace restore brought back a partial config
 # written before a previous crash.
-if [ ! -f /workspace/.claude.json ] || \
-   ! grep -q '"hasCompletedOnboarding"[[:space:]]*:[[:space:]]*true' /workspace/.claude.json; then
-  if ! write_json_atomic /workspace/.claude.json <<'JSON'
+ensure_json /workspace/.claude.json \
+  'if (.hasCompletedOnboarding == true
+       and (.projects["/workspace"].hasTrustDialogAccepted? == true))
+   then "ok" else "no" end' \
+  '.hasCompletedOnboarding = true
+   | .projects["/workspace"].hasTrustDialogAccepted = true' <<'JSON' || true
 {
   "theme": "dark",
   "hasCompletedOnboarding": true,
@@ -69,10 +112,6 @@ if [ ! -f /workspace/.claude.json ] || \
   }
 }
 JSON
-  then
-    echo "[entrypoint] WARN could not seed .claude.json" >&2
-  fi
-fi
 
 # Always ensure settings.json suppresses the bypass-permissions warning dialog and renderer prompts.
 # Without skipDangerousModePermissionPrompt, --dangerously-skip-permissions
@@ -96,9 +135,16 @@ fi
 # none of those three strings occur anywhere in the binary, so the dialog kept firing
 # and parked the headless session (deployed 0.10.1 wedged on it in labs on 2026-08-23).
 # Grep the shipped binary before changing these keys again.
-if [ ! -f /workspace/.claude/settings.json ] || \
-   ! grep -q '"skipDangerousModePermissionPrompt"[[:space:]]*:[[:space:]]*true' /workspace/.claude/settings.json; then
-  if ! write_json_atomic /workspace/.claude/settings.json <<'JSON'
+ensure_json /workspace/.claude/settings.json \
+  'if (.skipDangerousModePermissionPrompt == true
+       and .skipAutoPermissionPrompt == true
+       and .permissions.defaultMode? == "auto"
+       and .permissions.allow_bypass_permissions? == true)
+   then "ok" else "no" end' \
+  '.skipDangerousModePermissionPrompt = true
+   | .skipAutoPermissionPrompt = true
+   | .permissions.defaultMode = "auto"
+   | .permissions.allow_bypass_permissions = true' <<'JSON' || true
 {
   "permissions": { "defaultMode": "auto", "allow_bypass_permissions": true },
   "skipDangerousModePermissionPrompt": true,
@@ -107,10 +153,6 @@ if [ ! -f /workspace/.claude/settings.json ] || \
   "resumeReturnDismissed": true
 }
 JSON
-  then
-    echo "[entrypoint] WARN could not seed settings.json" >&2
-  fi
-fi
 
 # Idempotently FORCE the modal suppressors on a settings.json / .claude.json that
 # already exists from an earlier image or was restored from S3 storage (the heredocs
