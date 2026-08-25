@@ -266,10 +266,19 @@ fi
 # on the keep-list) and the steward silently lost the ability to commit. Set it here
 # so a fresh workspace, a restored one, and a pruned one all behave the same.
 #
+# Identity is the GitHub App's own bot user, so commits are attributed to the app
+# that pushed them rather than to a person. The email MUST carry the BOT USER's
+# numeric id (286814665), not the app id (3802616) -- GitHub links a commit to the
+# bot by that id, and the app id silently produces an unlinked commit. Resolved
+# from /orgs/mctlhq/installations (app_id 3802616 -> slug mctl-claude-remote,
+# matching GH_APP_ID/GH_APP_INSTALLATION_ID in this deployment) and then
+# /users/mctl-claude-remote[bot].
+#
 # --global writes /workspace/.gitconfig ($HOME). Only set what is missing, so an
 # operator override survives. The credential helper is NOT set here: the steward
 # skill re-establishes it every tick from the rotating token file.
-for _gi in "user.name=mctl-claude-remote steward" "user.email=steward@mctl.ai"; do
+for _gi in "user.name=mctl-claude-remote[bot]" \
+           "user.email=286814665+mctl-claude-remote[bot]@users.noreply.github.com"; do
   _gk=${_gi%%=*}; _gv=${_gi#*=}
   if [ -z "$(git config --global --get "$_gk" 2>/dev/null)" ]; then
     git config --global "$_gk" "$_gv" && echo "[entrypoint] git: set $_gk"
