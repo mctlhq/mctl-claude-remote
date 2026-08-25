@@ -281,7 +281,15 @@ for _gi in "user.name=mctl-claude-remote[bot]" \
            "user.email=286814665+mctl-claude-remote[bot]@users.noreply.github.com"; do
   _gk=${_gi%%=*}; _gv=${_gi#*=}
   if [ -z "$(git config --global --get "$_gk" 2>/dev/null)" ]; then
-    git config --global "$_gk" "$_gv" && echo "[entrypoint] git: set $_gk"
+    # Guarded: `set -e` is active, and an unguarded failure here would abort the
+    # entrypoint (PID 1) and take the whole device down over a config write —
+    # e.g. .gitconfig left as a directory by a bad restore, or a disk-full blip.
+    # Losing the identity degrades the steward; losing the device is worse.
+    if git config --global "$_gk" "$_gv" 2>/dev/null; then
+      echo "[entrypoint] git: set $_gk"
+    else
+      echo "[entrypoint] WARN could not set git $_gk; steward commits may fail" >&2
+    fi
   fi
 done
 
