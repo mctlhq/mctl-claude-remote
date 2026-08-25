@@ -257,6 +257,25 @@ if [ -f /workspace/.claude.json ]; then
   fi
 fi
 
+# Give git a commit identity. The pr-steward commits review fixes and pushes them
+# (skills/pr-steward/SKILL.md), but nothing in this image or that skill ever set
+# user.name/user.email — a fresh workspace has none, and git then refuses with
+# "Author identity unknown" rather than guessing. It only worked at all because an
+# operator had once set it by hand, which is exactly the kind of state that does
+# not survive: the s3-sync GC pruned /workspace/.gitconfig on 2026-08-25 (it is not
+# on the keep-list) and the steward silently lost the ability to commit. Set it here
+# so a fresh workspace, a restored one, and a pruned one all behave the same.
+#
+# --global writes /workspace/.gitconfig ($HOME). Only set what is missing, so an
+# operator override survives. The credential helper is NOT set here: the steward
+# skill re-establishes it every tick from the rotating token file.
+for _gi in "user.name=mctl-claude-remote steward" "user.email=steward@mctl.ai"; do
+  _gk=${_gi%%=*}; _gv=${_gi#*=}
+  if [ -z "$(git config --global --get "$_gk" 2>/dev/null)" ]; then
+    git config --global "$_gk" "$_gv" && echo "[entrypoint] git: set $_gk"
+  fi
+done
+
 # Seed a CLAUDE.md if the workspace doesn't have one yet. This gives Claude
 # context about its environment on every new session. Users can override by
 # writing their own CLAUDE.md to the persistent volume.
