@@ -17,12 +17,13 @@ jobs:
       issues: write
       id-token: write
     with:
-      # dependabot is listed so its PRs get reviewed automatically.
-      # Without it claude-code-action hard-fails with "Workflow initiated
-      # by non-human actor", and since branch protection requires an
-      # approving review, dependabot PRs then sit unmergeable until a
-      # maintainer triggers a review by hand.
-      allowed-bots: "mctl-claude-remote,github-actions,dependabot"
+      # dependabot and mctl-agents are listed so their PRs get reviewed
+      # automatically. Without the slug claude-code-action hard-fails with
+      # "Workflow initiated by non-human actor", and since branch protection
+      # requires an approving review, those PRs then sit unmergeable until a
+      # maintainer triggers a review by hand. mctl-agents is the App the
+      # DevLoop implementer and release-please run under across the org.
+      allowed-bots: "mctl-claude-remote,github-actions,dependabot,mctl-agents"
       sensitive-paths: '^(entrypoint\.sh|health-proxy\.js|skills/pr-steward/)'
       conventions: |
         This repo packages a self-hosted `claude --remote-control` device
