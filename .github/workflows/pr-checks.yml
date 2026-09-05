@@ -23,7 +23,7 @@ jobs:
         run: node --check health-proxy.js
 
       - name: Docker build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: false
