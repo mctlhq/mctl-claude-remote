@@ -291,6 +291,11 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
 | `MCTL_EVENTS_POLICY` | **path** to a JSON routing policy file, not inline JSON (the format is defined by the loader in `events/mctl_events/policy.py`) |
 | `CLAUDE_PTY_ANSWER_WINDOW_SECONDS` | seconds after launch during which the PTY launcher answers the startup dialogs (default `120`); later output is never answered, even if it repeats a dialog's words |
 
+Operating it — reading the audit trail with the read-only `events-observer`
+user, what `pending` and `lag` mean, why a saturated `max_inflight` stalls every
+stream at once, and which symptoms are worth acting on — is in
+[docs/events-operations.md](docs/events-operations.md).
+
 The development-channels flag shows a confirmation on every launch that nothing
 persists, so with the channel enabled the session runs under
 `bin/claude-pty-launch`, which answers that dialog (and only the dialogs it
