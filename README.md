@@ -232,7 +232,8 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
 
 - **Events are references, not content.** The adapter accepts only closed
   `mctl.events/v1` envelopes (`events/mctl_events/envelope.py`); an envelope with
-  an extra field, a nested subject value or more than 4 KiB is rejected. Claude
+  an extra field, a nested subject value, a subject value that is not an
+  identifier (whitespace, quotes, brackets) or more than 4 KiB is rejected. Claude
   hydrates the current state from the subject references, so a stale event is
   harmless. A second stream entry for an event that is still in flight is not
   delivered again and is acknowledged with the first; deduplication after an
@@ -245,7 +246,10 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
 - **New groups start at the tail.** The first time the adapter creates its
   consumer group it starts at `$`, so a new session is not flooded with the
   retained history; set `"group_start": "0"` in the policy to replay it. After
-  that the position lives in Valkey and every restart resumes from it.
+  that the group's read position lives in Valkey, so a restart reads only
+  entries it has not seen. Entries delivered before the restart but never
+  acknowledged stay pending and are not re-read; reclaiming them with
+  `XAUTOCLAIM` arrives with mctlhq/mctl-claude-remote#55.
 - **Deny by default.** `MCTL_EVENTS_POLICY` lists the streams, sources, event
   types and subject values this session may be woken by; anything else is
   acknowledged and audited as `skipped`.

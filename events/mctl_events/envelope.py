@@ -31,6 +31,10 @@ _RFC3339 = re.compile(
     r"(\.\d+)?(Z|[+-]([01]\d|2[0-3]):[0-5]\d)$"
 )
 _KIND = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$")
+# A subject value is an identifier (a number, `user:42`, `owner/repo`, a SHA),
+# never prose: no whitespace, quotes or brackets, so a free-text sentence cannot
+# travel in a reference-shaped key such as `subject.text`.
+_SUBJECT_VALUE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/@#+=-]*$")
 MAX_KIND = 64
 MAX_SUBJECT_KEYS = 12
 MAX_SUBJECT_VALUE = 256
@@ -127,12 +131,8 @@ def from_dict(doc: Any) -> Envelope:
             raise InvalidEnvelope(f"subject.{key} must be a string")
         if not value or len(value) > MAX_SUBJECT_VALUE:
             raise InvalidEnvelope(f"subject.{key} must be 1..{MAX_SUBJECT_VALUE} characters")
-        try:
-            # JSON can carry a lone surrogate (\ud800) that is a valid Python
-            # str but not encodable, and would fail later on the wire.
-            value.encode("utf-8")
-        except UnicodeEncodeError as exc:
-            raise InvalidEnvelope(f"subject.{key} is not valid Unicode") from exc
+        if not _SUBJECT_VALUE.fullmatch(value):
+            raise InvalidEnvelope(f"subject.{key} must be an identifier, not free text")
         normalized[key] = value
     return Envelope(
         id=doc["id"],

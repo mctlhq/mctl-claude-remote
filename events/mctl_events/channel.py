@@ -109,6 +109,10 @@ def notification_for(env: envelope_mod.Envelope, attempt: int) -> dict[str, Any]
             "params": {"content": content, "meta": meta}}
 
 
+class DeliveryFailed(RuntimeError):
+    """The notification could not be written to Claude; the entry stays pending."""
+
+
 @dataclass
 class Inflight:
     envelope: envelope_mod.Envelope
@@ -232,7 +236,16 @@ class Adapter:
             item = Inflight(env, 1, time.time(), [(stream, entry_id)])
             self.inflight[env.id] = item
             self.audit("received", env.id, env.correlation_id, stream=stream, entry_id=entry_id)
-            self.emit(notification_for(env, item.attempt))
+            try:
+                self.emit(notification_for(env, item.attempt))
+            except Exception as exc:  # noqa: BLE001 - e.g. BrokenPipeError when Claude closed stdio
+                # Not delivered, so not acknowledged: release the slot and leave
+                # the entry pending for recovery instead of losing the event.
+                del self.inflight[env.id]
+                self._lock.notify_all()
+                self.audit("delivery_failed", env.id, env.correlation_id, stream=stream,
+                           entry_id=entry_id, reason=type(exc).__name__)
+                raise DeliveryFailed(str(exc)) from exc
             self.audit("delivered", env.id, env.correlation_id, attempt=item.attempt)
 
     def forget_entry(self, stream: str, entry_id: str) -> None:
@@ -276,6 +289,10 @@ class Adapter:
                 fields = dict(zip(flat[::2], flat[1::2]))
                 try:
                     self.handle(stream_name.decode(), entry_id.decode(), fields)
+                except DeliveryFailed as exc:
+                    # Checked before OSError: a closed stdio pipe is not Valkey
+                    # trouble, and reconnecting would not deliver it either.
+                    _log("delivery failed; entry left pending", entry_id=entry_id.decode(), error=str(exc)[:300])
                 except (ValkeyError, ValkeyConnectionError, OSError):
                     raise  # transport trouble: reconnect in run()
                 except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the consumer
