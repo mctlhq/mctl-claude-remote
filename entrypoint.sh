@@ -702,12 +702,14 @@ relay_tls_established() {
 }
 
 # Echo the PID of the remote-control claude leaf — cmdline has --remote-control
-# and is not a script/sh wrapper (nor a `claude -p` steward tick, which has no
-# --remote-control).
+# and is not a script/sh wrapper, nor the claude-pty-launch wrapper (a SIGKILL
+# there would orphan the PTY child), nor a `claude -p` steward tick, which has
+# no --remote-control.
 find_claude_pid() {
   for p in /proc/[0-9]*; do
     [ -r "$p/cmdline" ] || continue
     cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
+    case "$cmd" in *claude-pty-launch*) continue ;; esac
     case "$cmd" in *--remote-control*) ;; *) continue ;; esac
     first=${cmd%% *}
     case "${first##*/}" in script|sh|bash|dash|env) continue ;; esac
