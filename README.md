@@ -266,7 +266,8 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
 | `MCTL_EVENTS_VALKEY_PASSWORD_FILE` | file holding the `claude-remote` ACL user's password |
 | `MCTL_EVENTS_TELEGRAM_MCP_URL` | optional https URL of the mctl-telegram MCP used to hydrate `telegram.message.*` events (registered as server `mctl-telegram`) |
 | `MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE` | file holding a **read-only** mctl-telegram worker token; exported as `MCTL_TELEGRAM_MCP_TOKEN` and referenced from the MCP header, never written to the config |
-| `MCTL_EVENTS_POLICY` | **path** to a JSON routing policy file (`events/mctl_events/policy.py`), not inline JSON |
+| `MCTL_EVENTS_POLICY` | **path** to a JSON routing policy file, not inline JSON (the format is defined by the loader in `events/mctl_events/policy.py`) |
+| `CLAUDE_PTY_ANSWER_WINDOW_SECONDS` | seconds after launch during which the PTY launcher answers the startup dialogs (default `120`); later output is never answered, even if it repeats a dialog's words |
 
 The development-channels flag shows a confirmation on every launch that nothing
 persists, so with the channel enabled the session runs under

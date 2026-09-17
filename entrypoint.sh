@@ -917,7 +917,7 @@ if [ "$MCTL_EVENTS_ENABLED" = "true" ]; then
       *) echo "[entrypoint] ERROR MCTL_EVENTS_TELEGRAM_MCP_URL must be https" >&2; exit 2 ;;
     esac
     case "$MCTL_EVENTS_TELEGRAM_MCP_URL" in
-      *[\"\\\ ]*) echo "[entrypoint] ERROR MCTL_EVENTS_TELEGRAM_MCP_URL contains a quote, backslash or space" >&2; exit 2 ;;
+      *[\"\\\ ]*|*[[:cntrl:]]*) echo "[entrypoint] ERROR MCTL_EVENTS_TELEGRAM_MCP_URL contains a quote, backslash, space or control character" >&2; exit 2 ;;
     esac
     : "${MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE:?MCTL_EVENTS_TELEGRAM_MCP_URL requires MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE}"
     if [ ! -r "$MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE" ]; then

@@ -13,6 +13,12 @@ answered, and only with the option this deployment already chose on its command
 line (it passed the development-channels flag and --dangerously-skip-permissions).
 Anything else is left alone.
 
+Answering is confined to a startup window. The dialogs only appear while the
+session starts, but the running session keeps printing -- model output, tool
+results, file contents -- and any of it can contain a dialog's words. Keys typed
+into a live session on a text match would be input nobody chose, so once the
+window closes the launcher only copies output.
+
 Output is copied to stdout so the container log keeps the session transcript, as
 `script ... /dev/stdout` did. SIGTERM/SIGINT are forwarded; the exit status is the
 child's.
@@ -76,6 +82,8 @@ def main(argv: list[str]) -> int:
         return 2
     settle = float(os.environ.get("CLAUDE_PTY_ANSWER_DELAY_SECONDS", "1.0"))
     cooldown = float(os.environ.get("CLAUDE_PTY_ANSWER_COOLDOWN_SECONDS", "5.0"))
+    window = float(os.environ.get("CLAUDE_PTY_ANSWER_WINDOW_SECONDS", "120"))
+    answer_until = time.monotonic() + window
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -115,6 +123,12 @@ def main(argv: list[str]) -> int:
             out.write(chunk)
             out.flush()
             # Keep a window across chunk boundaries: a dialog can be drawn in pieces.
+            if time.monotonic() >= answer_until:
+                if answer_until:
+                    log("startup window closed; no further dialogs are answered")
+                    answer_until = 0.0
+                    screen = b""
+                continue
             screen = (screen + chunk)[-WINDOW:]
             found = answer_for(screen, answered, time.monotonic(), cooldown)
             if found:

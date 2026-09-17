@@ -110,5 +110,32 @@ class LauncherRepeatTest(unittest.TestCase):
         self.assertEqual(2, proc.stderr.count(b"answered development-channels"))
 
 
+class LauncherStartupWindowTest(unittest.TestCase):
+    def test_dialog_text_in_a_running_session_is_not_answered(self) -> None:
+        # The session is past startup and prints a dialog's words as ordinary
+        # output (a transcript, a file); no key may be typed into it.
+        fake = textwrap.dedent(
+            """
+            import select, sys, time
+            time.sleep(0.6)
+            print("I am using this for local development", flush=True)
+            ready, _, _ = select.select([sys.stdin], [], [], 1.5)
+            print("typed" if ready else "untouched", flush=True)
+            """
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "fake_running.py"
+            script.write_text(fake)
+            proc = subprocess.run(
+                [sys.executable, str(LAUNCHER), "--", sys.executable, str(script)],
+                capture_output=True, timeout=30,
+                env={**os.environ, "CLAUDE_PTY_ANSWER_DELAY_SECONDS": "0.05",
+                     "CLAUDE_PTY_ANSWER_WINDOW_SECONDS": "0.3"},
+            )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        self.assertIn(b"untouched", proc.stdout)
+        self.assertNotIn(b"answered development-channels", proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()
