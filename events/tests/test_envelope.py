@@ -27,6 +27,12 @@ class EnvelopeTest(unittest.TestCase):
             "bad type": {**envelope(), "type": "Telegram Message"},
             "naive time": {**envelope(), "occurred_at": "2026-09-17T08:00:00"},
             "bad time": {**envelope(), "occurred_at": "2026-13-17T08:00:00Z"},
+            "integer subject": {**envelope(), "subject": {"kind": "x", "number": 12345678901234567890}},
+            "two-segment type": {**envelope(), "type": "telegram.message"},
+            "six-segment type": {**envelope(), "type": "a.b.c.d.e.f"},
+            "long kind": {**envelope(), "subject": {"kind": "a" * 65}},
+            "out of range time": {**envelope(), "occurred_at": "2026-99-99T99:99:99+99:99"},
+            "impossible date": {**envelope(), "occurred_at": "2026-02-30T08:00:00Z"},
             "too many keys": {**envelope(), "subject": {"kind": "x", **{f"k{i}": "v" for i in range(12)}}},
         }
         for name, doc in cases.items():

@@ -23,10 +23,15 @@ SPEC_VERSION = "mctl.events/v1"
 
 _FIELDS = {"specversion", "id", "type", "source", "occurred_at", "correlation_id", "subject"}
 _ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9:._/@#-]{0,255}$")
-_TYPE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+){1,5}$")
+_TYPE = re.compile(r"^[a-z0-9_]+\.[a-z0-9_]+\.[a-z0-9_]+$")
 _SOURCE = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}$")
 _SUBJECT_KEY = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
-_RFC3339 = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$")
+_RFC3339 = re.compile(
+    r"^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])T([01]\d|2[0-3]):[0-5]\d:([0-5]\d|60)"
+    r"(\.\d+)?(Z|[+-]([01]\d|2[0-3]):[0-5]\d)$"
+)
+_KIND = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)*$")
+MAX_KIND = 64
 MAX_SUBJECT_KEYS = 12
 MAX_SUBJECT_VALUE = 256
 MAX_ENVELOPE_BYTES = 4096
@@ -104,20 +109,22 @@ def from_dict(doc: Any) -> Envelope:
     subject = doc["subject"]
     if not isinstance(subject, dict) or "kind" not in subject:
         raise InvalidEnvelope("subject must be an object with a kind")
+    kind = subject["kind"]
+    if not isinstance(kind, str) or len(kind) > MAX_KIND or not _KIND.match(kind):
+        raise InvalidEnvelope(f"invalid subject.kind: {kind!r}")
     if len(subject) > MAX_SUBJECT_KEYS:
         raise InvalidEnvelope(f"subject has more than {MAX_SUBJECT_KEYS} keys")
     normalized: dict[str, str] = {}
     for key, value in subject.items():
         if not isinstance(key, str) or not _SUBJECT_KEY.match(key):
             raise InvalidEnvelope(f"invalid subject key {key!r}")
-        # References are scalars. A nested object or list is how a body would
-        # sneak in, so it is refused outright.
-        if isinstance(value, bool) or not isinstance(value, (str, int)):
-            raise InvalidEnvelope(f"subject.{key} must be a string or integer")
-        text = str(value)
-        if not text or len(text) > MAX_SUBJECT_VALUE:
+        # References are bounded strings. A nested object, list or unbounded
+        # number is how content (or an oversized value) would sneak in.
+        if not isinstance(value, str):
+            raise InvalidEnvelope(f"subject.{key} must be a string")
+        if not value or len(value) > MAX_SUBJECT_VALUE:
             raise InvalidEnvelope(f"subject.{key} must be 1..{MAX_SUBJECT_VALUE} characters")
-        normalized[key] = text
+        normalized[key] = value
     return Envelope(
         id=doc["id"],
         type=doc["type"],
