@@ -48,14 +48,22 @@ def log(message: str) -> None:
     sys.stderr.flush()
 
 
-def answer_for(screen: bytes, answered: dict[str, int]) -> tuple[str, bytes] | None:
-    """Return the dialog to answer if a new occurrence is on screen."""
+def answer_for(
+    screen: bytes, answered: dict[str, float], now: float, cooldown: float
+) -> tuple[str, bytes] | None:
+    """Return the dialog to answer if one is on screen and not just answered.
+
+    The screen buffer is cleared after each answer, so anything matched later is
+    newly drawn output. A redraw of the dialog we just answered (the TUI repaints
+    while it processes the key) arrives within the cooldown and is ignored; the
+    same dialog shown again later -- a second prompt, or one our keys did not
+    dismiss -- is answered again.
+    """
 
     flat = re.sub(rb"\s+", b"", ANSI.sub(b"", screen))
     for label, pattern, keys in DIALOGS:
-        hits = flat.count(pattern)
-        if hits > answered.get(label, 0):
-            answered[label] = hits
+        if pattern in flat and now - answered.get(label, float("-inf")) >= cooldown:
+            answered[label] = now
             return label, keys
     return None
 
@@ -67,6 +75,7 @@ def main(argv: list[str]) -> int:
         log("usage: claude-pty-launch -- <command> [args...]")
         return 2
     settle = float(os.environ.get("CLAUDE_PTY_ANSWER_DELAY_SECONDS", "1.0"))
+    cooldown = float(os.environ.get("CLAUDE_PTY_ANSWER_COOLDOWN_SECONDS", "5.0"))
 
     pid, fd = pty.fork()
     if pid == 0:
@@ -87,7 +96,7 @@ def main(argv: list[str]) -> int:
     signal.signal(signal.SIGINT, forward)
 
     screen = b""
-    answered: dict[str, int] = {}
+    answered: dict[str, float] = {}
     out = sys.stdout.buffer
     while True:
         try:
@@ -107,11 +116,12 @@ def main(argv: list[str]) -> int:
             out.flush()
             # Keep a window across chunk boundaries: a dialog can be drawn in pieces.
             screen = (screen + chunk)[-WINDOW:]
-            found = answer_for(screen, answered)
+            found = answer_for(screen, answered, time.monotonic(), cooldown)
             if found:
                 label, keys = found
                 time.sleep(settle)  # let the dialog finish drawing before keys arrive
                 os.write(fd, keys)
+                answered[label] = time.monotonic()  # cooldown counts from the keys, not the match
                 log(f"answered {label}")
                 screen = b""
         else:

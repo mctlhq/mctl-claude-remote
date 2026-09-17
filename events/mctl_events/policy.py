@@ -55,6 +55,12 @@ class Policy:
     dedup_ttl_seconds: int = 14 * 24 * 3600
     block_ms: int = 5000
     stream_maxlen: int = 10000
+    # Where a consumer group starts when the adapter creates it for the first
+    # time: "$" (default) = only events published from now on, so a new session
+    # is not flooded with up to stream_maxlen historical events; "0" = replay the
+    # retained stream. Once created, the group's position lives in Valkey and
+    # restarts resume from it either way.
+    group_start: str = "$"
 
     @property
     def streams(self) -> tuple[str, ...]:
@@ -81,12 +87,12 @@ def from_dict(doc: Any) -> Policy:
     if not isinstance(doc, dict):
         raise ValueError("policy must be an object")
     allowed = {"group", "consumer", "routes", "ack_timeout_seconds", "max_inflight",
-               "dedup_ttl_seconds", "block_ms", "stream_maxlen"}
+               "dedup_ttl_seconds", "block_ms", "stream_maxlen", "group_start"}
     unknown = sorted(set(doc) - allowed)
     if unknown:
         raise ValueError(f"unknown policy fields: {unknown}")
     for key in ("group", "consumer"):
-        if not isinstance(doc.get(key), str) or not _NAME.match(doc[key]):
+        if not isinstance(doc.get(key), str) or not _NAME.fullmatch(doc[key]):
             raise ValueError(f"{key} must match {_NAME.pattern}")
     routes_doc = doc.get("routes")
     if not isinstance(routes_doc, list):
@@ -97,9 +103,9 @@ def from_dict(doc: Any) -> Policy:
         if not isinstance(item, dict) or set(item) - {"stream", "sources", "types", "subject"}:
             raise ValueError(f"{where} must be an object with stream, sources, types and optional subject")
         stream = item.get("stream")
-        if not isinstance(stream, str) or not _STREAM.match(stream):
+        if not isinstance(stream, str) or not _STREAM.fullmatch(stream):
             raise ValueError(f"{where}.stream must match {_STREAM.pattern}")
-        if stream in RESERVED_STREAMS or stream.startswith("mctl:events:state"):
+        if stream in RESERVED_STREAMS:
             raise ValueError(f"{where}.stream {stream} is reserved for the adapter's own output")
         subject_doc = item.get("subject", {})
         if not isinstance(subject_doc, dict):
@@ -121,7 +127,14 @@ def from_dict(doc: Any) -> Policy:
         dedup_ttl_seconds=_positive(doc, "dedup_ttl_seconds", 14 * 24 * 3600),
         block_ms=_positive(doc, "block_ms", 5000),
         stream_maxlen=_positive(doc, "stream_maxlen", 10000),
+        group_start=_group_start(doc.get("group_start", "$")),
     )
+
+
+def _group_start(value: Any) -> str:
+    if value not in ("$", "0"):
+        raise ValueError('group_start must be "$" or "0"')
+    return value
 
 
 def load(path: Path) -> Policy:

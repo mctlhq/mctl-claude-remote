@@ -241,6 +241,10 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
 - **Acknowledged by Claude, not by the transport.** Channels have no delivery
   acknowledgement, so the stream entry stays pending in the consumer group until
   Claude calls `ack_event`.
+- **New groups start at the tail.** The first time the adapter creates its
+  consumer group it starts at `$`, so a new session is not flooded with the
+  retained history; set `"group_start": "0"` in the policy to replay it. After
+  that the position lives in Valkey and every restart resumes from it.
 - **Deny by default.** `MCTL_EVENTS_POLICY` lists the streams, sources, event
   types and subject values this session may be woken by; anything else is
   acknowledged and audited as `skipped`.

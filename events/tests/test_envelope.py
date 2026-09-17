@@ -33,12 +33,23 @@ class EnvelopeTest(unittest.TestCase):
             "long kind": {**envelope(), "subject": {"kind": "a" * 65}},
             "out of range time": {**envelope(), "occurred_at": "2026-99-99T99:99:99+99:99"},
             "impossible date": {**envelope(), "occurred_at": "2026-02-30T08:00:00Z"},
+            "trailing newline id": {**envelope(), "id": "telegram:evt:1\n"},
+            "trailing newline type": {**envelope(), "type": "telegram.message.created\n"},
+            "trailing newline kind": {**envelope(), "subject": {"kind": "telegram.message\n"}},
+            "leap second": {**envelope(), "occurred_at": "2026-09-17T08:00:60Z"},
             "too many keys": {**envelope(), "subject": {"kind": "x", **{f"k{i}": "v" for i in range(12)}}},
         }
         for name, doc in cases.items():
             with self.subTest(name):
                 with self.assertRaises(env_mod.InvalidEnvelope):
                     env_mod.parse(json.dumps(doc))
+
+    def test_deep_nesting_and_lone_surrogates_are_invalid_not_fatal(self) -> None:
+        with self.assertRaises(env_mod.InvalidEnvelope):
+            env_mod.parse("[" * 2000 + "]" * 2000)  # 4000 bytes: under the size cap
+        surrogate = json.dumps(envelope()).replace('"user:42"', '"\\ud800"')
+        with self.assertRaises(env_mod.InvalidEnvelope):
+            env_mod.parse(surrogate)
 
     def test_oversized_and_non_utf8_are_rejected(self) -> None:
         with self.assertRaises(env_mod.InvalidEnvelope):
@@ -65,6 +76,12 @@ class PolicyTest(unittest.TestCase):
         self.assertIsNone(self.policy(subject={"account_id": ["8"]}).route_for("mctl:events:telegram", env))
         self.assertIsNone(self.policy(subject={"repository": ["*"]}).route_for("mctl:events:telegram", env))
 
+    def test_only_exact_reserved_names_are_refused(self) -> None:
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "group_start": "0", "routes": [
+            {"stream": "mctl:events:stateful", "sources": ["a"], "types": ["a.b.c"]}]})
+        self.assertEqual(("mctl:events:stateful",), policy.streams)
+        self.assertEqual("0", policy.group_start)
+
     def test_invalid_policies(self) -> None:
         for doc in (
             {"group": "g", "consumer": "c", "routes": [], "extra": 1},
@@ -72,11 +89,42 @@ class PolicyTest(unittest.TestCase):
             {"group": "g", "consumer": "c", "routes": [{"stream": "other", "sources": ["a"], "types": ["a.b"]}]},
             {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:x", "sources": [], "types": ["a.b"]}]},
             {"group": "g", "consumer": "c", "routes": [], "max_inflight": 0},
+            {"group": "g\n", "consumer": "c", "routes": []},
+            {"group": "g", "consumer": "c", "routes": [], "group_start": ">"},
+            {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:x\n", "sources": ["a"], "types": ["a.b.c"]}]},
             {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:audit", "sources": ["a"], "types": ["a.b"]}]},
             {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:state", "sources": ["a"], "types": ["a.b"]}]},
         ):
             with self.subTest(doc=doc), self.assertRaises(ValueError):
                 policy_mod.from_dict(doc)
+
+
+class PoisonEntryTest(unittest.TestCase):
+    def test_unexpected_failure_on_one_entry_is_acked_not_fatal(self) -> None:
+        from mctl_events.channel import Adapter
+
+        class Reader:
+            def execute(self, *args, **_kwargs):
+                return [[b"mctl:events:telegram", [[b"9-0", [b"envelope", b"{}"]]]]]
+
+        class Commands:
+            calls: list[tuple] = []
+
+            def execute(self, *args, **_kwargs):
+                self.calls.append(args)
+                return 1
+
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
+            {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*"]}]})
+        commands = Commands()
+        adapter = Adapter(policy, commands, Reader(), lambda _m: None)
+
+        def boom(*_args):
+            raise RuntimeError("unexpected")
+
+        adapter.handle = boom
+        self.assertEqual(1, adapter.read_once(block_ms=1))
+        self.assertIn(("XACK", "mctl:events:telegram", "g", "9-0"), commands.calls)
 
 
 class AckRetryTest(unittest.TestCase):

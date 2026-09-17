@@ -36,6 +36,9 @@ from .valkey import Connection, Endpoint, ValkeyConnectionError, ValkeyError
 SERVER_NAME = "mctl-events"
 AUDIT_STREAM = "mctl:events:audit"
 AUDIT_MAXLEN = 10000
+# Audit is best effort and must never hold delivery back, so it gets its own
+# connection with a short timeout.
+AUDIT_TIMEOUT_SECONDS = 1.0
 
 INSTRUCTIONS = """\
 Events from MCTL arrive as <channel source="mctl-events" ...> tags. An event is a
@@ -113,10 +116,12 @@ class Adapter:
         commands: Connection,
         reader: Connection,
         emit: Callable[[dict[str, Any]], None],
+        auditor: Connection | None = None,
     ) -> None:
         self.policy = policy
         self.commands = commands
         self.reader = reader
+        self.auditor = auditor if auditor is not None else commands
         self.emit = emit
         self.inflight: dict[str, Inflight] = {}
         # One lock orders delivery and acknowledgement: `delivered` is always
@@ -135,8 +140,8 @@ class Adapter:
         for key, value in sorted(record.items()):
             args += [key, value]
         try:
-            self.commands.execute(*args)
-        except (ValkeyError, ValkeyConnectionError) as exc:
+            self.auditor.execute(*args, timeout=AUDIT_TIMEOUT_SECONDS)
+        except (ValkeyError, ValkeyConnectionError, OSError, UnicodeEncodeError) as exc:
             # The audit trail is best effort; delivery must not depend on it.
             _log("audit write failed", error=str(exc))
 
@@ -144,7 +149,9 @@ class Adapter:
     def ensure_groups(self) -> None:
         for stream in self.policy.streams:
             try:
-                self.commands.execute("XGROUP", "CREATE", stream, self.policy.group, "$", "MKSTREAM")
+                self.commands.execute(
+                    "XGROUP", "CREATE", stream, self.policy.group, self.policy.group_start, "MKSTREAM"
+                )
             except ValkeyError as exc:
                 if not str(exc).startswith("BUSYGROUP"):
                     raise
@@ -208,7 +215,16 @@ class Adapter:
         for stream_name, entries in reply or []:
             for entry_id, flat in entries:
                 fields = dict(zip(flat[::2], flat[1::2]))
-                self.handle(stream_name.decode(), entry_id.decode(), fields)
+                try:
+                    self.handle(stream_name.decode(), entry_id.decode(), fields)
+                except (ValkeyError, ValkeyConnectionError, OSError):
+                    raise  # transport trouble: reconnect in run()
+                except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the consumer
+                    _log("entry handling failed; acknowledging it as rejected",
+                         entry_id=entry_id.decode(), error=repr(exc)[:300])
+                    self.audit("rejected", event_id=f"{stream_name.decode()}/{entry_id.decode()}",
+                               reason=f"unhandled: {type(exc).__name__}")
+                    self.commands.execute("XACK", stream_name.decode(), self.policy.group, entry_id.decode())
                 handled += 1
         return handled
 
@@ -368,7 +384,8 @@ def main() -> int:
     policy = policy_mod.load(Path(policy_path))
 
     server = StdioServer(sys.stdin, sys.stdout, on_ready=lambda: None)
-    adapter = Adapter(policy, Connection(endpoint), Connection(endpoint), server.send)
+    adapter = Adapter(policy, Connection(endpoint), Connection(endpoint), server.send,
+                      auditor=Connection(endpoint, timeout=AUDIT_TIMEOUT_SECONDS))
     server.adapter = adapter
     started = threading.Event()
 

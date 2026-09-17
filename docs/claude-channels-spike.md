@@ -80,7 +80,7 @@ This is the load-bearing constraint for deployment, not a property of Channels
 themselves: a human at a TTY clears the dialog once and the channel works, but
 an unattended container cannot.
 
-## Not proven
+## Not proven at the time of the spike (closed 2026-09-17, see Status)
 
 The full **event → Claude → reply-tool (ack)** round trip was **not**
 reproduced in the automated harness. Six `expect`-driven attempts were all
