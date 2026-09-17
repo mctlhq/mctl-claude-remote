@@ -95,7 +95,9 @@ class PolicyTest(unittest.TestCase):
             {"group": "g", "consumer": "c", "routes": [], "max_inflight": 0},
             {"group": "g\n", "consumer": "c", "routes": []},
             {"group": "g", "consumer": "c", "routes": [], "ack_timeout_seconds": 60},
-            {"group": "g", "consumer": "c", "routes": [], "dedup_ttl_seconds": 60},
+            {"group": "g", "consumer": "c", "routes": [], "dedup_ttl_seconds": 0},
+            {"group": "g", "consumer": "c", "routes": [], "reclaim_min_idle_ms": -1},
+            {"group": "g", "consumer": "c", "routes": [], "max_attempts": "3"},
             {"group": "g", "consumer": "c", "routes": [], "group_start": ">"},
             {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:x\n", "sources": ["a"], "types": ["a.b.c"]}]},
             {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:audit", "sources": ["a"], "types": ["a.b"]}]},
@@ -118,7 +120,9 @@ class PoisonEntryTest(unittest.TestCase):
 
             def execute(self, *args, **_kwargs):
                 self.calls.append(args)
-                return 1
+                # EXISTS answers the durable dedup lookup: nothing here has
+                # been acknowledged before.
+                return 0 if args[0] == "EXISTS" else 1
 
         policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
             {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*"]}]})
@@ -145,7 +149,9 @@ class PoisonEntryTest(unittest.TestCase):
 
             def execute(self, *args, **_kwargs):
                 self.calls.append(args)
-                return 1
+                # EXISTS answers the durable dedup lookup: nothing here has
+                # been acknowledged before.
+                return 0 if args[0] == "EXISTS" else 1
 
         def broken_pipe(_message):
             raise BrokenPipeError("stdout closed")
@@ -222,7 +228,9 @@ class OversizedBulkTest(unittest.TestCase):
 
             def execute(self, *args, **_kwargs):
                 self.calls.append(args)
-                return 1
+                # EXISTS answers the durable dedup lookup: nothing here has
+                # been acknowledged before.
+                return 0 if args[0] == "EXISTS" else 1
 
         policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
             {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*.*"]}]})
@@ -246,7 +254,9 @@ class ExtraFieldTest(unittest.TestCase):
 
             def execute(self, *args, **_kwargs):
                 self.calls.append(args)
-                return 1
+                # EXISTS answers the durable dedup lookup: nothing here has
+                # been acknowledged before.
+                return 0 if args[0] == "EXISTS" else 1
 
         policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
             {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*.*"]}]})
@@ -304,7 +314,7 @@ class AckRetryTest(unittest.TestCase):
                     self.fail_next_xack = False
                     raise ValkeyConnectionError("connection reset")
                 self.calls.append(args)
-                return 1
+                return 0 if args[0] == "EXISTS" else 1
 
         commands = Flaky()
         policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
@@ -380,7 +390,9 @@ class ShutdownTest(unittest.TestCase):
 
             def execute(self, *args, **_kwargs):
                 self.calls.append(args)
-                return 1
+                # EXISTS answers the durable dedup lookup: nothing here has
+                # been acknowledged before.
+                return 0 if args[0] == "EXISTS" else 1
 
         policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
             {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*.*"]}]})

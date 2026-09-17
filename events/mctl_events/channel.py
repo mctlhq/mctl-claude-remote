@@ -4,7 +4,7 @@ Claude Code spawns this module as an MCP stdio server and, because it declares
 the `claude/channel` capability and is named on the command line, accepts
 `notifications/claude/channel` pushes from it into the live session.
 
-Delivery contract (walking skeleton):
+Delivery contract:
 
 - read with a consumer group and `XREADGROUP BLOCK` -- the adapter waits on the
   stream, nothing polls a producer;
@@ -14,7 +14,11 @@ Delivery contract (walking skeleton):
   Channels protocol has no acknowledgement of its own, so an unacknowledged
   entry stays pending in the group rather than being silently lost. Entries
   that can never be delivered (malformed, out of policy, duplicates) are
-  acknowledged by the adapter itself and recorded in the audit stream.
+  acknowledged by the adapter itself and recorded in the audit stream;
+- an acknowledged event id is remembered in Valkey for `dedup_ttl_seconds`, so
+  a duplicate entry is a no-op across restarts, not only within one process;
+- entries left pending by a consumer that is gone are taken over after
+  `reclaim_min_idle_ms` and redelivered with `attempt > 1`, up to `max_attempts`.
 
 The event is disposable, the source is canonical: Claude always hydrates current
 state from the subject references through the source system's MCP tools.
@@ -48,11 +52,19 @@ MAX_ENTRIES_PER_EVENT = 16
 AUDIT_QUEUE_MAX = 10000
 # Event ids acknowledged recently. A duplicate stream entry that arrives after
 # the ack (a producer retry, or one the in-flight read did not include) is
-# acknowledged silently instead of waking the session again. Bounded and in
-# memory: durable dedup across restarts arrives with #55.
+# acknowledged silently instead of waking the session again. This is only a
+# cache in front of the durable marker below, so it stays small and bounded.
 RECENTLY_ACKED_MAX = 4096
+# Durable dedup: one key per acknowledged event, in the key space the adapter's
+# ACL user owns. It outlives the process, so a producer retry that arrives after
+# a restart is acknowledged instead of waking the session a second time.
+DEDUP_PREFIX = "mctl:events:state:dedup"
 # Entries per stream fetched in one read of this consumer's pending list.
 PENDING_BATCH = 100
+# Entries per stream taken over from other consumers in one sweep.
+RECLAIM_BATCH = 50
+# How often the consumer looks for entries abandoned by another consumer.
+RECLAIM_INTERVAL_SECONDS = 60.0
 
 INSTRUCTIONS = """\
 Events from MCTL arrive as <channel source="mctl-events" ...> tags. An event is a
@@ -206,7 +218,28 @@ class Adapter:
                 if not str(exc).startswith("BUSYGROUP"):
                     raise
 
-    def handle(self, stream: str, entry_id: str, fields: dict[bytes, bytes]) -> None:
+    # -- dedup -------------------------------------------------------------
+    def _dedup_key(self, event_id: str) -> str:
+        return f"{DEDUP_PREFIX}:{self.policy.group}:{event_id}"
+
+    def _was_acked(self, event_id: str) -> bool:
+        """Has this event already been acknowledged, possibly by an earlier process?
+
+        The in-memory set answers the common case without a round trip; the key
+        in Valkey is what survives a restart. A transport failure propagates:
+        guessing "not seen" here would wake the session for an event already
+        handled, which is exactly what the dedup exists to prevent."""
+
+        with self._lock:
+            if event_id in self.recently_acked:
+                return True
+        return bool(self.commands.execute("EXISTS", self._dedup_key(event_id)))
+
+    def _mark_acked(self, event_id: str) -> None:
+        self.commands.execute("SET", self._dedup_key(event_id), "1",
+                              "EX", self.policy.dedup_ttl_seconds)
+
+    def handle(self, stream: str, entry_id: str, fields: dict[bytes, bytes], attempt: int = 1) -> None:
         raw = fields.get(b"envelope")
         try:
             if raw is None:
@@ -229,12 +262,21 @@ class Adapter:
             self.commands.execute("XACK", stream, self.policy.group, entry_id)
             return
 
+        if self._was_acked(env.id):
+            self.audit("duplicate", env.id, env.correlation_id, stream=stream, entry_id=entry_id,
+                       reason="already acknowledged", attempt=attempt)
+            self.commands.execute("XACK", stream, self.policy.group, entry_id)
+            return
+
+        if attempt > self.policy.max_attempts:
+            # Delivered this many times and never acknowledged: redelivering it
+            # again would loop forever, so it ends in the audit trail instead.
+            self.audit("rejected", env.id, env.correlation_id, stream=stream, entry_id=entry_id,
+                       attempt=attempt, reason=f"not acknowledged after {self.policy.max_attempts} deliveries")
+            self.commands.execute("XACK", stream, self.policy.group, entry_id)
+            return
+
         with self._lock:
-            if env.id in self.recently_acked:
-                self.audit("duplicate", env.id, env.correlation_id, stream=stream, entry_id=entry_id,
-                           reason="already acknowledged")
-                self.commands.execute("XACK", stream, self.policy.group, entry_id)
-                return
             current = self.inflight.get(env.id)
             if current is not None and (stream, entry_id) in current.entries:
                 # Re-read from this consumer's pending list after a reconnect:
@@ -254,9 +296,10 @@ class Adapter:
                 current.entries.append((stream, entry_id))
                 self.audit("duplicate", env.id, env.correlation_id, stream=stream, entry_id=entry_id)
                 return
-            item = Inflight(env, 1, time.time(), [(stream, entry_id)])
+            item = Inflight(env, attempt, time.time(), [(stream, entry_id)])
             self.inflight[env.id] = item
-            self.audit("received", env.id, env.correlation_id, stream=stream, entry_id=entry_id)
+            self.audit("received", env.id, env.correlation_id, stream=stream, entry_id=entry_id,
+                       attempt=attempt)
             try:
                 self.emit(notification_for(env, item.attempt))
             except Exception as exc:  # noqa: BLE001 - e.g. BrokenPipeError when Claude closed stdio
@@ -315,17 +358,37 @@ class Adapter:
                 handled += 1
         return handled
 
+    def _pending_rows(self, stream: str, min_idle_ms: int | None = None,
+                      consumer: str | None = None) -> list[tuple[str, str, int]]:
+        """(entry id, owning consumer, delivery count) for this group's pending list.
+
+        XREADGROUP and XCLAIM do not report the delivery count, so the attempt
+        number Claude is told about comes from the pending list itself."""
+
+        args: list[Any] = ["XPENDING", stream, self.policy.group]
+        if min_idle_ms is not None:
+            args += ["IDLE", min_idle_ms]
+        args += ["-", "+", PENDING_BATCH]
+        if consumer is not None:
+            args.append(consumer)
+        return [(row[0].decode(), row[1].decode(), int(row[3]))
+                for row in self.commands.execute(*args) or []]
+
     def recover_pending(self) -> int:
         """Re-read the entries this consumer already claimed but never acknowledged.
 
         The consumer name is fixed by the policy, so this covers both a restart
         (the previous adapter's in-flight events are delivered again) and a
-        reconnect (an automatic XACK that failed is retried). Entries of other,
-        dead consumers need XAUTOCLAIM, which mctlhq/mctl-claude-remote#55 tracks.
+        reconnect (an automatic XACK that failed is retried). Entries left by a
+        consumer under a *different* name are taken over by `reclaim`.
         Recovery is not bounded by max_inflight: the pending list is at most what
         an earlier adapter claimed under the same bound."""
 
         cursors = {stream: "0" for stream in self.policy.streams}
+        counts = {stream: {entry: delivered
+                           for entry, _owner, delivered in self._pending_rows(
+                               stream, consumer=self.policy.consumer)}
+                  for stream in self.policy.streams}
         handled = 0
         while cursors and not self._stop.is_set():
             streams = list(cursors)
@@ -337,20 +400,64 @@ class Adapter:
             for stream_name, entries in reply or []:
                 name = stream_name.decode()
                 for entry_id, flat in entries:
-                    cursors[name] = entry_id.decode()
+                    entry = entry_id.decode()
+                    cursors[name] = entry
                     advanced.add(name)
+                    # Already delivered at least once, otherwise it would not be
+                    # pending: tell Claude to check for an earlier side effect.
+                    attempt = counts.get(name, {}).get(entry, 1) + 1
                     # A trimmed entry comes back without fields and is rejected.
-                    self._dispatch(name, entry_id.decode(), flat or [])
+                    self._dispatch(name, entry, flat or [], attempt=attempt)
                     handled += 1
             for stream in streams:
                 if stream not in advanced:
                     del cursors[stream]
         return handled
 
-    def _dispatch(self, stream: str, entry_id: str, flat: list[Any]) -> None:
+    def reclaim(self) -> int:
+        """Take over entries another consumer claimed and never acknowledged.
+
+        A plain restart keeps the consumer name and is covered by
+        `recover_pending`; this is what rescues entries when the name changes --
+        a renamed or scaled deployment, or a session that will never come back.
+        Ownership only moves after `reclaim_min_idle_ms`, so a live consumer
+        that is simply waiting for Claude to answer is never undercut."""
+
+        claimed = 0
+        for stream in self.policy.streams:
+            if self._stop.is_set():
+                break
+            capacity = self.capacity()
+            if capacity <= 0:
+                break
+            # This consumer's own idle entries are left alone: recover_pending
+            # re-reads them, and claiming them here would inflate the attempt
+            # number of an event Claude is still working on.
+            counts = {entry: delivered
+                      for entry, owner, delivered in self._pending_rows(
+                          stream, min_idle_ms=self.policy.reclaim_min_idle_ms)
+                      if owner != self.policy.consumer}
+            batch = sorted(counts)[:min(RECLAIM_BATCH, capacity)]
+            if not batch:
+                continue
+            reply = self.commands.execute(
+                "XCLAIM", stream, self.policy.group, self.policy.consumer,
+                self.policy.reclaim_min_idle_ms, *batch,
+            ) or []
+            for entry_id, flat in reply:
+                entry = entry_id.decode()
+                _log("reclaimed a pending entry", stream=stream, entry_id=entry,
+                     attempt=counts.get(entry, 1) + 1)
+                # XCLAIM counts as one more delivery, and an entry trimmed from
+                # the stream comes back without fields and is rejected.
+                self._dispatch(stream, entry, flat or [], attempt=counts.get(entry, 1) + 1)
+                claimed += 1
+        return claimed
+
+    def _dispatch(self, stream: str, entry_id: str, flat: list[Any], attempt: int = 1) -> None:
         fields = dict(zip(flat[::2], flat[1::2]))
         try:
-            self.handle(stream, entry_id, fields)
+            self.handle(stream, entry_id, fields, attempt=attempt)
         except DeliveryFailed as exc:
             # Checked before OSError: a closed stdio pipe is not Valkey
             # trouble, and reconnecting would not deliver it either.
@@ -369,8 +476,12 @@ class Adapter:
             try:
                 self.ensure_groups()
                 self.recover_pending()
+                next_reclaim = time.time() + RECLAIM_INTERVAL_SECONDS
                 while not self._stop.is_set():
                     self.read_once()
+                    if time.time() >= next_reclaim:
+                        self.reclaim()
+                        next_reclaim = time.time() + RECLAIM_INTERVAL_SECONDS
                     backoff = 1.0
             except (ValkeyError, ValkeyConnectionError, OSError) as exc:
                 _log("consumer error; reconnecting", error=str(exc), backoff=backoff)
@@ -406,6 +517,11 @@ class Adapter:
             if item is None:
                 return {"event_id": event_id, "status": "unknown",
                         "detail": "not in flight on this adapter (already acknowledged or never delivered)"}
+            # The durable marker is written before the XACK, not after: if the
+            # process dies in between, the entry is redelivered, finds the marker
+            # and is acknowledged silently. The other order would lose the marker
+            # and wake the session again for an event Claude already handled.
+            self._mark_acked(event_id)
             # Remove the event only after XACK succeeds: if Valkey is briefly
             # unreachable the tool fails, the event stays in flight, and a retried
             # ack_event completes it.
@@ -434,7 +550,7 @@ class Adapter:
 TOOLS = [
     {
         "name": "ack_event",
-        "description": "Acknowledge an MCTL event after handling it. An unacknowledged event stays pending in its stream and is delivered again only after the adapter restarts.",
+        "description": "Acknowledge an MCTL event after handling it. An unacknowledged event stays pending in its stream and is delivered again when the adapter restarts or another consumer reclaims it.",
         "inputSchema": {
             "type": "object",
             "properties": {

@@ -185,10 +185,38 @@ class WalkingSkeletonTest(unittest.TestCase):
         replacement = FakeClaude(self.valkey.url, POLICY)
         self.addCleanup(replacement.close)
         replacement.handshake()
-        self.assertEqual(doc["id"], replacement.notification()["params"]["meta"]["event_id"])
+        pushed = replacement.notification()["params"]["meta"]
+        self.assertEqual(doc["id"], pushed["event_id"])
+        # Delivered before, so Claude is told to check for an earlier side effect.
+        self.assertEqual("2", pushed["attempt"])
         self.assertEqual("acknowledged", replacement.call("ack_event", event_id=doc["id"], outcome="handled")["body"]["status"])
         self.assertEqual(0, self.pending())
         replacement.no_notification(0.5)
+
+    def test_duplicate_after_a_restart_is_acknowledged_without_waking_the_session(self) -> None:
+        """The dedup marker lives in Valkey, not in the adapter's memory."""
+
+        self.claude.handshake()
+        self.wait_for_group()
+        doc = envelope("telegram:evt:v1:7:42:6001")
+        self.publish(doc)
+        self.claude.notification()
+        self.claude.call("ack_event", event_id=doc["id"], outcome="handled")
+        self.claude.kill()  # the in-memory set of acked ids dies with it
+
+        replacement = FakeClaude(self.valkey.url, POLICY)
+        self.addCleanup(replacement.close)
+        replacement.handshake()
+        self.publish(doc)  # the producer republishes from its outbox
+        replacement.no_notification(2.0)
+        self.assertEqual(0, self.pending())
+        # Killing the first adapter can lose its queued audit records, so what
+        # matters here is the last stage: the republished entry ended as a
+        # duplicate rather than a second delivery.
+        deadline = time.time() + 5
+        while time.time() < deadline and "duplicate" not in self.audit_stages(doc["id"]):
+            time.sleep(0.05)
+        self.assertEqual("duplicate", self.audit_stages(doc["id"])[-1])
 
 
 class _FailFirstXack:
@@ -212,11 +240,62 @@ class InProcessAdapterTest(unittest.TestCase):
         self.db = self.valkey.client()
         self.policy = policy_mod.from_dict({**POLICY, "block_ms": 5000})
 
-    def adapter(self, commands=None) -> Adapter:
-        adapter = Adapter(self.policy, commands or self.valkey.client(), self.valkey.client(),
-                          emit=lambda message: None)
+    def adapter(self, commands=None, policy=None, emit=None) -> Adapter:
+        adapter = Adapter(policy or self.policy, commands or self.valkey.client(), self.valkey.client(),
+                          emit=emit or (lambda message: None))
         adapter.ensure_groups()
         return adapter
+
+    def claim_as_ghost(self, doc) -> str:
+        """Publish an event and leave it pending on a consumer that never returns."""
+
+        entry = self.db.execute("XADD", STREAM, "*", "envelope", json.dumps(doc)).decode()
+        self.db.execute("XREADGROUP", "GROUP", "claude-remote", "ghost-consumer",
+                        "COUNT", 10, "STREAMS", STREAM, ">")
+        return entry
+
+    def test_entry_abandoned_by_another_consumer_is_reclaimed_with_a_higher_attempt(self) -> None:
+        pushed: list[dict] = []
+        policy = policy_mod.from_dict({**POLICY, "reclaim_min_idle_ms": 1})
+        adapter = self.adapter(policy=policy, emit=pushed.append)
+        doc = envelope("telegram:evt:v1:7:42:7001")
+        self.claim_as_ghost(doc)
+        time.sleep(0.05)  # let it idle past reclaim_min_idle_ms
+
+        self.assertEqual(1, adapter.reclaim())
+        self.assertEqual(doc["id"], pushed[0]["params"]["meta"]["event_id"])
+        # XCLAIM is the second delivery of this entry.
+        self.assertEqual("2", pushed[0]["params"]["meta"]["attempt"])
+        self.assertEqual("acknowledged", adapter.ack(doc["id"], "handled", "")["status"])
+        self.assertEqual(0, self.db.execute("XPENDING", STREAM, "claude-remote")[0])
+
+    def test_reclaim_leaves_this_consumers_own_pending_entries_alone(self) -> None:
+        policy = policy_mod.from_dict({**POLICY, "reclaim_min_idle_ms": 1})
+        adapter = self.adapter(policy=policy)
+        self.db.execute("XADD", STREAM, "*", "envelope", json.dumps(envelope("telegram:evt:v1:7:42:7002")))
+        self.assertEqual(1, adapter.read_once(block_ms=100))
+        time.sleep(0.05)
+
+        # Claude is still working on it: taking it over here would inflate the
+        # attempt number of an event that was never abandoned.
+        self.assertEqual(0, adapter.reclaim())
+        self.assertEqual(1, adapter.inflight["telegram:evt:v1:7:42:7002"].attempt)
+
+    def test_an_event_never_acknowledged_is_rejected_after_max_attempts(self) -> None:
+        pushed: list[dict] = []
+        policy = policy_mod.from_dict({**POLICY, "reclaim_min_idle_ms": 1, "max_attempts": 1})
+        adapter = self.adapter(policy=policy, emit=pushed.append)
+        doc = envelope("telegram:evt:v1:7:42:7003")
+        self.claim_as_ghost(doc)
+        time.sleep(0.05)
+
+        self.assertEqual(1, adapter.reclaim())
+        self.assertEqual([], pushed)  # attempt 2 is past the cap: not delivered again
+        self.assertEqual(0, self.db.execute("XPENDING", STREAM, "claude-remote")[0])
+        adapter.flush_audit()
+        stages = [dict(zip(flat[::2], flat[1::2]))[b"stage"].decode()
+                  for _, flat in self.db.execute("XRANGE", AUDIT_STREAM, "-", "+") or []]
+        self.assertIn("rejected", stages)
 
     def test_failed_automatic_ack_is_retried_from_the_pending_list(self) -> None:
         adapter = self.adapter(_FailFirstXack(self.valkey.client()))

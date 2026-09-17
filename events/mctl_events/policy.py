@@ -52,6 +52,19 @@ class Policy:
     routes: tuple[Route, ...]
     max_inflight: int = 5
     block_ms: int = 5000
+    # How long an acknowledged event id is remembered in Valkey, so a producer
+    # retry that arrives after a restart is acknowledged instead of waking the
+    # session again. Producers republish from an outbox within minutes; a day
+    # covers that with room to spare and costs one small key per event.
+    dedup_ttl_seconds: int = 86400
+    # An entry pending on *another* consumer for at least this long is taken
+    # over (XCLAIM) and delivered again. Only reached when the consumer name
+    # changes -- a plain restart keeps the name and re-reads its own pending
+    # list -- so the window is deliberately generous.
+    reclaim_min_idle_ms: int = 300000
+    # Deliveries of one entry before it is rejected: a poison event that Claude
+    # never acknowledges must not be reclaimed forever.
+    max_attempts: int = 5
     # Where a consumer group starts when the adapter creates it for the first
     # time: "$" (default) = only events published from now on, so a new session
     # is not flooded with the retained history; "0" = replay the
@@ -83,10 +96,10 @@ def _positive(doc: dict[str, Any], key: str, default: int) -> int:
 def from_dict(doc: Any) -> Policy:
     if not isinstance(doc, dict):
         raise ValueError("policy must be an object")
-    # Only knobs this adapter honours. Reclaim timeouts and dedup retention arrive
-    # with the recovery work (mctlhq/mctl-claude-remote#55); accepting them
-    # before then would let an operator believe they are in effect.
-    allowed = {"group", "consumer", "routes", "max_inflight", "block_ms", "group_start"}
+    # Only knobs this adapter honours: accepting any other field would let an
+    # operator believe a setting is in effect when nothing reads it.
+    allowed = {"group", "consumer", "routes", "max_inflight", "block_ms", "group_start",
+               "dedup_ttl_seconds", "reclaim_min_idle_ms", "max_attempts"}
     unknown = sorted(set(doc) - allowed)
     if unknown:
         raise ValueError(f"unknown policy fields: {unknown}")
@@ -124,6 +137,9 @@ def from_dict(doc: Any) -> Policy:
         max_inflight=_positive(doc, "max_inflight", 5),
         block_ms=_positive(doc, "block_ms", 5000),
         group_start=_group_start(doc.get("group_start", "$")),
+        dedup_ttl_seconds=_positive(doc, "dedup_ttl_seconds", 86400),
+        reclaim_min_idle_ms=_positive(doc, "reclaim_min_idle_ms", 300000),
+        max_attempts=_positive(doc, "max_attempts", 5),
     )
 
 
