@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import unittest
 
 from support import POLICY, FakeClaude, ValkeyServer, envelope, requires_valkey
 
-from mctl_events.channel import AUDIT_STREAM
+from mctl_events import policy as policy_mod
+from mctl_events.channel import AUDIT_STREAM, Adapter
+from mctl_events.valkey import ValkeyConnectionError
 
 STREAM = "mctl:events:telegram"
 
@@ -169,6 +172,78 @@ class WalkingSkeletonTest(unittest.TestCase):
         doc = envelope("telegram:evt:v1:7:42:3001")
         self.publish(doc)
         self.assertEqual(doc["id"], self.claude.notification(timeout=40)["params"]["meta"]["event_id"])
+
+    def test_unacknowledged_event_is_delivered_again_after_the_adapter_restarts(self) -> None:
+        self.claude.handshake()
+        self.wait_for_group()
+        doc = envelope("telegram:evt:v1:7:42:4001")
+        self.publish(doc)
+        self.assertEqual(doc["id"], self.claude.notification()["params"]["meta"]["event_id"])
+        self.claude.kill()  # crash before ack_event: the entry stays pending
+        self.assertEqual(1, self.pending())
+
+        replacement = FakeClaude(self.valkey.url, POLICY)
+        self.addCleanup(replacement.close)
+        replacement.handshake()
+        self.assertEqual(doc["id"], replacement.notification()["params"]["meta"]["event_id"])
+        self.assertEqual("acknowledged", replacement.call("ack_event", event_id=doc["id"], outcome="handled")["body"]["status"])
+        self.assertEqual(0, self.pending())
+        replacement.no_notification(0.5)
+
+
+class _FailFirstXack:
+    """Commands connection whose first XACK fails as if Valkey dropped the link."""
+
+    def __init__(self, conn) -> None:
+        self.conn, self.failed = conn, False
+
+    def execute(self, *args, **kwargs):
+        if args[0] == "XACK" and not self.failed:
+            self.failed = True
+            raise ValkeyConnectionError("simulated disconnect")
+        return self.conn.execute(*args, **kwargs)
+
+
+@requires_valkey
+class InProcessAdapterTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.valkey = ValkeyServer()
+        self.addCleanup(self.valkey.stop)
+        self.db = self.valkey.client()
+        self.policy = policy_mod.from_dict({**POLICY, "block_ms": 5000})
+
+    def adapter(self, commands=None) -> Adapter:
+        adapter = Adapter(self.policy, commands or self.valkey.client(), self.valkey.client(),
+                          emit=lambda message: None)
+        adapter.ensure_groups()
+        return adapter
+
+    def test_failed_automatic_ack_is_retried_from_the_pending_list(self) -> None:
+        adapter = self.adapter(_FailFirstXack(self.valkey.client()))
+        self.db.execute("XADD", STREAM, "*", "envelope", "not json")
+        with self.assertRaises(ValkeyConnectionError):
+            adapter.read_once(block_ms=100)
+        self.assertEqual(1, self.db.execute("XPENDING", STREAM, "claude-remote")[0])
+        self.assertEqual(1, adapter.recover_pending())
+        self.assertEqual(0, self.db.execute("XPENDING", STREAM, "claude-remote")[0])
+
+    def test_reconnect_does_not_duplicate_an_in_flight_entry(self) -> None:
+        adapter = self.adapter()
+        self.db.execute("XADD", STREAM, "*", "envelope", json.dumps(envelope("telegram:evt:v1:7:42:5001")))
+        self.assertEqual(1, adapter.read_once(block_ms=100))
+        adapter.recover_pending()
+        self.assertEqual(1, len(adapter.inflight["telegram:evt:v1:7:42:5001"].entries))
+
+    def test_stop_interrupts_a_blocked_read(self) -> None:
+        adapter = self.adapter()
+        consumer = threading.Thread(target=adapter.run, daemon=True)
+        consumer.start()
+        time.sleep(0.3)  # let it block in XREADGROUP for up to 5 s
+        started = time.time()
+        adapter.stop()
+        consumer.join(timeout=3)
+        self.assertFalse(consumer.is_alive())
+        self.assertLess(time.time() - started, 2)
 
 
 if __name__ == "__main__":

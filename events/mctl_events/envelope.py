@@ -78,7 +78,12 @@ def parse(raw: str | bytes) -> Envelope:
             raw = raw.decode("utf-8")
         except UnicodeDecodeError as exc:
             raise InvalidEnvelope("envelope is not UTF-8") from exc
-    if len(raw.encode("utf-8")) > MAX_ENVELOPE_BYTES:
+    try:
+        size = len(raw.encode("utf-8"))
+    except UnicodeEncodeError as exc:
+        # A str can hold a lone surrogate that no UTF-8 byte input could.
+        raise InvalidEnvelope("envelope is not UTF-8") from exc
+    if size > MAX_ENVELOPE_BYTES:
         raise InvalidEnvelope(f"envelope exceeds {MAX_ENVELOPE_BYTES} bytes")
     try:
         doc = json.loads(raw)

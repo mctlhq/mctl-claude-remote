@@ -237,19 +237,21 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
   hydrates the current state from the subject references, so a stale event is
   harmless. A second stream entry for an event that is still in flight is not
   delivered again and is acknowledged with the first; deduplication after an
-  acknowledgement and redelivery after a restart arrive with
+  acknowledgement that survives a restart arrives with
   mctlhq/mctl-claude-remote#55.
 - **Acknowledged by Claude, not by the transport.** Channels have no delivery
   acknowledgement, so a valid, routed event's stream entry stays pending in the
-  consumer group until Claude calls `ack_event`. Reclaiming entries left pending
-  by a crash (and their redelivery) arrives with mctlhq/mctl-claude-remote#55.
+  consumer group until Claude calls `ack_event`.
 - **New groups start at the tail.** The first time the adapter creates its
   consumer group it starts at `$`, so a new session is not flooded with the
   retained history; set `"group_start": "0"` in the policy to replay it. After
   that the group's read position lives in Valkey, so a restart reads only
-  entries it has not seen. Entries delivered before the restart but never
-  acknowledged stay pending and are not re-read; reclaiming them with
-  `XAUTOCLAIM` arrives with mctlhq/mctl-claude-remote#55.
+  entries it has not seen, after first re-reading its own pending list: entries
+  delivered before the restart but never acknowledged are delivered again, and
+  an automatic acknowledgement that failed is retried the same way after a
+  reconnect. This works because the policy fixes the consumer name; reclaiming
+  entries of a different, dead consumer with `XAUTOCLAIM` arrives with
+  mctlhq/mctl-claude-remote#55.
 - **Deny by default.** `MCTL_EVENTS_POLICY` lists the streams, sources, event
   types and subject values this session may be woken by; anything else is
   acknowledged and audited as `skipped`.

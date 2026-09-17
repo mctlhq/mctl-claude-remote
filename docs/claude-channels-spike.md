@@ -39,8 +39,8 @@ Contract (verified against the docs and a Go prototype):
 
 1. **The flags exist in the pinned runtime.** `--channels <servers...>` and
    `--dangerously-load-development-channels <servers...>` are present (though
-   hidden from `--help`) in Claude Code **2.1.198** (the image pin) and
-   2.1.209. `-p`/`--print` (non-interactive) mode is documented to support
+   hidden from `--help`) in Claude Code **2.1.198** (the image pin at the time
+   of this spike; the image now pins 2.1.273) and 2.1.209. `-p`/`--print` (non-interactive) mode is documented to support
    channels — the real constraint is that `-p` is one-shot: the process
    exits after its turn, so a channel notification only reaches it if
    something is already invoking `-p` per event, not because channels and

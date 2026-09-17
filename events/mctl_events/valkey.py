@@ -107,6 +107,17 @@ class Connection:
             finally:
                 self._sock, self._buf = None, b""
 
+    def interrupt(self) -> None:
+        """Unblock a read in progress on another thread; that call then fails
+        with a transport error. Takes no lock, since the reader holds it."""
+
+        sock = self._sock
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass  # already closed or never connected
+
     # -- protocol ----------------------------------------------------------
     def _read_line(self) -> bytes:
         while b"\r\n" not in self._buf:

@@ -431,5 +431,11 @@ class StdioServerTest(unittest.TestCase):
         self.assertNotIn("isError", by_id[3])
 
 
+class LoneSurrogateTest(unittest.TestCase):
+    def test_str_with_a_lone_surrogate_is_an_invalid_envelope(self) -> None:
+        with self.assertRaises(env_mod.InvalidEnvelope):
+            env_mod.parse('{"id": "\ud800"}')
+
+
 if __name__ == "__main__":
     unittest.main()

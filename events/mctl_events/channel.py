@@ -51,6 +51,8 @@ AUDIT_QUEUE_MAX = 10000
 # acknowledged silently instead of waking the session again. Bounded and in
 # memory: durable dedup across restarts arrives with #55.
 RECENTLY_ACKED_MAX = 4096
+# Entries per stream fetched in one read of this consumer's pending list.
+PENDING_BATCH = 100
 
 INSTRUCTIONS = """\
 Events from MCTL arrive as <channel source="mctl-events" ...> tags. An event is a
@@ -234,6 +236,10 @@ class Adapter:
                 self.commands.execute("XACK", stream, self.policy.group, entry_id)
                 return
             current = self.inflight.get(env.id)
+            if current is not None and (stream, entry_id) in current.entries:
+                # Re-read from this consumer's pending list after a reconnect:
+                # the entry is already tracked, nothing new arrived.
+                return
             if current is not None:
                 # Same event still awaiting Claude's ack: do not wake the session
                 # twice; this entry is acknowledged together with the first.
@@ -298,33 +304,71 @@ class Adapter:
             "STREAMS", *streams, *([">"] * len(streams)),
             timeout=block / 1000 + 10,
         )
+        if self._stop.is_set():
+            # Shutting down: whatever this read claimed stays in this consumer's
+            # pending list, and the next adapter re-reads it on start.
+            return 0
         handled = 0
         for stream_name, entries in reply or []:
             for entry_id, flat in entries:
-                fields = dict(zip(flat[::2], flat[1::2]))
-                try:
-                    self.handle(stream_name.decode(), entry_id.decode(), fields)
-                except DeliveryFailed as exc:
-                    # Checked before OSError: a closed stdio pipe is not Valkey
-                    # trouble, and reconnecting would not deliver it either.
-                    _log("delivery failed; entry left pending", entry_id=entry_id.decode(), error=str(exc)[:300])
-                except (ValkeyError, ValkeyConnectionError, OSError):
-                    raise  # transport trouble: reconnect in run()
-                except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the consumer
-                    _log("entry handling failed; acknowledging it as rejected",
-                         entry_id=entry_id.decode(), error=repr(exc)[:300])
-                    self.forget_entry(stream_name.decode(), entry_id.decode())
-                    self.audit("rejected", event_id=f"{stream_name.decode()}/{entry_id.decode()}",
-                               reason=f"unhandled: {type(exc).__name__}")
-                    self.commands.execute("XACK", stream_name.decode(), self.policy.group, entry_id.decode())
+                self._dispatch(stream_name.decode(), entry_id.decode(), flat)
                 handled += 1
         return handled
+
+    def recover_pending(self) -> int:
+        """Re-read the entries this consumer already claimed but never acknowledged.
+
+        The consumer name is fixed by the policy, so this covers both a restart
+        (the previous adapter's in-flight events are delivered again) and a
+        reconnect (an automatic XACK that failed is retried). Entries of other,
+        dead consumers need XAUTOCLAIM, which mctlhq/mctl-claude-remote#55 tracks.
+        Recovery is not bounded by max_inflight: the pending list is at most what
+        an earlier adapter claimed under the same bound."""
+
+        cursors = {stream: "0" for stream in self.policy.streams}
+        handled = 0
+        while cursors and not self._stop.is_set():
+            streams = list(cursors)
+            reply = self.reader.execute(
+                "XREADGROUP", "GROUP", self.policy.group, self.policy.consumer,
+                "COUNT", PENDING_BATCH, "STREAMS", *streams, *(cursors[s] for s in streams),
+            )
+            advanced = set()
+            for stream_name, entries in reply or []:
+                name = stream_name.decode()
+                for entry_id, flat in entries:
+                    cursors[name] = entry_id.decode()
+                    advanced.add(name)
+                    # A trimmed entry comes back without fields and is rejected.
+                    self._dispatch(name, entry_id.decode(), flat or [])
+                    handled += 1
+            for stream in streams:
+                if stream not in advanced:
+                    del cursors[stream]
+        return handled
+
+    def _dispatch(self, stream: str, entry_id: str, flat: list[Any]) -> None:
+        fields = dict(zip(flat[::2], flat[1::2]))
+        try:
+            self.handle(stream, entry_id, fields)
+        except DeliveryFailed as exc:
+            # Checked before OSError: a closed stdio pipe is not Valkey
+            # trouble, and reconnecting would not deliver it either.
+            _log("delivery failed; entry left pending", entry_id=entry_id, error=str(exc)[:300])
+        except (ValkeyError, ValkeyConnectionError, OSError):
+            raise  # transport trouble: reconnect in run()
+        except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the consumer
+            _log("entry handling failed; acknowledging it as rejected", entry_id=entry_id, error=repr(exc)[:300])
+            self.forget_entry(stream, entry_id)
+            self.audit("rejected", event_id=f"{stream}/{entry_id}", reason=f"unhandled: {type(exc).__name__}")
+            self.commands.execute("XACK", stream, self.policy.group, entry_id)
 
     def run(self) -> None:
         backoff = 1.0
         while not self._stop.is_set():
             try:
                 self.ensure_groups()
+                self.recover_pending()
                 while not self._stop.is_set():
                     self.read_once()
                     backoff = 1.0
@@ -337,6 +381,11 @@ class Adapter:
         self._stop.set()
         with self._lock:
             self._lock.notify_all()
+        # Wake a consumer blocked in XREADGROUP now rather than after BLOCK
+        # expires, so a replacement session does not race a still-reading one.
+        interrupt = getattr(self.reader, "interrupt", None)
+        if interrupt is not None:
+            interrupt()
 
     def close(self, audit_timeout: float = 5.0, consumer: threading.Thread | None = None) -> None:
         """Stop consuming, then give queued audit records a bounded chance to be
@@ -385,7 +434,7 @@ class Adapter:
 TOOLS = [
     {
         "name": "ack_event",
-        "description": "Acknowledge an MCTL event after handling it. An unacknowledged event stays pending in its stream; it is not redelivered to this session yet.",
+        "description": "Acknowledge an MCTL event after handling it. An unacknowledged event stays pending in its stream and is delivered again only after the adapter restarts.",
         "inputSchema": {
             "type": "object",
             "properties": {
