@@ -255,7 +255,11 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
   deployment -- is taken over once it has been idle for `reclaim_min_idle_ms`
   and delivered again with `attempt > 1`; after `max_attempts` deliveries
   without an acknowledgement it is audited as `rejected` and acknowledged, so a
-  poison event cannot loop forever.
+  poison event cannot loop forever. The attempt number is counted in Valkey
+  (`mctl:events:state:attempt:<group>:<event_id>`) as the event is handed to
+  Claude, not taken from the stream's own delivery count: re-reading a pending
+  entry by id does not move that count, so a crash loop on one consumer name
+  would otherwise never reach the cap.
 - **Deny by default.** `MCTL_EVENTS_POLICY` lists the streams, sources, event
   types and subject values this session may be woken by; anything else is
   acknowledged and audited as `skipped`.
