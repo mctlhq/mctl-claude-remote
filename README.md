@@ -253,11 +253,12 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
 - **Deny by default.** `MCTL_EVENTS_POLICY` lists the streams, sources, event
   types and subject values this session may be woken by; anything else is
   acknowledged and audited as `skipped`.
-- **Audited, best effort.** Each stage (`received`, `delivered`, `duplicate`,
-  `acked`, `skipped`, `rejected`) is appended to `mctl:events:audit` with
+- **Audited, best effort.** Each stage (`received`, `delivered`,
+  `delivery_failed`, `duplicate`, `acked`, `skipped`, `rejected`) is appended to `mctl:events:audit` with
   `event_id` and `correlation_id`. An audit write that fails is logged and
   skipped; it never holds delivery back, so the trail can have gaps while Valkey
-  is unreachable.
+  is unreachable. On shutdown the adapter waits up to 5 s for queued audit
+  records to be written.
 
 | Variable | Meaning |
 |---|---|

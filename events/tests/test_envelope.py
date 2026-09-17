@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 import unittest
 
 from support import envelope
@@ -225,6 +226,29 @@ class AckRetryTest(unittest.TestCase):
         self.assertEqual("acknowledged", adapter.ack(event_id, "handled", "")["status"])
         self.assertIn(("XACK", "mctl:events:telegram", "g", "1-0"), commands.calls)
         self.assertEqual("not_in_flight", adapter.status(event_id)["status"])
+
+
+class ShutdownTest(unittest.TestCase):
+    def test_close_waits_for_queued_audit_records(self) -> None:
+        import threading
+
+        from mctl_events.channel import Adapter
+
+        written: list[tuple] = []
+
+        class SlowAuditor:
+            def execute(self, *args, **_kwargs):
+                time.sleep(0.05)
+                written.append(args)
+                return b"1-0"
+
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": []})
+        adapter = Adapter(policy, SlowAuditor(), SlowAuditor(), lambda _m: None, auditor=SlowAuditor())
+        for i in range(3):
+            adapter.audit("acked", f"telegram:evt:{i}")
+        adapter.close(audit_timeout=5)
+        self.assertEqual(3, len(written))
+        self.assertTrue(adapter._stop.is_set())
 
 
 class StdioServerTest(unittest.TestCase):

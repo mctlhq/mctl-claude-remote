@@ -323,6 +323,13 @@ class Adapter:
         with self._lock:
             self._lock.notify_all()
 
+    def close(self, audit_timeout: float = 5.0) -> None:
+        """Stop consuming, then give queued audit records a bounded chance to be
+        written: the audit writer is a daemon thread and dies with the process."""
+
+        self.stop()
+        self.flush_audit(timeout=audit_timeout)
+
     # -- tools -------------------------------------------------------------
     def ack(self, event_id: str, outcome: str, note: str) -> dict[str, Any]:
         with self._lock:
@@ -488,7 +495,7 @@ def main() -> int:
     server.on_ready = start
     _log("starting", group=policy.group, consumer=policy.consumer, streams=list(policy.streams))
     server.serve()
-    adapter.stop()
+    adapter.close()
     return 0
 
 
