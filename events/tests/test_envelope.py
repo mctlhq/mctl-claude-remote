@@ -66,9 +66,48 @@ class PolicyTest(unittest.TestCase):
             {"group": "g", "consumer": "c", "routes": [{"stream": "other", "sources": ["a"], "types": ["a.b"]}]},
             {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:x", "sources": [], "types": ["a.b"]}]},
             {"group": "g", "consumer": "c", "routes": [], "max_inflight": 0},
+            {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:audit", "sources": ["a"], "types": ["a.b"]}]},
+            {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:state", "sources": ["a"], "types": ["a.b"]}]},
         ):
             with self.subTest(doc=doc), self.assertRaises(ValueError):
                 policy_mod.from_dict(doc)
+
+
+class AckRetryTest(unittest.TestCase):
+    """A failed XACK must leave the event in flight so a retried ack completes it."""
+
+    def test_ack_survives_a_transient_xack_failure(self) -> None:
+        from mctl_events.channel import Adapter
+        from mctl_events.valkey import ValkeyConnectionError
+
+        class Flaky:
+            def __init__(self) -> None:
+                self.calls: list[tuple] = []
+                self.fail_next_xack = True
+
+            def execute(self, *args, **_kwargs):
+                if args[0] == "XACK" and self.fail_next_xack:
+                    self.fail_next_xack = False
+                    raise ValkeyConnectionError("connection reset")
+                self.calls.append(args)
+                return 1
+
+        commands = Flaky()
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
+            {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*"]}]})
+        pushed: list[dict] = []
+        adapter = Adapter(policy, commands, commands, pushed.append)
+        adapter.handle("mctl:events:telegram", "1-0", {b"envelope": json.dumps(envelope()).encode()})
+        event_id = envelope()["id"]
+        self.assertEqual(1, len(pushed))
+
+        with self.assertRaises(ValkeyConnectionError):
+            adapter.ack(event_id, "handled", "")
+        self.assertEqual("in_flight", adapter.status(event_id)["status"])
+
+        self.assertEqual("acknowledged", adapter.ack(event_id, "handled", "")["status"])
+        self.assertIn(("XACK", "mctl:events:telegram", "g", "1-0"), commands.calls)
+        self.assertEqual("not_in_flight", adapter.status(event_id)["status"])
 
 
 if __name__ == "__main__":

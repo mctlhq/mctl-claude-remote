@@ -113,5 +113,44 @@ class WalkingSkeletonTest(unittest.TestCase):
         self.assertTrue(bad["isError"])
 
 
+    def test_duplicate_entry_in_flight_wakes_the_session_once(self) -> None:
+        self.claude.handshake()
+        self.wait_for_group()
+        doc = envelope()
+        self.publish(doc)
+        self.claude.notification()
+        self.publish(doc)  # a producer retry publishes the same envelope again
+        self.claude.no_notification(1.0)
+        self.assertEqual(2, self.pending())
+        self.assertEqual(2, self.claude.call("event_status", event_id=doc["id"])["body"]["entries"])
+        self.claude.call("ack_event", event_id=doc["id"], outcome="handled")
+        self.assertEqual(0, self.pending())
+        self.assertEqual(["received", "delivered", "duplicate", "acked"], self.audit_stages(doc["id"]))
+
+    def test_in_flight_is_bounded_by_max_inflight(self) -> None:
+        self.claude.close()
+        claude = FakeClaude(self.valkey.url, {**POLICY, "max_inflight": 1})
+        self.addCleanup(claude.close)
+        claude.handshake()
+        self.wait_for_group()
+        first, second = envelope("telegram:evt:v1:7:42:2001"), envelope("telegram:evt:v1:7:42:2002")
+        self.publish(first)
+        self.publish(second)
+        self.assertEqual(first["id"], claude.notification()["params"]["meta"]["event_id"])
+        claude.no_notification(1.5)
+        claude.call("ack_event", event_id=first["id"], outcome="handled")
+        self.assertEqual(second["id"], claude.notification()["params"]["meta"]["event_id"])
+
+    def test_consumer_recovers_after_valkey_restarts(self) -> None:
+        self.claude.handshake()
+        self.wait_for_group()
+        self.valkey.restart()  # empty server: stream and group are gone too
+        self.db = self.valkey.client()
+        self.wait_for_group()  # the adapter reconnects and recreates its group
+        doc = envelope("telegram:evt:v1:7:42:3001")
+        self.publish(doc)
+        self.assertEqual(doc["id"], self.claude.notification(timeout=40)["params"]["meta"]["event_id"])
+
+
 if __name__ == "__main__":
     unittest.main()

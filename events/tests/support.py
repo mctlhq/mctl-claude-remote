@@ -54,6 +54,25 @@ class ValkeyServer:
                     raise
                 time.sleep(0.05)
 
+    def restart(self) -> None:
+        """Kill and start a fresh, empty server on the same port."""
+        self.proc.kill()
+        self.proc.wait(timeout=10)
+        self.proc = subprocess.Popen(
+            [VALKEY_SERVER, "--port", str(self.port), "--bind", "127.0.0.1", "--save", "",
+             "--appendonly", "no", "--dir", self.dir],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
+        deadline = time.time() + 10
+        while True:
+            try:
+                Connection(Endpoint.from_url(self.url)).execute("PING")
+                return
+            except OSError:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.05)
+
     def client(self) -> Connection:
         return Connection(Endpoint.from_url(self.url))
 

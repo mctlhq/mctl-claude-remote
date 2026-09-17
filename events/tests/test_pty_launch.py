@@ -57,5 +57,30 @@ class LauncherProcessTest(unittest.TestCase):
         self.assertIn(b"answered development-channels", proc.stderr)
 
 
+class LauncherArrowKeyTest(unittest.TestCase):
+    def test_down_enter_reaches_the_child_for_a_default_no_dialog(self) -> None:
+        fake = textwrap.dedent(
+            """
+            import sys, termios, tty
+            print("1. No, exit   2. Yes, I trust this folder", flush=True)
+            tty.setcbreak(sys.stdin.fileno())
+            keys = sys.stdin.read(4)
+            print("keys:" + keys.encode().hex(), flush=True)
+            """
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "fake_trust.py"
+            script.write_text(fake)
+            proc = subprocess.run(
+                [sys.executable, str(LAUNCHER), "--", sys.executable, str(script)],
+                capture_output=True, timeout=30,
+                env={**os.environ, "CLAUDE_PTY_ANSWER_DELAY_SECONDS": "0.1"},
+            )
+        self.assertEqual(0, proc.returncode, proc.stderr)
+        # ESC [ B then CR (cbreak keeps ICRNL, so CR arrives as LF).
+        self.assertIn(b"keys:1b5b420a", proc.stdout)
+        self.assertIn(b"answered trust-folder", proc.stderr)
+
+
 if __name__ == "__main__":
     unittest.main()

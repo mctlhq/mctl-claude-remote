@@ -233,24 +233,29 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
 - **Events are references, not content.** The adapter accepts only closed
   `mctl.events/v1` envelopes (`events/mctl_events/envelope.py`); an envelope with
   an extra field, a nested subject value or more than 4 KiB is rejected. Claude
-  hydrates the current state from the subject references, so a stale or
-  duplicated event is harmless.
+  hydrates the current state from the subject references, so a stale event is
+  harmless. A second stream entry for an event that is still in flight is not
+  delivered again and is acknowledged with the first; deduplication after an
+  acknowledgement and redelivery after a restart arrive with
+  mctlhq/mctl-claude-remote#55.
 - **Acknowledged by Claude, not by the transport.** Channels have no delivery
   acknowledgement, so the stream entry stays pending in the consumer group until
   Claude calls `ack_event`.
 - **Deny by default.** `MCTL_EVENTS_POLICY` lists the streams, sources, event
   types and subject values this session may be woken by; anything else is
   acknowledged and audited as `skipped`.
-- **Audited.** Every stage (`received`, `delivered`, `acked`, `skipped`,
-  `rejected`) is appended to `mctl:events:audit` with `event_id` and
-  `correlation_id`.
+- **Audited, best effort.** Each stage (`received`, `delivered`, `duplicate`,
+  `acked`, `skipped`, `rejected`) is appended to `mctl:events:audit` with
+  `event_id` and `correlation_id`. An audit write that fails is logged and
+  skipped; it never holds delivery back, so the trail can have gaps while Valkey
+  is unreachable.
 
 | Variable | Meaning |
 |---|---|
 | `MCTL_EVENTS_ENABLED` | `true` to load the channel (default `false`: launch unchanged) |
 | `MCTL_EVENTS_VALKEY_URL` | e.g. `redis://claude-remote@valkey.platform-events.svc.cluster.local:6379/0` |
 | `MCTL_EVENTS_VALKEY_PASSWORD_FILE` | file holding the `claude-remote` ACL user's password |
-| `MCTL_EVENTS_POLICY` | JSON routing policy (`events/mctl_events/policy.py`) |
+| `MCTL_EVENTS_POLICY` | **path** to a JSON routing policy file (`events/mctl_events/policy.py`), not inline JSON |
 
 The development-channels flag shows a confirmation on every launch that nothing
 persists, so with the channel enabled the session runs under

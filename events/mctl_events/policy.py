@@ -19,6 +19,10 @@ from typing import Any
 from .envelope import Envelope
 
 _STREAM = re.compile(r"^mctl:events:[a-z0-9][a-z0-9_-]{0,62}$")
+# Streams the adapter itself writes to. Subscribing to one would feed the
+# adapter its own output: every audit entry has no envelope, so each would be
+# rejected and audited again, forever.
+RESERVED_STREAMS = frozenset({"mctl:events:audit", "mctl:events:state"})
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 
 
@@ -95,6 +99,8 @@ def from_dict(doc: Any) -> Policy:
         stream = item.get("stream")
         if not isinstance(stream, str) or not _STREAM.match(stream):
             raise ValueError(f"{where}.stream must match {_STREAM.pattern}")
+        if stream in RESERVED_STREAMS or stream.startswith("mctl:events:state"):
+            raise ValueError(f"{where}.stream {stream} is reserved for the adapter's own output")
         subject_doc = item.get("subject", {})
         if not isinstance(subject_doc, dict):
             raise ValueError(f"{where}.subject must be an object")

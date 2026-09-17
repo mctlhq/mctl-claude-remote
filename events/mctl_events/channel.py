@@ -97,11 +97,13 @@ def notification_for(env: envelope_mod.Envelope, attempt: int) -> dict[str, Any]
 
 @dataclass
 class Inflight:
-    stream: str
-    entry_id: str
     envelope: envelope_mod.Envelope
     attempt: int
     delivered_at: float
+    # Every stream entry carrying this event id. A producer retry can publish the
+    # same envelope twice; it is delivered to Claude once and all its entries are
+    # acknowledged together.
+    entries: list[tuple[str, str]]
 
 
 class Adapter:
@@ -117,7 +119,10 @@ class Adapter:
         self.reader = reader
         self.emit = emit
         self.inflight: dict[str, Inflight] = {}
-        self._lock = threading.Lock()
+        # One lock orders delivery and acknowledgement: `delivered` is always
+        # audited before a concurrent `ack_event` can audit `acked`, and the
+        # condition wakes a consumer waiting for in-flight capacity.
+        self._lock = threading.Condition()
         self._stop = threading.Event()
 
     # -- audit -------------------------------------------------------------
@@ -163,32 +168,49 @@ class Adapter:
             return
 
         with self._lock:
-            previous = self.inflight.get(env.id)
-            attempt = previous.attempt + 1 if previous else 1
-            self.inflight[env.id] = Inflight(stream, entry_id, env, attempt, time.time())
-        self.audit("received", env.id, env.correlation_id, stream=stream, entry_id=entry_id)
-        self.emit(notification_for(env, attempt))
-        self.audit("delivered", env.id, env.correlation_id, attempt=attempt)
+            current = self.inflight.get(env.id)
+            if current is not None:
+                # Same event still awaiting Claude's ack: do not wake the session
+                # twice; this entry is acknowledged together with the first.
+                current.entries.append((stream, entry_id))
+                self.audit("duplicate", env.id, env.correlation_id, stream=stream, entry_id=entry_id)
+                return
+            item = Inflight(env, 1, time.time(), [(stream, entry_id)])
+            self.inflight[env.id] = item
+            self.audit("received", env.id, env.correlation_id, stream=stream, entry_id=entry_id)
+            self.emit(notification_for(env, item.attempt))
+            self.audit("delivered", env.id, env.correlation_id, attempt=item.attempt)
+
+    def capacity(self) -> int:
+        with self._lock:
+            return max(self.policy.max_inflight - len(self.inflight), 0)
 
     def read_once(self, block_ms: int | None = None) -> int:
         streams = self.policy.streams
-        if not streams:
-            time.sleep((block_ms or self.policy.block_ms) / 1000)
-            return 0
         block = self.policy.block_ms if block_ms is None else block_ms
+        if not streams:
+            self._stop.wait(block / 1000)
+            return 0
+        # Never hold more unacknowledged events than max_inflight: XREADGROUP's
+        # COUNT bounds one read, not the backlog, so wait for an ack instead.
+        with self._lock:
+            if len(self.inflight) >= self.policy.max_inflight:
+                self._lock.wait(timeout=block / 1000)
+                return 0
+            count = self.policy.max_inflight - len(self.inflight)
         reply = self.reader.execute(
             "XREADGROUP", "GROUP", self.policy.group, self.policy.consumer,
-            "COUNT", self.policy.max_inflight, "BLOCK", block,
+            "COUNT", count, "BLOCK", block,
             "STREAMS", *streams, *([">"] * len(streams)),
             timeout=block / 1000 + 10,
         )
-        count = 0
+        handled = 0
         for stream_name, entries in reply or []:
             for entry_id, flat in entries:
                 fields = dict(zip(flat[::2], flat[1::2]))
                 self.handle(stream_name.decode(), entry_id.decode(), fields)
-                count += 1
-        return count
+                handled += 1
+        return handled
 
     def run(self) -> None:
         backoff = 1.0
@@ -205,18 +227,26 @@ class Adapter:
 
     def stop(self) -> None:
         self._stop.set()
+        with self._lock:
+            self._lock.notify_all()
 
     # -- tools -------------------------------------------------------------
     def ack(self, event_id: str, outcome: str, note: str) -> dict[str, Any]:
         with self._lock:
-            item = self.inflight.pop(event_id, None)
-        if item is None:
-            return {"event_id": event_id, "status": "unknown",
-                    "detail": "not in flight on this adapter (already acknowledged or never delivered)"}
-        self.commands.execute("XACK", item.stream, self.policy.group, item.entry_id)
-        self.audit("acked", event_id, item.envelope.correlation_id, outcome=outcome,
-                   note=note[:500], attempt=item.attempt,
-                   latency_ms=int((time.time() - item.delivered_at) * 1000))
+            item = self.inflight.get(event_id)
+            if item is None:
+                return {"event_id": event_id, "status": "unknown",
+                        "detail": "not in flight on this adapter (already acknowledged or never delivered)"}
+            # Remove the event only after XACK succeeds: if Valkey is briefly
+            # unreachable the tool fails, the event stays in flight, and a retried
+            # ack_event completes it.
+            for stream, entry_id in item.entries:
+                self.commands.execute("XACK", stream, self.policy.group, entry_id)
+            del self.inflight[event_id]
+            self.audit("acked", event_id, item.envelope.correlation_id, outcome=outcome,
+                       note=note[:500], attempt=item.attempt, entries=len(item.entries),
+                       latency_ms=int((time.time() - item.delivered_at) * 1000))
+            self._lock.notify_all()
         return {"event_id": event_id, "status": "acknowledged", "outcome": outcome}
 
     def status(self, event_id: str) -> dict[str, Any]:
@@ -225,7 +255,8 @@ class Adapter:
         if item is None:
             return {"event_id": event_id, "status": "not_in_flight"}
         return {"event_id": event_id, "status": "in_flight", "attempt": item.attempt,
-                "type": item.envelope.type, "subject": item.envelope.subject}
+                "entries": len(item.entries), "type": item.envelope.type,
+                "subject": item.envelope.subject}
 
 
 TOOLS = [
