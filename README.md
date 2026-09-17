@@ -239,8 +239,9 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
   acknowledgement and redelivery after a restart arrive with
   mctlhq/mctl-claude-remote#55.
 - **Acknowledged by Claude, not by the transport.** Channels have no delivery
-  acknowledgement, so the stream entry stays pending in the consumer group until
-  Claude calls `ack_event`.
+  acknowledgement, so a valid, routed event's stream entry stays pending in the
+  consumer group until Claude calls `ack_event`. Reclaiming entries left pending
+  by a crash (and their redelivery) arrives with mctlhq/mctl-claude-remote#55.
 - **New groups start at the tail.** The first time the adapter creates its
   consumer group it starts at `$`, so a new session is not flooded with the
   retained history; set `"group_start": "0"` in the policy to replay it. After
@@ -259,6 +260,8 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
 | `MCTL_EVENTS_ENABLED` | `true` to load the channel (default `false`: launch unchanged) |
 | `MCTL_EVENTS_VALKEY_URL` | e.g. `redis://claude-remote@valkey.platform-events.svc.cluster.local:6379/0` |
 | `MCTL_EVENTS_VALKEY_PASSWORD_FILE` | file holding the `claude-remote` ACL user's password |
+| `MCTL_EVENTS_TELEGRAM_MCP_URL` | optional https URL of the mctl-telegram MCP used to hydrate `telegram.message.*` events (registered as server `mctl-telegram`) |
+| `MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE` | file holding a **read-only** mctl-telegram worker token; exported as `MCTL_TELEGRAM_MCP_TOKEN` and referenced from the MCP header, never written to the config |
 | `MCTL_EVENTS_POLICY` | **path** to a JSON routing policy file (`events/mctl_events/policy.py`), not inline JSON |
 
 The development-channels flag shows a confirmation on every launch that nothing

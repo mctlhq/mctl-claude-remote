@@ -90,6 +90,8 @@ class PolicyTest(unittest.TestCase):
             {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:x", "sources": [], "types": ["a.b"]}]},
             {"group": "g", "consumer": "c", "routes": [], "max_inflight": 0},
             {"group": "g\n", "consumer": "c", "routes": []},
+            {"group": "g", "consumer": "c", "routes": [], "ack_timeout_seconds": 60},
+            {"group": "g", "consumer": "c", "routes": [], "dedup_ttl_seconds": 60},
             {"group": "g", "consumer": "c", "routes": [], "group_start": ">"},
             {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:x\n", "sources": ["a"], "types": ["a.b.c"]}]},
             {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:audit", "sources": ["a"], "types": ["a.b"]}]},
@@ -125,6 +127,69 @@ class PoisonEntryTest(unittest.TestCase):
         adapter.handle = boom
         self.assertEqual(1, adapter.read_once(block_ms=1))
         self.assertIn(("XACK", "mctl:events:telegram", "g", "9-0"), commands.calls)
+
+    def test_failed_delivery_releases_its_in_flight_slot(self) -> None:
+        from mctl_events.channel import Adapter
+
+        class Reader:
+            def execute(self, *args, **_kwargs):
+                return [[b"mctl:events:telegram", [[b"10-0", [b"envelope", json.dumps(envelope()).encode()]]]]]
+
+        class Commands:
+            def __init__(self) -> None:
+                self.calls: list[tuple] = []
+
+            def execute(self, *args, **_kwargs):
+                self.calls.append(args)
+                return 1
+
+        def broken_pipe(_message):
+            raise BrokenPipeError("stdout closed")
+
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "max_inflight": 1, "routes": [
+            {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*.*"]}]})
+        commands = Commands()
+        adapter = Adapter(policy, commands, Reader(), broken_pipe)
+        # BrokenPipeError is an OSError, which the loop treats as transport
+        # trouble; wrap it so the poison path is exercised.
+        original = adapter.handle
+
+        def handle(*args):
+            try:
+                original(*args)
+            except OSError as exc:
+                raise RuntimeError(str(exc)) from exc
+
+        adapter.handle = handle
+        adapter.read_once(block_ms=1)
+        self.assertIn(("XACK", "mctl:events:telegram", "g", "10-0"), commands.calls)
+        self.assertEqual({}, adapter.inflight)
+        self.assertEqual(1, adapter.capacity())
+
+
+class PasswordFileTest(unittest.TestCase):
+    def test_only_the_line_ending_is_stripped(self) -> None:
+        import os
+        import tempfile
+        from unittest import mock
+
+        from mctl_events import channel
+
+        with tempfile.NamedTemporaryFile("w", delete=False) as handle:
+            handle.write(" pass word \n")
+        seen = {}
+
+        def fake_endpoint(url, password=None):
+            seen["password"] = password
+            raise SystemExit(0)
+
+        env = {"MCTL_EVENTS_VALKEY_URL": "redis://u@127.0.0.1:1/0", "MCTL_EVENTS_POLICY": "/nonexistent",
+               "MCTL_EVENTS_VALKEY_PASSWORD_FILE": handle.name}
+        with mock.patch.dict(os.environ, env), mock.patch.object(channel.Endpoint, "from_url", fake_endpoint):
+            with self.assertRaises(SystemExit):
+                channel.main()
+        os.unlink(handle.name)
+        self.assertEqual(" pass word ", seen["password"])
 
 
 class AckRetryTest(unittest.TestCase):

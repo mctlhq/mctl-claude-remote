@@ -10,9 +10,11 @@ Delivery contract (walking skeleton):
   stream, nothing polls a producer;
 - push a short, reference-only notification: the event says *what* happened and
   *where to look*, never the content;
-- `XACK` only when Claude calls `ack_event` -- the Channels protocol has no
-  acknowledgement of its own, so an unacknowledged entry stays pending in the
-  group rather than being silently lost.
+- for a valid, routed event, `XACK` only when Claude calls `ack_event` -- the
+  Channels protocol has no acknowledgement of its own, so an unacknowledged
+  entry stays pending in the group rather than being silently lost. Entries
+  that can never be delivered (malformed, out of policy, duplicates) are
+  acknowledged by the adapter itself and recorded in the audit stream.
 
 The event is disposable, the source is canonical: Claude always hydrates current
 state from the subject references through the source system's MCP tools.
@@ -22,9 +24,11 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import sys
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, TextIO
@@ -39,6 +43,12 @@ AUDIT_MAXLEN = 10000
 # Audit is best effort and must never hold delivery back, so it gets its own
 # connection with a short timeout.
 AUDIT_TIMEOUT_SECONDS = 1.0
+AUDIT_QUEUE_MAX = 10000
+# Event ids acknowledged recently. A duplicate stream entry that arrives after
+# the ack (a producer retry, or one the in-flight read did not include) is
+# acknowledged silently instead of waking the session again. Bounded and in
+# memory: durable dedup across restarts arrives with #55.
+RECENTLY_ACKED_MAX = 4096
 
 INSTRUCTIONS = """\
 Events from MCTL arrive as <channel source="mctl-events" ...> tags. An event is a
@@ -54,7 +64,8 @@ For each event:
    current state (for example whether you already replied) before any side effect.
 3. Keep the turn short; do not block the session.
 4. Call `ack_event` with the event_id, an outcome (handled | ignored | failed) and a
-   short note naming what you hydrated. Unacknowledged events are redelivered.
+   short note naming what you hydrated. An unacknowledged event stays pending in
+   the stream and blocks a delivery slot; do not skip the ack.
 """
 
 HYDRATION_HINTS = {
@@ -124,6 +135,10 @@ class Adapter:
         self.auditor = auditor if auditor is not None else commands
         self.emit = emit
         self.inflight: dict[str, Inflight] = {}
+        self.recently_acked: OrderedDict[str, None] = OrderedDict()
+        self._audit_queue: queue.Queue[list[Any] | None] = queue.Queue(maxsize=AUDIT_QUEUE_MAX)
+        self._audit_thread = threading.Thread(target=self._drain_audit, name="audit", daemon=True)
+        self._audit_thread.start()
         # One lock orders delivery and acknowledgement: `delivered` is always
         # audited before a concurrent `ack_event` can audit `acked`, and the
         # condition wakes a consumer waiting for in-flight capacity.
@@ -132,6 +147,13 @@ class Adapter:
 
     # -- audit -------------------------------------------------------------
     def audit(self, stage: str, event_id: str, correlation_id: str = "", **fields: Any) -> None:
+        """Queue an audit record. Never blocks delivery or acknowledgement.
+
+        Records are written in the order they are queued by a single background
+        writer, so calling this under the delivery lock keeps received ->
+        delivered -> acked ordered without holding the lock across network I/O.
+        """
+
         record = {"stage": stage, "event_id": event_id, "correlation_id": correlation_id,
                   "component": SERVER_NAME, "group": self.policy.group,
                   "consumer": self.policy.consumer, **{k: str(v) for k, v in fields.items()}}
@@ -140,10 +162,30 @@ class Adapter:
         for key, value in sorted(record.items()):
             args += [key, value]
         try:
-            self.auditor.execute(*args, timeout=AUDIT_TIMEOUT_SECONDS)
-        except (ValkeyError, ValkeyConnectionError, OSError, UnicodeEncodeError) as exc:
-            # The audit trail is best effort; delivery must not depend on it.
-            _log("audit write failed", error=str(exc))
+            self._audit_queue.put_nowait(args)
+        except queue.Full:
+            _log("audit queue full; record dropped", stage=stage, event_id=event_id)
+
+    def _drain_audit(self) -> None:
+        while True:
+            args = self._audit_queue.get()
+            if args is None:
+                self._audit_queue.task_done()
+                return
+            try:
+                self.auditor.execute(*args, timeout=AUDIT_TIMEOUT_SECONDS)
+            except (ValkeyError, ValkeyConnectionError, OSError, UnicodeEncodeError) as exc:
+                # The audit trail is best effort; delivery must not depend on it.
+                _log("audit write failed", error=str(exc))
+            finally:
+                self._audit_queue.task_done()
+
+    def flush_audit(self, timeout: float = 5.0) -> None:
+        """Wait until queued audit records are written (tests, shutdown)."""
+
+        deadline = time.time() + timeout
+        while self._audit_queue.unfinished_tasks and time.time() < deadline:
+            time.sleep(0.01)
 
     # -- consumer ----------------------------------------------------------
     def ensure_groups(self) -> None:
@@ -175,6 +217,11 @@ class Adapter:
             return
 
         with self._lock:
+            if env.id in self.recently_acked:
+                self.audit("duplicate", env.id, env.correlation_id, stream=stream, entry_id=entry_id,
+                           reason="already acknowledged")
+                self.commands.execute("XACK", stream, self.policy.group, entry_id)
+                return
             current = self.inflight.get(env.id)
             if current is not None:
                 # Same event still awaiting Claude's ack: do not wake the session
@@ -187,6 +234,18 @@ class Adapter:
             self.audit("received", env.id, env.correlation_id, stream=stream, entry_id=entry_id)
             self.emit(notification_for(env, item.attempt))
             self.audit("delivered", env.id, env.correlation_id, attempt=item.attempt)
+
+    def forget_entry(self, stream: str, entry_id: str) -> None:
+        """Drop in-flight state for an entry the adapter is about to XACK itself,
+        so a failed delivery cannot hold a slot for an event already acknowledged."""
+
+        with self._lock:
+            for event_id, item in list(self.inflight.items()):
+                if (stream, entry_id) in item.entries:
+                    item.entries.remove((stream, entry_id))
+                    if not item.entries:
+                        del self.inflight[event_id]
+            self._lock.notify_all()
 
     def capacity(self) -> int:
         with self._lock:
@@ -222,6 +281,7 @@ class Adapter:
                 except Exception as exc:  # noqa: BLE001 - one bad entry must not stop the consumer
                     _log("entry handling failed; acknowledging it as rejected",
                          entry_id=entry_id.decode(), error=repr(exc)[:300])
+                    self.forget_entry(stream_name.decode(), entry_id.decode())
                     self.audit("rejected", event_id=f"{stream_name.decode()}/{entry_id.decode()}",
                                reason=f"unhandled: {type(exc).__name__}")
                     self.commands.execute("XACK", stream_name.decode(), self.policy.group, entry_id.decode())
@@ -259,6 +319,9 @@ class Adapter:
             for stream, entry_id in item.entries:
                 self.commands.execute("XACK", stream, self.policy.group, entry_id)
             del self.inflight[event_id]
+            self.recently_acked[event_id] = None
+            while len(self.recently_acked) > RECENTLY_ACKED_MAX:
+                self.recently_acked.popitem(last=False)
             self.audit("acked", event_id, item.envelope.correlation_id, outcome=outcome,
                        note=note[:500], attempt=item.attempt, entries=len(item.entries),
                        latency_ms=int((time.time() - item.delivered_at) * 1000))
@@ -379,7 +442,9 @@ def main() -> int:
         _log("MCTL_EVENTS_VALKEY_URL and MCTL_EVENTS_POLICY are required")
         return 2
     password_file = os.environ.get("MCTL_EVENTS_VALKEY_PASSWORD_FILE")
-    password = Path(password_file).read_text(encoding="utf-8").strip() if password_file else None
+    # Only the file's line ending is removed: an ACL password may legitimately
+    # contain other whitespace.
+    password = Path(password_file).read_text(encoding="utf-8").rstrip("\r\n") if password_file else None
     endpoint = Endpoint.from_url(url, password=password)
     policy = policy_mod.load(Path(policy_path))
 

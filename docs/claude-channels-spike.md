@@ -82,15 +82,17 @@ an unattended container cannot.
 
 ## Not proven at the time of the spike (closed 2026-09-17, see Status)
 
-The full **event → Claude → reply-tool (ack)** round trip was **not**
-reproduced in the automated harness. Six `expect`-driven attempts were all
-defeated by TUI timing: the channel subprocess (and therefore its HTTP
-listener) only binds *after* the session finishes its startup dialogs, and
-driving those dialogs deterministically through `expect` proved unreliable.
-This is a test-harness limitation, not evidence against Channels — registration
-is confirmed and the notification mechanism is documented. Proving the ack
-end-to-end needs either a real TTY or a PTY driver that watches for each dialog
-by content rather than by fixed sleeps.
+At the time of this spike the full **event → Claude → reply-tool (ack)** round
+trip had not been reproduced in an automated harness: six `expect`-driven
+attempts were defeated by TUI timing, because the channel subprocess only
+starts after the session finishes its startup dialogs.
+
+**Closure.** The failures were fixed-sleep timing, not a protocol problem. A PTY
+driver that recognises dialogs by their text (whitespace removed, since the TUI
+draws words with cursor moves) passes the development-channels confirmation in
+about 1.6 s, and the round trip was then reproduced on Claude Code 2.1.273, with
+and without `--remote-control`. That driver ships as `bin/claude-pty-launch`, and
+the entrypoint uses it when `MCTL_EVENTS_ENABLED=true`.
 
 ## Options
 

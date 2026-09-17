@@ -36,13 +36,19 @@ class WalkingSkeletonTest(unittest.TestCase):
             time.sleep(0.05)
         raise AssertionError("consumer group never created")
 
-    def audit_stages(self, event_id: str) -> list[str]:
-        stages = []
-        for _, flat in self.db.execute("XRANGE", AUDIT_STREAM, "-", "+"):
-            fields = dict(zip(flat[::2], flat[1::2]))
-            if fields[b"event_id"].decode() == event_id:
-                stages.append(fields[b"stage"].decode())
-        return stages
+    def audit_stages(self, event_id: str, expect: list[str] | None = None) -> list[str]:
+        """Audit writes are asynchronous: poll until the expected stages land."""
+
+        deadline = time.time() + 5
+        while True:
+            stages = []
+            for _, flat in self.db.execute("XRANGE", AUDIT_STREAM, "-", "+") or []:
+                fields = dict(zip(flat[::2], flat[1::2]))
+                if fields[b"event_id"].decode() == event_id:
+                    stages.append(fields[b"stage"].decode())
+            if expect is None or stages == expect or time.time() > deadline:
+                return stages
+            time.sleep(0.05)
 
     def test_declares_the_channel_capability(self) -> None:
         init = self.claude.handshake()
@@ -72,7 +78,7 @@ class WalkingSkeletonTest(unittest.TestCase):
         ack = self.claude.call("ack_event", event_id=doc["id"], outcome="handled", note="get_messages user:42")
         self.assertEqual("acknowledged", ack["body"]["status"])
         self.assertEqual(0, self.pending())
-        self.assertEqual(["received", "delivered", "acked"], self.audit_stages(doc["id"]))
+        self.assertEqual(["received", "delivered", "acked"], self.audit_stages(doc["id"], ["received", "delivered", "acked"]))
 
     def test_notification_carries_references_not_content(self) -> None:
         self.claude.handshake()
@@ -103,7 +109,7 @@ class WalkingSkeletonTest(unittest.TestCase):
         self.publish(foreign)
         self.claude.no_notification(1.5)
         self.assertEqual(0, self.pending())
-        self.assertEqual(["skipped"], self.audit_stages(foreign["id"]))
+        self.assertEqual(["skipped"], self.audit_stages(foreign["id"], ["skipped"]))
 
     def test_ack_for_an_unknown_event_changes_nothing(self) -> None:
         self.claude.handshake()
@@ -125,7 +131,20 @@ class WalkingSkeletonTest(unittest.TestCase):
         self.assertEqual(2, self.claude.call("event_status", event_id=doc["id"])["body"]["entries"])
         self.claude.call("ack_event", event_id=doc["id"], outcome="handled")
         self.assertEqual(0, self.pending())
-        self.assertEqual(["received", "delivered", "duplicate", "acked"], self.audit_stages(doc["id"]))
+        self.assertEqual(["received", "delivered", "duplicate", "acked"], self.audit_stages(doc["id"], ["received", "delivered", "duplicate", "acked"]))
+
+    def test_duplicate_after_ack_is_acknowledged_silently(self) -> None:
+        self.claude.handshake()
+        self.wait_for_group()
+        doc = envelope("telegram:evt:v1:7:42:4001")
+        self.publish(doc)
+        self.claude.notification()
+        self.claude.call("ack_event", event_id=doc["id"], outcome="handled")
+        self.publish(doc)  # a late producer retry
+        self.claude.no_notification(1.5)
+        self.assertEqual(0, self.pending())
+        expected = ["received", "delivered", "acked", "duplicate"]
+        self.assertEqual(expected, self.audit_stages(doc["id"], expected))
 
     def test_in_flight_is_bounded_by_max_inflight(self) -> None:
         self.claude.close()

@@ -50,14 +50,11 @@ class Policy:
     group: str
     consumer: str
     routes: tuple[Route, ...]
-    ack_timeout_seconds: int = 900
     max_inflight: int = 5
-    dedup_ttl_seconds: int = 14 * 24 * 3600
     block_ms: int = 5000
-    stream_maxlen: int = 10000
     # Where a consumer group starts when the adapter creates it for the first
     # time: "$" (default) = only events published from now on, so a new session
-    # is not flooded with up to stream_maxlen historical events; "0" = replay the
+    # is not flooded with the retained history; "0" = replay the
     # retained stream. Once created, the group's position lives in Valkey and
     # restarts resume from it either way.
     group_start: str = "$"
@@ -86,8 +83,10 @@ def _positive(doc: dict[str, Any], key: str, default: int) -> int:
 def from_dict(doc: Any) -> Policy:
     if not isinstance(doc, dict):
         raise ValueError("policy must be an object")
-    allowed = {"group", "consumer", "routes", "ack_timeout_seconds", "max_inflight",
-               "dedup_ttl_seconds", "block_ms", "stream_maxlen", "group_start"}
+    # Only knobs this adapter honours. Reclaim timeouts and dedup retention arrive
+    # with the recovery work (mctlhq/mctl-claude-remote#55); accepting them
+    # before then would let an operator believe they are in effect.
+    allowed = {"group", "consumer", "routes", "max_inflight", "block_ms", "group_start"}
     unknown = sorted(set(doc) - allowed)
     if unknown:
         raise ValueError(f"unknown policy fields: {unknown}")
@@ -122,11 +121,8 @@ def from_dict(doc: Any) -> Policy:
         group=doc["group"],
         consumer=doc["consumer"],
         routes=tuple(routes),
-        ack_timeout_seconds=_positive(doc, "ack_timeout_seconds", 900),
         max_inflight=_positive(doc, "max_inflight", 5),
-        dedup_ttl_seconds=_positive(doc, "dedup_ttl_seconds", 14 * 24 * 3600),
         block_ms=_positive(doc, "block_ms", 5000),
-        stream_maxlen=_positive(doc, "stream_maxlen", 10000),
         group_start=_group_start(doc.get("group_start", "$")),
     )
 

@@ -906,11 +906,33 @@ if [ "$MCTL_EVENTS_ENABLED" = "true" ]; then
   MCTL_EVENTS_MCP_CONFIG="/tmp/mctl-events-mcp.json"
   # Values are passed through the environment the adapter inherits; the MCP
   # config only names the command, so no credential is written to disk here.
-  cat > "$MCTL_EVENTS_MCP_CONFIG" <<'JSON'
-{"mcpServers": {"mctl-events": {"command": "python3", "args": ["-m", "mctl_events.channel"],
-  "env": {"PYTHONPATH": "/opt/mctl-events"}}}}
-JSON
-  echo "[entrypoint] mctl-events channel enabled (policy=$MCTL_EVENTS_POLICY)"
+  MCTL_EVENTS_TELEGRAM_SERVER=""
+  # Optional hydration server: the mctl-telegram MCP that owns the messages the
+  # events point at, authenticated with a read-only worker token. The header
+  # references ${MCTL_TELEGRAM_MCP_TOKEN}, which Claude Code expands from the
+  # environment, so the token stays out of the config file too.
+  if [ -n "${MCTL_EVENTS_TELEGRAM_MCP_URL:-}" ]; then
+    case "$MCTL_EVENTS_TELEGRAM_MCP_URL" in
+      https://*) ;;
+      *) echo "[entrypoint] ERROR MCTL_EVENTS_TELEGRAM_MCP_URL must be https" >&2; exit 2 ;;
+    esac
+    case "$MCTL_EVENTS_TELEGRAM_MCP_URL" in
+      *[\"\\\ ]*) echo "[entrypoint] ERROR MCTL_EVENTS_TELEGRAM_MCP_URL contains a quote, backslash or space" >&2; exit 2 ;;
+    esac
+    : "${MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE:?MCTL_EVENTS_TELEGRAM_MCP_URL requires MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE}"
+    if [ ! -r "$MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE" ]; then
+      echo "[entrypoint] ERROR MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE is not readable" >&2
+      exit 2
+    fi
+    MCTL_TELEGRAM_MCP_TOKEN="$(tr -d '\r\n' < "$MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE")"
+    export MCTL_TELEGRAM_MCP_TOKEN
+    MCTL_EVENTS_TELEGRAM_SERVER=$(printf ',\n  "mctl-telegram": {"type": "http", "url": "%s",\n    "headers": {"Authorization": "Bearer ${MCTL_TELEGRAM_MCP_TOKEN}"}}' "$MCTL_EVENTS_TELEGRAM_MCP_URL")
+  fi
+  {
+    printf '{"mcpServers": {"mctl-events": {"command": "python3", "args": ["-m", "mctl_events.channel"],\n'
+    printf '  "env": {"PYTHONPATH": "/opt/mctl-events"}}%s}}\n' "$MCTL_EVENTS_TELEGRAM_SERVER"
+  } > "$MCTL_EVENTS_MCP_CONFIG"
+  echo "[entrypoint] mctl-events channel enabled (policy=$MCTL_EVENTS_POLICY telegram_hydration=${MCTL_EVENTS_TELEGRAM_MCP_URL:+on})"
 fi
 
 crash_window_start=$(date +%s)
