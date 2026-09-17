@@ -236,9 +236,10 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
   identifier (whitespace, quotes, brackets) or more than 4 KiB is rejected. Claude
   hydrates the current state from the subject references, so a stale event is
   harmless. A second stream entry for an event that is still in flight is not
-  delivered again and is acknowledged with the first; deduplication after an
-  acknowledgement that survives a restart arrives with
-  mctlhq/mctl-claude-remote#55.
+  delivered again and is acknowledged with the first, and an acknowledged event
+  id is remembered in Valkey (`mctl:events:state:dedup:<group>:<event_id>`, TTL
+  `dedup_ttl_seconds`), so a producer retry that arrives after a restart is
+  acknowledged silently instead of waking the session twice.
 - **Acknowledged by Claude, not by the transport.** Channels have no delivery
   acknowledgement, so a valid, routed event's stream entry stays pending in the
   consumer group until Claude calls `ack_event`.
@@ -249,12 +250,28 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
   entries it has not seen, after first re-reading its own pending list: entries
   delivered before the restart but never acknowledged are delivered again, and
   an automatic acknowledgement that failed is retried the same way after a
-  reconnect. This works because the policy fixes the consumer name; reclaiming
-  entries of a different, dead consumer with `XAUTOCLAIM` arrives with
-  mctlhq/mctl-claude-remote#55.
+  reconnect. This works because the policy fixes the consumer name. An entry
+  left pending by a consumer under a *different* name -- a renamed or scaled
+  deployment -- is taken over once it has been idle for `reclaim_min_idle_ms`
+  and delivered again with `attempt > 1`; after `max_attempts` deliveries
+  without an acknowledgement it is audited as `rejected` and acknowledged, so a
+  poison event cannot loop forever. The attempt number is counted in Valkey
+  (`mctl:events:state:attempt:<group>:<event_id>`) as the event is handed to
+  Claude, not taken from the stream's own delivery count: re-reading a pending
+  entry by id does not move that count, so a crash loop on one consumer name
+  would otherwise never reach the cap. In both key names the group and the
+  event id are percent-encoded, so the key for `telegram:evt:v1:7:42:6001` under
+  group `claude-remote` reads
+  `mctl:events:state:dedup:claude-remote:telegram%3Aevt%3Av1%3A7%3A42%3A6001` --
+  every event id contains `:`, and without the encoding two different ids could
+  produce one key.
 - **Deny by default.** `MCTL_EVENTS_POLICY` lists the streams, sources, event
   types and subject values this session may be woken by; anything else is
   acknowledged and audited as `skipped`.
+  Beyond the routes it accepts only knobs the adapter honours:
+  `max_inflight` (5), `block_ms` (5000), `group_start` (`$`),
+  `dedup_ttl_seconds` (86400), `reclaim_min_idle_ms` (300000) and
+  `max_attempts` (5); any other field is a startup error.
 - **Audited, best effort.** Each stage (`received`, `delivered`,
   `delivery_failed`, `duplicate`, `acked`, `skipped`, `rejected`) is appended to `mctl:events:audit` with
   `event_id` and `correlation_id`. An audit write that fails is logged and
