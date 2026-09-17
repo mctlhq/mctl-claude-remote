@@ -35,7 +35,7 @@ from typing import Any, Callable, TextIO
 
 from . import envelope as envelope_mod
 from . import policy as policy_mod
-from .valkey import Connection, Endpoint, ValkeyConnectionError, ValkeyError
+from .valkey import Connection, Endpoint, Oversized, ValkeyConnectionError, ValkeyError
 
 SERVER_NAME = "mctl-events"
 AUDIT_STREAM = "mctl:events:audit"
@@ -209,6 +209,8 @@ class Adapter:
         try:
             if raw is None:
                 raise envelope_mod.InvalidEnvelope("stream entry has no envelope field")
+            if isinstance(raw, Oversized):
+                raise envelope_mod.InvalidEnvelope(f"envelope of {raw.size} bytes was discarded unread")
             env = envelope_mod.parse(raw)
         except envelope_mod.InvalidEnvelope as exc:
             # A malformed entry can never become valid: acknowledge it so it does

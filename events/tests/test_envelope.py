@@ -166,6 +166,57 @@ class PoisonEntryTest(unittest.TestCase):
         self.assertNotIn(("XACK", "mctl:events:telegram", "g", "10-0"), commands.calls)
 
 
+class OversizedBulkTest(unittest.TestCase):
+    def test_oversized_envelope_is_skipped_unbuffered_and_rejected(self) -> None:
+        import socket
+        import threading as th
+
+        from mctl_events import valkey
+        from mctl_events.channel import Adapter
+
+        big = b"x" * (valkey.MAX_BULK_BYTES * 4)
+        reply = (b"*1\r\n*2\r\n$20\r\nmctl:events:telegram\r\n*1\r\n*2\r\n$4\r\n11-0\r\n"
+                 b"*2\r\n$8\r\nenvelope\r\n$%d\r\n%s\r\n" % (len(big), big))
+        server, client = socket.socketpair()
+        self.addCleanup(server.close)
+        conn = valkey.Connection(valkey.Endpoint("unused", 0, None, None, 0))
+        conn._sock = client
+        peak = [0]
+        fill = conn._fill
+
+        def tracking_fill() -> None:
+            fill()
+            peak[0] = max(peak[0], len(conn._buf))
+
+        conn._fill = tracking_fill
+        writer = th.Thread(target=lambda: (server.sendall(reply + b"+OK\r\n")))
+        writer.start()
+        got = conn._read_reply()
+        self.assertEqual("OK", conn._read_reply())  # the stream stays in sync
+        writer.join()
+        self.assertLess(peak[0], valkey.MAX_BULK_BYTES * 2)
+        fields = got[0][1][0][1]
+        self.assertEqual(valkey.Oversized(len(big)), fields[1])
+
+        class Commands:
+            calls: list[tuple] = []
+
+            def execute(self, *args, **_kwargs):
+                self.calls.append(args)
+                return 1
+
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
+            {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*.*"]}]})
+        commands = Commands()
+        adapter = Adapter(policy, commands, None, lambda _m: None)
+        audited: list[tuple] = []
+        adapter.audit = lambda stage, *_a, **k: audited.append((stage, k.get("reason", "")))
+        adapter.handle("mctl:events:telegram", "11-0", dict(zip(fields[::2], fields[1::2])))
+        self.assertIn(("XACK", "mctl:events:telegram", "g", "11-0"), commands.calls)
+        self.assertEqual("rejected", audited[0][0])
+        self.assertIn("discarded unread", audited[0][1])
+
+
 class PasswordFileTest(unittest.TestCase):
     def test_only_the_line_ending_is_stripped(self) -> None:
         import os

@@ -23,6 +23,18 @@ class ValkeyConnectionError(ConnectionError):
     """The connection failed or closed mid-reply."""
 
 
+# Envelopes are capped at 4 KiB; no reply this client reads legitimately carries
+# a longer string. A longer one is skipped on the wire, never buffered.
+MAX_BULK_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class Oversized:
+    """Stands in for a bulk string longer than MAX_BULK_BYTES that was discarded."""
+
+    size: int
+
+
 @dataclass(frozen=True)
 class Endpoint:
     host: str
@@ -108,6 +120,16 @@ class Connection:
         data, self._buf = self._buf[:n], self._buf[n + 2 :]
         return data
 
+    def _skip(self, n: int) -> None:
+        """Discard n bytes plus CRLF without holding more than one chunk."""
+        remaining = n + 2
+        while remaining:
+            if not self._buf:
+                self._fill()
+            take = min(remaining, len(self._buf))
+            self._buf = self._buf[take:]
+            remaining -= take
+
     def _fill(self) -> None:
         assert self._sock is not None
         chunk = self._sock.recv(65536)
@@ -126,7 +148,12 @@ class Connection:
             return int(rest)
         if kind == b"$":
             n = int(rest)
-            return None if n < 0 else self._read_exact(n)
+            if n < 0:
+                return None
+            if n > MAX_BULK_BYTES:
+                self._skip(n)
+                return Oversized(n)
+            return self._read_exact(n)
         if kind == b"*":
             n = int(rest)
             return None if n < 0 else [self._read_reply() for _ in range(n)]
