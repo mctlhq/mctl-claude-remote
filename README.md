@@ -218,3 +218,63 @@ docker stop cr-test
 ## License
 
 [MIT](LICENSE)
+
+## Inbound events Channel (optional)
+
+`MCTL_EVENTS_ENABLED=true` wakes the live remote-control session on platform
+events — a Telegram message, a GitHub pull request — without polling
+(mctlhq/.github#87).
+
+```
+producer → Valkey Streams (platform-events) → mctl-events adapter (MCP stdio,
+claude/channel) → running session → hydration through MCP / gh → ack_event → XACK
+```
+
+- **Events are references, not content.** The adapter accepts only closed
+  `mctl.events/v1` envelopes (`events/mctl_events/envelope.py`); an envelope with
+  an extra field, a nested subject value, a subject value that is not an
+  identifier (whitespace, quotes, brackets) or more than 4 KiB is rejected. Claude
+  hydrates the current state from the subject references, so a stale event is
+  harmless. A second stream entry for an event that is still in flight is not
+  delivered again and is acknowledged with the first; deduplication after an
+  acknowledgement that survives a restart arrives with
+  mctlhq/mctl-claude-remote#55.
+- **Acknowledged by Claude, not by the transport.** Channels have no delivery
+  acknowledgement, so a valid, routed event's stream entry stays pending in the
+  consumer group until Claude calls `ack_event`.
+- **New groups start at the tail.** The first time the adapter creates its
+  consumer group it starts at `$`, so a new session is not flooded with the
+  retained history; set `"group_start": "0"` in the policy to replay it. After
+  that the group's read position lives in Valkey, so a restart reads only
+  entries it has not seen, after first re-reading its own pending list: entries
+  delivered before the restart but never acknowledged are delivered again, and
+  an automatic acknowledgement that failed is retried the same way after a
+  reconnect. This works because the policy fixes the consumer name; reclaiming
+  entries of a different, dead consumer with `XAUTOCLAIM` arrives with
+  mctlhq/mctl-claude-remote#55.
+- **Deny by default.** `MCTL_EVENTS_POLICY` lists the streams, sources, event
+  types and subject values this session may be woken by; anything else is
+  acknowledged and audited as `skipped`.
+- **Audited, best effort.** Each stage (`received`, `delivered`,
+  `delivery_failed`, `duplicate`, `acked`, `skipped`, `rejected`) is appended to `mctl:events:audit` with
+  `event_id` and `correlation_id`. An audit write that fails is logged and
+  skipped; it never holds delivery back, so the trail can have gaps while Valkey
+  is unreachable. On shutdown the adapter waits up to 5 s for queued audit
+  records to be written, and on SIGTERM the entrypoint gives the session up to
+  10 s to exit so that drain can happen. Duplicates of an in-flight event keep
+  at most 16 stream entries; further copies are acknowledged at once.
+
+| Variable | Meaning |
+|---|---|
+| `MCTL_EVENTS_ENABLED` | `true` to load the channel (default `false`: launch unchanged) |
+| `MCTL_EVENTS_VALKEY_URL` | e.g. `redis://claude-remote@valkey.platform-events.svc.cluster.local:6379/0` |
+| `MCTL_EVENTS_VALKEY_PASSWORD_FILE` | file holding the `claude-remote` ACL user's password |
+| `MCTL_EVENTS_TELEGRAM_MCP_URL` | optional https URL of the mctl-telegram MCP used to hydrate `telegram.message.*` events (registered as server `mctl-telegram`) |
+| `MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE` | file holding a **read-only** mctl-telegram worker token; exported as `MCTL_TELEGRAM_MCP_TOKEN` and referenced from the MCP header, never written to the config |
+| `MCTL_EVENTS_POLICY` | **path** to a JSON routing policy file, not inline JSON (the format is defined by the loader in `events/mctl_events/policy.py`) |
+| `CLAUDE_PTY_ANSWER_WINDOW_SECONDS` | seconds after launch during which the PTY launcher answers the startup dialogs (default `120`); later output is never answered, even if it repeats a dialog's words |
+
+The development-channels flag shows a confirmation on every launch that nothing
+persists, so with the channel enabled the session runs under
+`bin/claude-pty-launch`, which answers that dialog (and only the dialogs it
+knows) by screen content instead of by timing.

@@ -702,12 +702,14 @@ relay_tls_established() {
 }
 
 # Echo the PID of the remote-control claude leaf — cmdline has --remote-control
-# and is not a script/sh wrapper (nor a `claude -p` steward tick, which has no
-# --remote-control).
+# and is not a script/sh wrapper, nor the claude-pty-launch wrapper (a SIGKILL
+# there would orphan the PTY child), nor a `claude -p` steward tick, which has
+# no --remote-control.
 find_claude_pid() {
   for p in /proc/[0-9]*; do
     [ -r "$p/cmdline" ] || continue
     cmd=$(tr '\0' ' ' < "$p/cmdline" 2>/dev/null)
+    case "$cmd" in *claude-pty-launch*) continue ;; esac
     case "$cmd" in *--remote-control*) ;; *) continue ;; esac
     first=${cmd%% *}
     case "${first##*/}" in script|sh|bash|dash|env) continue ;; esac
@@ -883,9 +885,67 @@ on_term() {
   echo "[entrypoint] received SIGTERM/INT; stopping claude"
   [ -n "$WEDGE_PROBE_PID" ] && kill "$WEDGE_PROBE_PID" 2>/dev/null || true
   [ -n "$CLAUDE_CHILD" ] && kill -TERM "$CLAUDE_CHILD" 2>/dev/null || true
+  # With the events Channel on, give the session a bounded chance to exit so
+  # the adapter sees stdin close and flushes its last audit records before
+  # PID 1 exits and the container is torn down.
+  if [ "${MCTL_EVENTS_ENABLED:-false}" = "true" ] && [ -n "$CLAUDE_CHILD" ]; then
+    _term_wait=0
+    while kill -0 "$CLAUDE_CHILD" 2>/dev/null && [ "$_term_wait" -lt 10 ]; do
+      sleep 1
+      _term_wait=$((_term_wait + 1))
+    done
+  fi
   exit 0
 }
 trap on_term TERM INT
+
+# ── Inbound events Channel (optional) ────────────────────────────────────────
+# MCTL_EVENTS_ENABLED=true loads the mctl-events adapter as a Claude Code
+# development channel: events from platform Valkey Streams are pushed into this
+# live session (mctlhq/.github#87). The development-channels flag shows a
+# confirmation on every launch, so the session then runs under
+# claude-pty-launch, which answers it by screen content. Default off: the
+# launch below is byte-for-byte the previous `script -qfc` one.
+MCTL_EVENTS_ENABLED="${MCTL_EVENTS_ENABLED:-false}"
+MCTL_EVENTS_MCP_CONFIG=""
+if [ "$MCTL_EVENTS_ENABLED" = "true" ]; then
+  : "${MCTL_EVENTS_VALKEY_URL:?MCTL_EVENTS_ENABLED=true requires MCTL_EVENTS_VALKEY_URL}"
+  : "${MCTL_EVENTS_POLICY:?MCTL_EVENTS_ENABLED=true requires MCTL_EVENTS_POLICY}"
+  if [ ! -r "$MCTL_EVENTS_POLICY" ]; then
+    echo "[entrypoint] ERROR MCTL_EVENTS_POLICY=$MCTL_EVENTS_POLICY is not readable" >&2
+    exit 2
+  fi
+  MCTL_EVENTS_MCP_CONFIG="/tmp/mctl-events-mcp.json"
+  # Values are passed through the environment the adapter inherits; the MCP
+  # config only names the command, so no credential is written to disk here.
+  MCTL_EVENTS_TELEGRAM_SERVER=""
+  # Optional hydration server: the mctl-telegram MCP that owns the messages the
+  # events point at, authenticated with a read-only worker token. The header
+  # references ${MCTL_TELEGRAM_MCP_TOKEN}, which Claude Code expands from the
+  # environment, so the token stays out of the config file too.
+  if [ -n "${MCTL_EVENTS_TELEGRAM_MCP_URL:-}" ]; then
+    case "$MCTL_EVENTS_TELEGRAM_MCP_URL" in
+      https://*) ;;
+      *) echo "[entrypoint] ERROR MCTL_EVENTS_TELEGRAM_MCP_URL must be https" >&2; exit 2 ;;
+    esac
+    case "$MCTL_EVENTS_TELEGRAM_MCP_URL" in
+      *[\"\\\ ]*|*[[:cntrl:]]*) echo "[entrypoint] ERROR MCTL_EVENTS_TELEGRAM_MCP_URL contains a quote, backslash, space or control character" >&2; exit 2 ;;
+    esac
+    : "${MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE:?MCTL_EVENTS_TELEGRAM_MCP_URL requires MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE}"
+    if [ ! -r "$MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE" ]; then
+      echo "[entrypoint] ERROR MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE is not readable" >&2
+      exit 2
+    fi
+    MCTL_TELEGRAM_MCP_TOKEN="$(tr -d '\r\n' < "$MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE")"
+    export MCTL_TELEGRAM_MCP_TOKEN
+    MCTL_EVENTS_TELEGRAM_SERVER=$(printf ',\n  "mctl-telegram": {"type": "http", "url": "%s",\n    "headers": {"Authorization": "Bearer ${MCTL_TELEGRAM_MCP_TOKEN}"}}' "$MCTL_EVENTS_TELEGRAM_MCP_URL")
+  fi
+  {
+    printf '{"mcpServers": {"mctl-events": {"command": "python3", "args": ["-m", "mctl_events.channel"],\n'
+    printf '  "env": {"PYTHONPATH": "/opt/mctl-events"}}%s}}\n' "$MCTL_EVENTS_TELEGRAM_SERVER"
+  } > "$MCTL_EVENTS_MCP_CONFIG"
+  echo "[entrypoint] mctl-events channel enabled (policy=$MCTL_EVENTS_POLICY telegram_hydration=${MCTL_EVENTS_TELEGRAM_MCP_URL:+on})"
+fi
 
 crash_window_start=$(date +%s)
 crash_count=0
@@ -893,7 +953,15 @@ while true; do
   resolve_resume
   echo "[entrypoint] launching claude --remote-control (${RESUME_FLAG:-fresh})"
   set +e
-  script -qfc "claude --remote-control ${DEVICE_NAME} ${RESUME_FLAG} --dangerously-skip-permissions 2>&1" /dev/stdout &
+  if [ -n "$MCTL_EVENTS_MCP_CONFIG" ]; then
+    # shellcheck disable=SC2086 # RESUME_FLAG is intentionally word-split (flag + uuid)
+    claude-pty-launch -- claude --remote-control "${DEVICE_NAME}" ${RESUME_FLAG} \
+      --mcp-config "$MCTL_EVENTS_MCP_CONFIG" \
+      --dangerously-load-development-channels server:mctl-events \
+      --dangerously-skip-permissions 2>&1 &
+  else
+    script -qfc "claude --remote-control ${DEVICE_NAME} ${RESUME_FLAG} --dangerously-skip-permissions 2>&1" /dev/stdout &
+  fi
   CLAUDE_CHILD=$!
   # Per-launch startup-wedge backstop: detects a relay that never comes up (e.g.
   # a resume modal blocking startup) and rotates to a fresh session + alerts.

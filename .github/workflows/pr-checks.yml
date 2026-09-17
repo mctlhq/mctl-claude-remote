@@ -22,6 +22,15 @@ jobs:
       - name: Node syntax
         run: node --check health-proxy.js
 
+      # The Channel adapter's tests run against a real server: stream and
+      # consumer-group semantics are the thing under test, so a fake would only
+      # prove the fake. Ubuntu's redis-server speaks the same Streams protocol.
+      - name: Install Redis-protocol server for adapter tests
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-server
+
+      - name: Inbound events adapter and PTY launcher tests
+        run: python3 -m unittest discover -s events/tests -p 'test_*.py' -v
+
       - name: Docker build
         uses: docker/build-push-action@v5
         with:

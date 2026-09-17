@@ -1,6 +1,14 @@
 # Claude Code Channels — Spike (Communication Agent, Phase 0)
 
-Status: **spike complete, recommendation below.** This documents what was
+Status: **spike complete; the open gap is now closed.** On 2026-09-17 the full
+event → running session → reply-tool round trip was proven on Claude Code
+2.1.273, with and without `--remote-control`, and the development-channels
+confirmation is answered by `bin/claude-pty-launch` (content-matched, not timed).
+The delivery design moved to platform Valkey Streams — see the README section
+"Inbound events Channel" and mctlhq/.github#87. The rest of this document is the
+original spike record.
+
+ This documents what was
 verified about Claude Code "Channels" as the delivery mechanism for pushing
 Telegram events into a dedicated Claude session for the MCTL Communication
 Agent, and why the production recommendation is what it is.
@@ -31,8 +39,8 @@ Contract (verified against the docs and a Go prototype):
 
 1. **The flags exist in the pinned runtime.** `--channels <servers...>` and
    `--dangerously-load-development-channels <servers...>` are present (though
-   hidden from `--help`) in Claude Code **2.1.198** (the image pin) and
-   2.1.209. `-p`/`--print` (non-interactive) mode is documented to support
+   hidden from `--help`) in Claude Code **2.1.198** (the image pin at the time
+   of this spike; the image now pins 2.1.273) and 2.1.209. `-p`/`--print` (non-interactive) mode is documented to support
    channels — the real constraint is that `-p` is one-shot: the process
    exits after its turn, so a channel notification only reaches it if
    something is already invoking `-p` per event, not because channels and
@@ -72,17 +80,19 @@ This is the load-bearing constraint for deployment, not a property of Channels
 themselves: a human at a TTY clears the dialog once and the channel works, but
 an unattended container cannot.
 
-## Not proven
+## Not proven at the time of the spike (closed 2026-09-17, see Status)
 
-The full **event → Claude → reply-tool (ack)** round trip was **not**
-reproduced in the automated harness. Six `expect`-driven attempts were all
-defeated by TUI timing: the channel subprocess (and therefore its HTTP
-listener) only binds *after* the session finishes its startup dialogs, and
-driving those dialogs deterministically through `expect` proved unreliable.
-This is a test-harness limitation, not evidence against Channels — registration
-is confirmed and the notification mechanism is documented. Proving the ack
-end-to-end needs either a real TTY or a PTY driver that watches for each dialog
-by content rather than by fixed sleeps.
+At the time of this spike the full **event → Claude → reply-tool (ack)** round
+trip had not been reproduced in an automated harness: six `expect`-driven
+attempts were defeated by TUI timing, because the channel subprocess only
+starts after the session finishes its startup dialogs.
+
+**Closure.** The failures were fixed-sleep timing, not a protocol problem. A PTY
+driver that recognises dialogs by their text (whitespace removed, since the TUI
+draws words with cursor moves) passes the development-channels confirmation in
+about 1.6 s, and the round trip was then reproduced on Claude Code 2.1.273, with
+and without `--remote-control`. That driver ships as `bin/claude-pty-launch`, and
+the entrypoint uses it when `MCTL_EVENTS_ENABLED=true`.
 
 ## Options
 
