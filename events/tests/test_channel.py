@@ -8,7 +8,7 @@ import unittest
 from support import POLICY, FakeClaude, ValkeyServer, envelope, requires_valkey
 
 from mctl_events import policy as policy_mod
-from mctl_events.channel import AUDIT_STREAM, Adapter
+from mctl_events.channel import AUDIT_STREAM, PENDING_BATCH, Adapter
 from mctl_events.valkey import ValkeyConnectionError
 
 STREAM = "mctl:events:telegram"
@@ -337,6 +337,63 @@ class InProcessAdapterTest(unittest.TestCase):
         attempts = [message["params"]["meta"]["attempt"] for message in pushed]
         self.assertEqual(["1", "2"], attempts)  # the third re-read is past the cap
         self.assertEqual(0, self.db.execute("XPENDING", STREAM, "claude-remote")[0])
+
+    def test_a_notification_that_never_reached_claude_does_not_spend_an_attempt(self) -> None:
+        """A stdio hiccup is not a delivery: the event has not been tried, so the
+        durable counter is given back and the next attempt is still the first."""
+
+        pushed: list[dict] = []
+        broken = True
+
+        def emit(message: dict) -> None:
+            if broken:
+                raise BrokenPipeError("stdout is gone")
+            pushed.append(message)
+
+        policy = policy_mod.from_dict({**POLICY, "max_attempts": 1})
+        adapter = self.adapter(policy=policy, emit=emit)
+        self.db.execute("XADD", STREAM, "*", "envelope", json.dumps(envelope("telegram:evt:v1:7:42:7007")))
+        self.assertEqual(1, adapter.read_once(block_ms=100))
+        self.assertEqual({}, adapter.inflight)  # the slot was released with the attempt
+        self.assertEqual(b"0", self.db.execute(
+            "GET", "mctl:events:state:attempt:claude-remote:telegram%3Aevt%3Av1%3A7%3A42%3A7007"))
+
+        broken = False
+        self.assertEqual(1, self.adapter(policy=policy, emit=emit).recover_pending())
+        # Still attempt 1 under a cap of 1: the failed notification was refunded,
+        # so the budget was not spent on a delivery Claude never saw.
+        self.assertEqual(["1"], [message["params"]["meta"]["attempt"] for message in pushed])
+
+    def test_reclaim_looks_past_a_page_full_of_this_consumers_own_entries(self) -> None:
+        """Own entries are never taken over but still occupy rows of the pending
+        list, so a backlog of them must not hide an abandoned entry behind it."""
+
+        pushed: list[dict] = []
+        broken = True
+
+        def emit(message: dict) -> None:
+            if broken:
+                raise BrokenPipeError("stdout is gone")
+            pushed.append(message)
+
+        policy = policy_mod.from_dict({**POLICY, "reclaim_min_idle_ms": 1})
+        adapter = self.adapter(policy=policy, emit=emit)
+        # A stdio outage leaves entries pending while capacity stays free, so
+        # this consumer's own backlog grows past one XPENDING page.
+        for index in range(PENDING_BATCH + 1):
+            self.db.execute("XADD", STREAM, "*", "envelope",
+                            json.dumps(envelope(f"telegram:evt:v1:7:42:9{index:03d}")))
+        while adapter.read_once(block_ms=100):
+            pass
+        self.assertGreater(self.db.execute("XPENDING", STREAM, "claude-remote")[0], PENDING_BATCH)
+
+        self.claim_as_ghost(envelope("telegram:evt:v1:7:42:7008"))  # newest, so last in id order
+        time.sleep(0.05)
+        broken = False
+
+        self.assertEqual(1, adapter.reclaim())
+        self.assertEqual(["telegram:evt:v1:7:42:7008"],
+                         [message["params"]["meta"]["event_id"] for message in pushed])
 
     def test_reclaim_survives_an_entry_trimmed_out_of_the_stream(self) -> None:
         """An entry can be pending and gone at once, and carries nothing to deliver."""

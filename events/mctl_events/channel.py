@@ -70,6 +70,11 @@ ATTEMPT_PREFIX = "mctl:events:state:attempt"
 PENDING_BATCH = 100
 # Entries per stream taken over from other consumers in one sweep.
 RECLAIM_BATCH = 50
+# Pages of the pending list a single sweep will walk looking for entries owned
+# by someone else. Own-consumer entries are never taken over but still occupy
+# rows, so one page can be filled entirely by a backlog this consumer is working
+# through -- which would hide every abandoned entry behind it.
+PENDING_PAGES = 10
 # How often the consumer looks for entries abandoned by another consumer.
 RECLAIM_INTERVAL_SECONDS = 60.0
 
@@ -276,12 +281,25 @@ class Adapter:
 
         INCR is atomic, so two adapters reclaiming the same entry cannot both
         report the same attempt, and the count survives a restart -- which is
-        what makes `max_attempts` bound a crash loop and not only a takeover."""
+        what makes `max_attempts` bound a crash loop and not only a takeover.
+
+        The order of the three commands is what makes them safe apart, without
+        a script: the key is created with its TTL, the TTL is then pushed out,
+        and only then does the counter move. A link that drops part-way leaves
+        a key that still expires and an attempt that was never counted -- and
+        never the reverse, where a delivery Claude did not see would have spent
+        the event's budget.
+
+        Refreshing the TTL on every delivery is deliberate: an entry can stay
+        pending far longer than `dedup_ttl_seconds` (a session down for a day,
+        a generous `reclaim_min_idle_ms`), and a counter that expired underneath
+        it would restart at 1 and let a poison event outlive `max_attempts` by
+        simply being slow."""
 
         key = self._state_key(ATTEMPT_PREFIX, event_id)
-        count = int(self.commands.execute("INCR", key))
+        self.commands.execute("SET", key, "0", "EX", self.policy.dedup_ttl_seconds, "NX")
         self.commands.execute("EXPIRE", key, self.policy.dedup_ttl_seconds)
-        return count
+        return int(self.commands.execute("INCR", key))
 
     def _drop_attempt(self, event_id: str) -> None:
         """Give an attempt back when the notification never reached Claude: an
@@ -338,18 +356,15 @@ class Adapter:
             self.commands.execute("XACK", stream, self.policy.group, entry_id)
             return
 
-        # Cheap pre-check outside the lock: the common case costs one EXISTS and
-        # no contention. It is re-checked under the lock below, where a
-        # concurrent ack_event cannot slip in between the two.
-        acked = self._was_acked(env.id)
-
         with self._lock:
-            if acked or self._cached_ack(env.id):
-                # Re-checked here because `ack()` writes the marker, empties
-                # `inflight` and fills the cache while holding this lock: without
-                # the second look, a duplicate that read "not acked" just before
-                # that would find no in-flight item and wake the session again for
-                # an event Claude has already finished.
+            # The durable marker is read here, under the lock, and not before
+            # it: `ack()` writes the marker, empties `inflight` and fills the
+            # cache while holding this same lock, so a check made outside would
+            # let a duplicate that read "not acked" just beforehand find no
+            # in-flight item and wake the session again for an event Claude has
+            # already finished. It costs one round trip with the lock held, the
+            # same as the XACK this branch goes on to issue.
+            if self._cached_ack(env.id) or self._was_acked(env.id):
                 self._acknowledge_acked_locked(stream, entry_id, env)
                 return
 
@@ -450,19 +465,37 @@ class Adapter:
                 handled += 1
         return handled
 
-    def _pending_rows(self, stream: str, min_idle_ms: int | None = None) -> list[tuple[str, str]]:
-        """(entry id, owning consumer) for the oldest entries in this group's
-        pending list. The attempt number does not come from here: Valkey's
-        delivery count does not move on an ID-based re-read, so it is counted in
-        `ATTEMPT_PREFIX` instead. One page is enough because a sweep repeats
-        every `RECLAIM_INTERVAL_SECONDS` and each pass drains its oldest end."""
+    def _abandoned_entries(self, stream: str, min_idle_ms: int, limit: int) -> list[str]:
+        """Ids of entries pending on *another* consumer, oldest first.
 
-        args: list[Any] = ["XPENDING", stream, self.policy.group]
-        if min_idle_ms is not None:
-            args += ["IDLE", min_idle_ms]
-        args += ["-", "+", PENDING_BATCH]
-        return [(row[0].decode(), row[1].decode())
-                for row in self.commands.execute(*args) or []]
+        The pending list is walked a page at a time rather than read once: this
+        consumer's own entries are never taken over (`recover_pending` re-reads
+        them and they leave the list only when Claude acknowledges them), so a
+        backlog of them -- a stdio outage leaves entries pending while capacity
+        stays free -- would otherwise fill the first page every sweep and hide
+        every abandoned entry behind it. `XPENDING` returns the list in id
+        order, so each page resumes exclusively after the last id seen.
+
+        The attempt number does not come from here: Valkey's delivery count
+        does not move on an ID-based re-read, so it lives in `ATTEMPT_PREFIX`."""
+
+        found: list[str] = []
+        start = "-"
+        for _ in range(PENDING_PAGES):
+            rows = self.commands.execute(
+                "XPENDING", stream, self.policy.group, "IDLE", min_idle_ms,
+                start, "+", PENDING_BATCH,
+            ) or []
+            for row in rows:
+                entry, owner = row[0].decode(), row[1].decode()
+                if owner != self.policy.consumer:
+                    found.append(entry)
+                    if len(found) >= limit:
+                        return found
+            if len(rows) < PENDING_BATCH:
+                break  # the whole pending list fit in the pages read
+            start = f"({rows[-1][0].decode()}"
+        return found
 
     def recover_pending(self) -> int:
         """Re-read the entries this consumer already claimed but never acknowledged.
@@ -520,10 +553,8 @@ class Adapter:
             # This consumer's own idle entries are left alone: recover_pending
             # re-reads them, and claiming them here would inflate the attempt
             # number of an event Claude is still working on.
-            abandoned = sorted(entry for entry, owner in self._pending_rows(
-                stream, min_idle_ms=self.policy.reclaim_min_idle_ms)
-                if owner != self.policy.consumer)
-            batch = abandoned[:min(RECLAIM_BATCH, capacity)]
+            batch = self._abandoned_entries(
+                stream, self.policy.reclaim_min_idle_ms, min(RECLAIM_BATCH, capacity))
             if not batch:
                 continue
             reply = self.commands.execute(

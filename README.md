@@ -259,7 +259,12 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
   (`mctl:events:state:attempt:<group>:<event_id>`) as the event is handed to
   Claude, not taken from the stream's own delivery count: re-reading a pending
   entry by id does not move that count, so a crash loop on one consumer name
-  would otherwise never reach the cap.
+  would otherwise never reach the cap. In both key names the group and the
+  event id are percent-encoded, so the key for `telegram:evt:v1:7:42:6001` under
+  group `claude-remote` reads
+  `mctl:events:state:dedup:claude-remote:telegram%3Aevt%3Av1%3A7%3A42%3A6001` --
+  every event id contains `:`, and without the encoding two different ids could
+  produce one key.
 - **Deny by default.** `MCTL_EVENTS_POLICY` lists the streams, sources, event
   types and subject values this session may be woken by; anything else is
   acknowledged and audited as `skipped`.
