@@ -227,5 +227,38 @@ class AckRetryTest(unittest.TestCase):
         self.assertEqual("not_in_flight", adapter.status(event_id)["status"])
 
 
+class StdioServerTest(unittest.TestCase):
+    """Malformed JSON-RPC from the client must not stop the long-lived adapter."""
+
+    def test_non_object_requests_and_arguments_are_answered_not_fatal(self) -> None:
+        import io
+
+        from mctl_events.channel import StdioServer
+
+        class Adapter:
+            def status(self, event_id):
+                return {"event_id": event_id, "status": "not_in_flight"}
+
+        lines = [
+            "[]",
+            "42",
+            json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": []}),
+            json.dumps({"jsonrpc": "2.0", "id": 2, "method": "tools/call",
+                        "params": {"name": "event_status", "arguments": ["x"]}}),
+            json.dumps({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
+                        "params": {"name": "event_status", "arguments": {"event_id": "e1"}}}),
+        ]
+        sent: list[dict] = []
+        server = StdioServer(io.StringIO("\n".join(lines) + "\n"), io.StringIO(), on_ready=lambda: None)
+        server.send = sent.append
+        server.adapter = Adapter()
+        server.serve()
+        by_id = {m["id"]: m["result"] for m in sent}
+        self.assertEqual({1, 2, 3}, set(by_id))
+        self.assertTrue(by_id[1]["isError"])
+        self.assertTrue(by_id[2]["isError"])
+        self.assertNotIn("isError", by_id[3])
+
+
 if __name__ == "__main__":
     unittest.main()

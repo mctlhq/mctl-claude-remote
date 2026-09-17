@@ -423,11 +423,13 @@ class StdioServer:
                 continue
             try:
                 message = json.loads(line)
-            except json.JSONDecodeError:
+            except (json.JSONDecodeError, RecursionError):
                 continue
+            if not isinstance(message, dict):
+                continue  # not a JSON-RPC request object
             method, mid = message.get("method"), message.get("id")
             if method == "initialize":
-                params = message.get("params") or {}
+                params = message.get("params") if isinstance(message.get("params"), dict) else {}
                 self._result(mid, {
                     "protocolVersion": params.get("protocolVersion", "2025-06-18"),
                     "capabilities": {"tools": {}, "experimental": {"claude/channel": {}}},
@@ -441,7 +443,12 @@ class StdioServer:
             elif method == "tools/call":
                 params = message.get("params") or {}
                 try:
-                    result = self._call(params.get("name", ""), params.get("arguments") or {})
+                    if not isinstance(params, dict):
+                        raise ValueError("params must be an object")
+                    arguments = params.get("arguments") or {}
+                    if not isinstance(arguments, dict):
+                        raise ValueError("arguments must be an object")
+                    result = self._call(str(params.get("name", "")), arguments)
                     self._result(mid, {"content": [{"type": "text", "text": json.dumps(result)}]})
                 except (ValueError, RuntimeError, ValkeyError, ValkeyConnectionError) as exc:
                     self._result(mid, {"isError": True, "content": [{"type": "text", "text": str(exc)}]})
