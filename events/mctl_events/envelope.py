@@ -91,40 +91,42 @@ def parse(raw: str | bytes) -> Envelope:
 
 
 def from_dict(doc: Any) -> Envelope:
+    # Rejection reasons reach stderr and the audit stream: they name the field,
+    # never echo the untrusted value.
     if not isinstance(doc, dict):
         raise InvalidEnvelope("envelope must be an object")
     unknown = sorted(set(doc) - _FIELDS)
     if unknown:
-        raise InvalidEnvelope(f"unknown envelope fields: {unknown}")
+        raise InvalidEnvelope(f"{len(unknown)} unknown envelope field(s)")
     missing = sorted(_FIELDS - set(doc))
     if missing:
         raise InvalidEnvelope(f"missing envelope fields: {missing}")
     if doc["specversion"] != SPEC_VERSION:
-        raise InvalidEnvelope(f"unsupported specversion {doc['specversion']!r}")
+        raise InvalidEnvelope("unsupported specversion")
     for name, pattern in (("id", _ID), ("type", _TYPE), ("source", _SOURCE), ("correlation_id", _ID)):
         value = doc[name]
         if not isinstance(value, str) or not pattern.fullmatch(value):
-            raise InvalidEnvelope(f"invalid {name}: {value!r}")
+            raise InvalidEnvelope(f"invalid {name}")
     occurred_at = doc["occurred_at"]
     if not isinstance(occurred_at, str) or not _RFC3339.fullmatch(occurred_at):
-        raise InvalidEnvelope(f"invalid occurred_at: {occurred_at!r}")
+        raise InvalidEnvelope("invalid occurred_at")
     try:
         datetime.fromisoformat(occurred_at.replace("Z", "+00:00"))
     except ValueError as exc:
-        raise InvalidEnvelope(f"invalid occurred_at: {occurred_at!r}") from exc
+        raise InvalidEnvelope("invalid occurred_at") from exc
 
     subject = doc["subject"]
     if not isinstance(subject, dict) or "kind" not in subject:
         raise InvalidEnvelope("subject must be an object with a kind")
     kind = subject["kind"]
     if not isinstance(kind, str) or len(kind) > MAX_KIND or not _KIND.fullmatch(kind):
-        raise InvalidEnvelope(f"invalid subject.kind: {kind!r}")
+        raise InvalidEnvelope("invalid subject.kind")
     if len(subject) > MAX_SUBJECT_KEYS:
         raise InvalidEnvelope(f"subject has more than {MAX_SUBJECT_KEYS} keys")
     normalized: dict[str, str] = {}
     for key, value in subject.items():
         if not isinstance(key, str) or not _SUBJECT_KEY.fullmatch(key):
-            raise InvalidEnvelope(f"invalid subject key {key!r}")
+            raise InvalidEnvelope("invalid subject key")
         # References are bounded strings. A nested object, list or unbounded
         # number is how content (or an oversized value) would sneak in.
         if not isinstance(value, str):

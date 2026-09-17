@@ -166,6 +166,25 @@ class PoisonEntryTest(unittest.TestCase):
         self.assertNotIn(("XACK", "mctl:events:telegram", "g", "10-0"), commands.calls)
 
 
+class RejectionReasonTest(unittest.TestCase):
+    def test_reasons_never_echo_untrusted_values(self) -> None:
+        secret = "the-message-text"
+        for field in ("id", "type", "source", "correlation_id", "occurred_at", "specversion"):
+            doc = envelope()
+            doc[field] = secret + " !"
+            with self.assertRaises(env_mod.InvalidEnvelope) as ctx:
+                env_mod.from_dict(doc)
+            self.assertNotIn(secret, str(ctx.exception), field)
+        for mutate in (lambda d: d["subject"].__setitem__("kind", secret + " !"),
+                       lambda d: d["subject"].__setitem__(secret + " !", "x"),
+                       lambda d: d.__setitem__(secret, "x")):
+            doc = envelope()
+            mutate(doc)
+            with self.assertRaises(env_mod.InvalidEnvelope) as ctx:
+                env_mod.from_dict(doc)
+            self.assertNotIn(secret, str(ctx.exception))
+
+
 class OversizedBulkTest(unittest.TestCase):
     def test_oversized_envelope_is_skipped_unbuffered_and_rejected(self) -> None:
         import socket

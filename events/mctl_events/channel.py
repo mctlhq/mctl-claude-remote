@@ -385,7 +385,7 @@ class Adapter:
 TOOLS = [
     {
         "name": "ack_event",
-        "description": "Acknowledge an MCTL event after handling it. Unacknowledged events are redelivered.",
+        "description": "Acknowledge an MCTL event after handling it. An unacknowledged event stays pending in its stream; it is not redelivered to this session yet.",
         "inputSchema": {
             "type": "object",
             "properties": {
