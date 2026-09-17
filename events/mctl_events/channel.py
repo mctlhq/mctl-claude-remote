@@ -209,6 +209,9 @@ class Adapter:
         try:
             if raw is None:
                 raise envelope_mod.InvalidEnvelope("stream entry has no envelope field")
+            if len(fields) != 1:
+                # Reference-only transport: a second field could carry content.
+                raise envelope_mod.InvalidEnvelope("stream entry must hold only the envelope field")
             if isinstance(raw, Oversized):
                 raise envelope_mod.InvalidEnvelope(f"envelope of {raw.size} bytes was discarded unread")
             env = envelope_mod.parse(raw)

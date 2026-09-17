@@ -217,6 +217,32 @@ class OversizedBulkTest(unittest.TestCase):
         self.assertIn("discarded unread", audited[0][1])
 
 
+class ExtraFieldTest(unittest.TestCase):
+    def test_entry_with_a_field_besides_the_envelope_is_rejected(self) -> None:
+        from mctl_events.channel import Adapter
+
+        class Commands:
+            def __init__(self) -> None:
+                self.calls: list[tuple] = []
+
+            def execute(self, *args, **_kwargs):
+                self.calls.append(args)
+                return 1
+
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
+            {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*.*"]}]})
+        commands = Commands()
+        emitted: list = []
+        adapter = Adapter(policy, commands, None, emitted.append)
+        audited: list[tuple] = []
+        adapter.audit = lambda stage, *_a, **k: audited.append((stage, k.get("reason", "")))
+        adapter.handle("mctl:events:telegram", "12-0",
+                       {b"envelope": json.dumps(envelope()).encode(), b"body": b"the message text"})
+        self.assertEqual([], emitted)
+        self.assertEqual("rejected", audited[0][0])
+        self.assertIn(("XACK", "mctl:events:telegram", "g", "12-0"), commands.calls)
+
+
 class PasswordFileTest(unittest.TestCase):
     def test_only_the_line_ending_is_stripped(self) -> None:
         import os
