@@ -3,7 +3,9 @@ FROM node:22-slim
 # Pinned by default — the harness version must not float between rebuilds
 # (June's relay-TLS incidents were version-specific behavior). Bump via an
 # explicit commit, or override with --build-arg for a one-off (see issue #27).
-ARG CLAUDE_CODE_NPM_VERSION=2.1.198
+# 2.1.273: the first pin with a proven Channels round trip (event -> running
+# --remote-control session -> tool call), required by the mctl-events adapter.
+ARG CLAUDE_CODE_NPM_VERSION=2.1.273
 
 # Matches the k3s-preview cluster's server version (kube.tf install_k3s_version
 # = v1.33.13+k3s1). kubectl tolerates +/-1 minor version skew from the server,
@@ -21,6 +23,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     jq \
     openssl \
+    python3 \
     util-linux \
     && rm -rf /var/lib/apt/lists/* \
     && npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_NPM_VERSION}"
@@ -62,6 +65,12 @@ COPY entrypoint.sh /entrypoint.sh
 COPY bin/ /opt/steward/bin/
 COPY skills/ /opt/steward/skills/
 RUN chmod +x /entrypoint.sh /opt/steward/bin/*
+# Inbound events Channel adapter (stdlib-only Python) and the PTY launcher that
+# answers the development-channels confirmation. Inert unless MCTL_EVENTS_ENABLED=true.
+COPY events/mctl_events/ /opt/mctl-events/mctl_events/
+COPY bin/claude-pty-launch /usr/local/bin/claude-pty-launch
+RUN chmod +x /usr/local/bin/claude-pty-launch \
+    && python3 -c "import sys; sys.path.insert(0, '/opt/mctl-events'); import mctl_events.channel"
 
 ENV HOME=/workspace
 

@@ -218,3 +218,41 @@ docker stop cr-test
 ## License
 
 [MIT](LICENSE)
+
+## Inbound events Channel (optional)
+
+`MCTL_EVENTS_ENABLED=true` wakes the live remote-control session on platform
+events — a Telegram message, a GitHub pull request — without polling
+(mctlhq/.github#87).
+
+```
+producer → Valkey Streams (platform-events) → mctl-events adapter (MCP stdio,
+claude/channel) → running session → hydration through MCP / gh → ack_event → XACK
+```
+
+- **Events are references, not content.** The adapter accepts only closed
+  `mctl.events/v1` envelopes (`events/mctl_events/envelope.py`); an envelope with
+  an extra field, a nested subject value or more than 4 KiB is rejected. Claude
+  hydrates the current state from the subject references, so a stale or
+  duplicated event is harmless.
+- **Acknowledged by Claude, not by the transport.** Channels have no delivery
+  acknowledgement, so the stream entry stays pending in the consumer group until
+  Claude calls `ack_event`.
+- **Deny by default.** `MCTL_EVENTS_POLICY` lists the streams, sources, event
+  types and subject values this session may be woken by; anything else is
+  acknowledged and audited as `skipped`.
+- **Audited.** Every stage (`received`, `delivered`, `acked`, `skipped`,
+  `rejected`) is appended to `mctl:events:audit` with `event_id` and
+  `correlation_id`.
+
+| Variable | Meaning |
+|---|---|
+| `MCTL_EVENTS_ENABLED` | `true` to load the channel (default `false`: launch unchanged) |
+| `MCTL_EVENTS_VALKEY_URL` | e.g. `redis://claude-remote@valkey.platform-events.svc.cluster.local:6379/0` |
+| `MCTL_EVENTS_VALKEY_PASSWORD_FILE` | file holding the `claude-remote` ACL user's password |
+| `MCTL_EVENTS_POLICY` | JSON routing policy (`events/mctl_events/policy.py`) |
+
+The development-channels flag shows a confirmation on every launch that nothing
+persists, so with the channel enabled the session runs under
+`bin/claude-pty-launch`, which answers that dialog (and only the dialogs it
+knows) by screen content instead of by timing.

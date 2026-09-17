@@ -1,6 +1,14 @@
 # Claude Code Channels — Spike (Communication Agent, Phase 0)
 
-Status: **spike complete, recommendation below.** This documents what was
+Status: **spike complete; the open gap is now closed.** On 2026-09-17 the full
+event → running session → reply-tool round trip was proven on Claude Code
+2.1.273, with and without `--remote-control`, and the development-channels
+confirmation is answered by `bin/claude-pty-launch` (content-matched, not timed).
+The delivery design moved to platform Valkey Streams — see the README section
+"Inbound events Channel" and mctlhq/.github#87. The rest of this document is the
+original spike record.
+
+ This documents what was
 verified about Claude Code "Channels" as the delivery mechanism for pushing
 Telegram events into a dedicated Claude session for the MCTL Communication
 Agent, and why the production recommendation is what it is.

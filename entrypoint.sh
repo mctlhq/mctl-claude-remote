@@ -887,13 +887,47 @@ on_term() {
 }
 trap on_term TERM INT
 
+# ── Inbound events Channel (optional) ────────────────────────────────────────
+# MCTL_EVENTS_ENABLED=true loads the mctl-events adapter as a Claude Code
+# development channel: events from platform Valkey Streams are pushed into this
+# live session (mctlhq/.github#87). The development-channels flag shows a
+# confirmation on every launch, so the session then runs under
+# claude-pty-launch, which answers it by screen content. Default off: the
+# launch below is byte-for-byte the previous `script -qfc` one.
+MCTL_EVENTS_ENABLED="${MCTL_EVENTS_ENABLED:-false}"
+MCTL_EVENTS_MCP_CONFIG=""
+if [ "$MCTL_EVENTS_ENABLED" = "true" ]; then
+  : "${MCTL_EVENTS_VALKEY_URL:?MCTL_EVENTS_ENABLED=true requires MCTL_EVENTS_VALKEY_URL}"
+  : "${MCTL_EVENTS_POLICY:?MCTL_EVENTS_ENABLED=true requires MCTL_EVENTS_POLICY}"
+  if [ ! -r "$MCTL_EVENTS_POLICY" ]; then
+    echo "[entrypoint] ERROR MCTL_EVENTS_POLICY=$MCTL_EVENTS_POLICY is not readable" >&2
+    exit 2
+  fi
+  MCTL_EVENTS_MCP_CONFIG="/tmp/mctl-events-mcp.json"
+  # Values are passed through the environment the adapter inherits; the MCP
+  # config only names the command, so no credential is written to disk here.
+  cat > "$MCTL_EVENTS_MCP_CONFIG" <<'JSON'
+{"mcpServers": {"mctl-events": {"command": "python3", "args": ["-m", "mctl_events.channel"],
+  "env": {"PYTHONPATH": "/opt/mctl-events"}}}}
+JSON
+  echo "[entrypoint] mctl-events channel enabled (policy=$MCTL_EVENTS_POLICY)"
+fi
+
 crash_window_start=$(date +%s)
 crash_count=0
 while true; do
   resolve_resume
   echo "[entrypoint] launching claude --remote-control (${RESUME_FLAG:-fresh})"
   set +e
-  script -qfc "claude --remote-control ${DEVICE_NAME} ${RESUME_FLAG} --dangerously-skip-permissions 2>&1" /dev/stdout &
+  if [ -n "$MCTL_EVENTS_MCP_CONFIG" ]; then
+    # shellcheck disable=SC2086 # RESUME_FLAG is intentionally word-split (flag + uuid)
+    claude-pty-launch -- claude --remote-control "${DEVICE_NAME}" ${RESUME_FLAG} \
+      --mcp-config "$MCTL_EVENTS_MCP_CONFIG" \
+      --dangerously-load-development-channels server:mctl-events \
+      --dangerously-skip-permissions 2>&1 &
+  else
+    script -qfc "claude --remote-control ${DEVICE_NAME} ${RESUME_FLAG} --dangerously-skip-permissions 2>&1" /dev/stdout &
+  fi
   CLAUDE_CHILD=$!
   # Per-launch startup-wedge backstop: detects a relay that never comes up (e.g.
   # a resume modal blocking startup) and rotates to a fresh session + alerts.
