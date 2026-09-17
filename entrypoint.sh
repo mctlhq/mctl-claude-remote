@@ -883,6 +883,16 @@ on_term() {
   echo "[entrypoint] received SIGTERM/INT; stopping claude"
   [ -n "$WEDGE_PROBE_PID" ] && kill "$WEDGE_PROBE_PID" 2>/dev/null || true
   [ -n "$CLAUDE_CHILD" ] && kill -TERM "$CLAUDE_CHILD" 2>/dev/null || true
+  # With the events Channel on, give the session a bounded chance to exit so
+  # the adapter sees stdin close and flushes its last audit records before
+  # PID 1 exits and the container is torn down.
+  if [ "${MCTL_EVENTS_ENABLED:-false}" = "true" ] && [ -n "$CLAUDE_CHILD" ]; then
+    _term_wait=0
+    while kill -0 "$CLAUDE_CHILD" 2>/dev/null && [ "$_term_wait" -lt 10 ]; do
+      sleep 1
+      _term_wait=$((_term_wait + 1))
+    done
+  fi
   exit 0
 }
 trap on_term TERM INT

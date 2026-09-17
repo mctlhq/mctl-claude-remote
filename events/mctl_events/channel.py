@@ -43,6 +43,8 @@ AUDIT_MAXLEN = 10000
 # Audit is best effort and must never hold delivery back, so it gets its own
 # connection with a short timeout.
 AUDIT_TIMEOUT_SECONDS = 1.0
+# Stream entries kept per in-flight event; further duplicates are acked at once.
+MAX_ENTRIES_PER_EVENT = 16
 AUDIT_QUEUE_MAX = 10000
 # Event ids acknowledged recently. A duplicate stream entry that arrives after
 # the ack (a producer retry, or one the in-flight read did not include) is
@@ -230,6 +232,14 @@ class Adapter:
             if current is not None:
                 # Same event still awaiting Claude's ack: do not wake the session
                 # twice; this entry is acknowledged together with the first.
+                if len(current.entries) >= MAX_ENTRIES_PER_EVENT:
+                    # A retry storm must not grow in-flight state without bound:
+                    # the kept entries already recover this event, so the extra
+                    # copy is acknowledged now.
+                    self.audit("duplicate", env.id, env.correlation_id, stream=stream, entry_id=entry_id,
+                               reason="in flight; entry cap reached")
+                    self.commands.execute("XACK", stream, self.policy.group, entry_id)
+                    return
                 current.entries.append((stream, entry_id))
                 self.audit("duplicate", env.id, env.correlation_id, stream=stream, entry_id=entry_id)
                 return
@@ -323,12 +333,17 @@ class Adapter:
         with self._lock:
             self._lock.notify_all()
 
-    def close(self, audit_timeout: float = 5.0) -> None:
+    def close(self, audit_timeout: float = 5.0, consumer: threading.Thread | None = None) -> None:
         """Stop consuming, then give queued audit records a bounded chance to be
-        written: the audit writer is a daemon thread and dies with the process."""
+        written: the audit writer is a daemon thread and dies with the process.
+        The consumer is joined first (bounded), so a record it enqueues while
+        finishing its current entry is not missed by the flush."""
 
+        deadline = time.time() + audit_timeout
         self.stop()
-        self.flush_audit(timeout=audit_timeout)
+        if consumer is not None:
+            consumer.join(timeout=max(deadline - time.time(), 0))
+        self.flush_audit(timeout=max(deadline - time.time(), 0.5))
 
     # -- tools -------------------------------------------------------------
     def ack(self, event_id: str, outcome: str, note: str) -> dict[str, Any]:
@@ -484,18 +499,19 @@ def main() -> int:
                       auditor=Connection(endpoint, timeout=AUDIT_TIMEOUT_SECONDS))
     server.adapter = adapter
     started = threading.Event()
+    consumer = threading.Thread(target=adapter.run, name="consumer", daemon=True)
 
     def start() -> None:
         # Only push once Claude has finished the handshake; a notification sent
         # before `initialized` has nowhere to land.
         if not started.is_set():
             started.set()
-            threading.Thread(target=adapter.run, name="consumer", daemon=True).start()
+            consumer.start()
 
     server.on_ready = start
     _log("starting", group=policy.group, consumer=policy.consumer, streams=list(policy.streams))
     server.serve()
-    adapter.close()
+    adapter.close(consumer=consumer if started.is_set() else None)
     return 0
 
 

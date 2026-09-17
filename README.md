@@ -258,7 +258,9 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
   `event_id` and `correlation_id`. An audit write that fails is logged and
   skipped; it never holds delivery back, so the trail can have gaps while Valkey
   is unreachable. On shutdown the adapter waits up to 5 s for queued audit
-  records to be written.
+  records to be written, and on SIGTERM the entrypoint gives the session up to
+  10 s to exit so that drain can happen. Duplicates of an in-flight event keep
+  at most 16 stream entries; further copies are acknowledged at once.
 
 | Variable | Meaning |
 |---|---|

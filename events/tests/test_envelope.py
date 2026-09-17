@@ -230,8 +230,6 @@ class AckRetryTest(unittest.TestCase):
 
 class ShutdownTest(unittest.TestCase):
     def test_close_waits_for_queued_audit_records(self) -> None:
-        import threading
-
         from mctl_events.channel import Adapter
 
         written: list[tuple] = []
@@ -249,6 +247,59 @@ class ShutdownTest(unittest.TestCase):
         adapter.close(audit_timeout=5)
         self.assertEqual(3, len(written))
         self.assertTrue(adapter._stop.is_set())
+
+
+    def test_close_joins_the_consumer_before_flushing(self) -> None:
+        import threading
+
+        from mctl_events.channel import Adapter
+
+        written: list[tuple] = []
+
+        class Auditor:
+            def execute(self, *args, **_kwargs):
+                written.append(args)
+                return b"1-0"
+
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": []})
+        adapter = Adapter(policy, Auditor(), Auditor(), lambda _m: None, auditor=Auditor())
+
+        def finishing_entry() -> None:
+            adapter._stop.wait()
+            time.sleep(0.2)  # still handling the last entry when stop is requested
+            adapter.audit("delivered", "telegram:evt:last")
+
+        consumer = threading.Thread(target=finishing_entry, daemon=True)
+        consumer.start()
+        adapter.close(audit_timeout=5, consumer=consumer)
+        self.assertEqual(1, len(written))
+
+    def test_duplicates_of_an_in_flight_event_are_bounded(self) -> None:
+        from mctl_events import channel
+        from mctl_events.channel import Adapter
+
+        class Commands:
+            def __init__(self) -> None:
+                self.calls: list[tuple] = []
+
+            def execute(self, *args, **_kwargs):
+                self.calls.append(args)
+                return 1
+
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
+            {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*.*"]}]})
+        commands = Commands()
+        adapter = Adapter(policy, commands, commands, lambda _m: None)
+        adapter.audit = lambda *_a, **_k: None
+        raw = {b"envelope": json.dumps(envelope()).encode()}
+        extra = 4
+        for i in range(channel.MAX_ENTRIES_PER_EVENT + extra):
+            adapter.handle("mctl:events:telegram", f"{i + 1}-0", raw)
+        item = adapter.inflight[envelope()["id"]]
+        self.assertEqual(channel.MAX_ENTRIES_PER_EVENT, len(item.entries))
+        acked = [c for c in commands.calls if c[0] == "XACK"]
+        self.assertEqual(extra, len(acked))
+        self.assertIn(("mctl:events:telegram", "1-0"), item.entries)
 
 
 class StdioServerTest(unittest.TestCase):
