@@ -1,5 +1,10 @@
 # Operating the inbound events Channel
 
+**Use this when** events stop reaching the session, when a stream's `lag` is
+growing, when you need to prove what happened to one `event_id`, or before
+touching anything in the consumer group. For the producer side — a webhook that
+never became an event — see `mctlhq/mctl-api`, `docs/github-events-producer.md`.
+
 What the channel looks like from the outside: how to read its state without
 being able to change it, what each number means, and which observations are
 symptoms of a fault as opposed to the design working.
@@ -58,22 +63,32 @@ XINFO GROUPS mctl:events:github
   name=claude-remote  consumers=1  pending=5  lag=16  last-delivered-id=...
 ```
 
-- **`pending`** — entries handed to Claude that no `ack_event` has closed yet.
-  A non-zero value is normal while the session is working. It is bounded by
-  `max_inflight` (5 by default).
-- **`lag`** — entries published but not yet read by the group. Lag moves as
-  Claude acknowledges; it is *not* a queue of failures.
+- **`pending`** — entries the group has already handed out and that no
+  `ack_event` has closed yet. Already delivered, not yet acknowledged. A
+  non-zero value is normal while the session is working.
+- **`lag`** — entries published to the stream that the group has **not read at
+  all** yet. Not delivered, therefore not pending. Lag moves as Claude
+  acknowledges and the adapter resumes reading; it is not a queue of failures.
+- **`max_inflight`** (5 by default) — **a budget for the adapter as a whole,
+  not per stream.** It caps the total number of unacknowledged entries across
+  every stream the policy subscribes to. This is the single most
+  misread number in the whole channel, so it has its own section below.
 - **`consumers`** — 1, and it stays 1: the policy fixes the consumer name, so a
   restart reuses it rather than abandoning a pending list under an old name.
 
 ### Saturated back-pressure is not an outage
 
-When `pending` equals `max_inflight`, the adapter stops reading new entries
-**from every stream**, not just the one that filled it. That is the intended
-behaviour: events are held in Valkey rather than dropped or delivered to a
-session that cannot act on them. The visible signature is one stream at
-`pending=max_inflight` and *another* stream with `pending=0` and a growing
-`lag`:
+`max_inflight` is one budget for the adapter, not one per stream. The in-flight
+set is a single map keyed by event id, and one `XREADGROUP` reads every
+subscribed stream in the same call; when that map is full the adapter does not
+issue the read at all (`events/mctl_events/channel.py`, `read_once`). So when
+the total of unacknowledged entries reaches `max_inflight`, **new deliveries
+stop from every stream, including streams whose own `pending` is 0.**
+
+That is the intended behaviour: events are held in Valkey rather than dropped
+or delivered to a session that cannot act on them. The visible signature is one
+stream at `pending=max_inflight` and *another* stream with `pending=0` and a
+growing `lag`:
 
 ```
 XINFO GROUPS mctl:events:github    pending=5  lag=16
@@ -142,6 +157,8 @@ reached when the deployment is renamed or scaled.
 - **Gaps in the audit trail.** Audit writes are best effort and are dropped
   rather than blocking delivery. A gap means Valkey was unreachable for the
   audit writer, not that an event was lost.
-- **Valkey refusing to start after an ACL change.** The ACL file accepts no
-  comments — a single `#` line aborts startup. Notes belong above the rendered
-  block, in the ExternalSecret's YAML, never inside it.
+- **Valkey refusing to start after an ACL change.** On the deployed image a
+  single `#` line inside the rendered ACL file aborts startup rather than being
+  ignored. Notes belong above the block, in the ExternalSecret's YAML, never
+  inside it — the details are in `mctlhq/mctl-gitops`,
+  `docs/runbooks/valkey-acl.md`.
