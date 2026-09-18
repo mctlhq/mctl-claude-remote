@@ -53,6 +53,35 @@ The gap between `delivered` and `acked` is Claude's own working time — it
 covers hydration through MCP and whatever the session did about the event. It
 is not a transport latency and there is no timeout on it.
 
+### What an `acked` record carries, and who may read it
+
+`acked` is written by the `ack_event` handler and by nothing else, so it is the
+only record that proves the session itself finished an event rather than some
+other tool call having touched it. It carries two fields the other stages do
+not:
+
+- **`outcome`** — `handled`, `ignored` or `failed`, chosen by the session.
+- **`note`** — a short, Claude-authored line naming what was hydrated and what
+  was done, capped at 500 characters (`channel.py`, `Adapter.ack`).
+
+That note is written **after** hydration, so unlike the envelope it is not
+reference-only: summarising what a message or a pull request was about can
+include a few words from it. This is deliberate and it is the difference
+between an audit trail you can read and a list of ids, but it means the two
+streams have different sensitivities and must be treated differently:
+
+| | `mctl:events:<source>` | `mctl:events:audit` |
+|---|---|---|
+| contents | references only — closed 4 KiB envelope schema, identifiers, no body | stage records, plus a Claude-authored summary on `acked` |
+| written by | the producers | the adapter (best effort) |
+| read by | `claude-remote` only | `events-observer` only |
+
+Neither stream is exported, mirrored or exposed to any third party, and the
+`events-observer` ACL user is read-only and hand-issued for operators. Keep it
+that way: the audit stream is operator-facing observability, **not** a feed to
+hand to an external consumer, and anything that would forward it needs its own
+review of what the note may contain rather than inheriting this one.
+
 ## The group state, and what each number means
 
 Group state needs the `claude-remote` user (the observer is deliberately not
