@@ -178,22 +178,30 @@ JSON
 # none of those three strings occur anywhere in the binary, so the dialog kept firing
 # and parked the headless session (deployed 0.10.1 wedged on it in labs on 2026-08-23).
 # Grep the shipped binary before changing these keys again.
+# "model": "haiku" pins this deployment's default model to the latest Haiku, so a
+# restart or a workspace restored from an older S3 snapshot can't silently fall back
+# to whatever Sonnet/Opus default the CLI shipped with. The alias (not a dated
+# model ID) tracks Anthropic's "latest Haiku" the same way an interactive `/model
+# haiku` selection would, so it keeps picking up new Haiku releases automatically.
 ensure_json /workspace/.claude/settings.json \
   'if (.skipDangerousModePermissionPrompt == true
        and .skipAutoPermissionPrompt == true
        and .permissions.defaultMode? == "auto"
-       and .permissions.allow_bypass_permissions? == true)
+       and .permissions.allow_bypass_permissions? == true
+       and .model == "haiku")
    then "ok" else "no" end' \
   '.skipDangerousModePermissionPrompt = true
    | .skipAutoPermissionPrompt = true
    | .permissions.defaultMode = "auto"
-   | .permissions.allow_bypass_permissions = true' <<'JSON' || true
+   | .permissions.allow_bypass_permissions = true
+   | .model = "haiku"' <<'JSON' || true
 {
   "permissions": { "defaultMode": "auto", "allow_bypass_permissions": true },
   "skipDangerousModePermissionPrompt": true,
   "skipAutoPermissionPrompt": true,
   "tui": "default",
-  "resumeReturnDismissed": true
+  "resumeReturnDismissed": true,
+  "model": "haiku"
 }
 JSON
 
