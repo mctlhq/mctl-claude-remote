@@ -178,22 +178,30 @@ JSON
 # none of those three strings occur anywhere in the binary, so the dialog kept firing
 # and parked the headless session (deployed 0.10.1 wedged on it in labs on 2026-08-23).
 # Grep the shipped binary before changing these keys again.
+# "model": "haiku" pins this deployment's default model to the latest Haiku, so a
+# restart or a workspace restored from an older S3 snapshot can't silently fall back
+# to whatever Sonnet/Opus default the CLI shipped with. The alias (not a dated
+# model ID) tracks Anthropic's "latest Haiku" the same way an interactive `/model
+# haiku` selection would, so it keeps picking up new Haiku releases automatically.
 ensure_json /workspace/.claude/settings.json \
   'if (.skipDangerousModePermissionPrompt == true
        and .skipAutoPermissionPrompt == true
        and .permissions.defaultMode? == "auto"
-       and .permissions.allow_bypass_permissions? == true)
+       and .permissions.allow_bypass_permissions? == true
+       and .model == "haiku")
    then "ok" else "no" end' \
   '.skipDangerousModePermissionPrompt = true
    | .skipAutoPermissionPrompt = true
    | .permissions.defaultMode = "auto"
-   | .permissions.allow_bypass_permissions = true' <<'JSON' || true
+   | .permissions.allow_bypass_permissions = true
+   | .model = "haiku"' <<'JSON' || true
 {
   "permissions": { "defaultMode": "auto", "allow_bypass_permissions": true },
   "skipDangerousModePermissionPrompt": true,
   "skipAutoPermissionPrompt": true,
   "tui": "default",
-  "resumeReturnDismissed": true
+  "resumeReturnDismissed": true,
+  "model": "haiku"
 }
 JSON
 
@@ -464,6 +472,14 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
   # Guard against a misconfigured value: `timeout 0` kills the tick instantly
   # and a negative value errors out, silently breaking every tick.
   printf '%s' "$STEWARD_TICK_TIMEOUT" | grep -qE '^[1-9][0-9]*$' || STEWARD_TICK_TIMEOUT=1800
+  # Explicit --model, independent of whatever /workspace/.claude/settings.json pins
+  # for the interactive remote-control session (HOME=/workspace makes that file the
+  # user settings for every claude process here, steward included). The steward
+  # edits code, pushes with --dangerously-skip-permissions, resolves bot review
+  # threads and calls `gh pr merge` under merge_mode: when-green -- a smaller model
+  # degrades exactly at that long, precise instruction-following, so its model is
+  # pinned on the invocation itself rather than inherited.
+  STEWARD_MODEL="${PR_STEWARD_MODEL:-sonnet}"
   (
     while true; do
       sleep "${PR_STEWARD_SCHEDULE_SECONDS}"
@@ -474,6 +490,7 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
         # "newest on disk" heuristic would resolve to a steward tick instead of the
         # operator's interactive remote-control session, silently defeating resume.
         timeout "$STEWARD_TICK_TIMEOUT" "$STEWARD_CLAUDE_BIN" -p "Run the pr-steward skill" \
+          --model "$STEWARD_MODEL" \
           --no-session-persistence --dangerously-skip-permissions >>"$STEWARD_SCHED_LOG" 2>&1 \
           || echo "[scheduler $(date -u +%FT%TZ)] tick exited non-zero (timeout/error)" >>"$STEWARD_SCHED_LOG"
       fi
