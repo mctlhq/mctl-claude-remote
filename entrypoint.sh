@@ -61,8 +61,18 @@ write_json_atomic() {  # $1 = destination, $2 = mode for a NEW file (default 600
   # destination exists; a freshly seeded file gets $2, or mktemp's restrictive
   # default when the caller says nothing (the callers that say nothing write
   # credentials; CLAUDE.md is documentation and asks for 644).
-  # GNU stat on the image; the BSD spelling keeps the tests honest on a Mac.
-  _wja_mode=$(stat -c '%a' "$_wja_dst" 2>/dev/null || stat -f '%Lp' "$_wja_dst" 2>/dev/null || echo "${2:-600}")
+  # The lookup runs only when there is something to look up (GNU stat on the
+  # image; the BSD spelling keeps the tests honest on a Mac, and on GNU
+  # `-f` means --file-system, so it is never reached with a real file and
+  # the value is checked to be an octal mode regardless).
+  _wja_mode="${2:-600}"
+  if [ -e "$_wja_dst" ]; then
+    _wja_have=$(stat -c '%a' "$_wja_dst" 2>/dev/null || stat -f '%Lp' "$_wja_dst" 2>/dev/null) || _wja_have=""
+    case "$_wja_have" in
+      ""|*[!0-7]*) ;;
+      *) _wja_mode="$_wja_have" ;;
+    esac
+  fi
   if cat > "$_wja_tmp" && [ -s "$_wja_tmp" ] \
      && chmod "$_wja_mode" "$_wja_tmp" && mv -f "$_wja_tmp" "$_wja_dst"; then
     return 0
@@ -324,9 +334,11 @@ done
 # writing their own CLAUDE.md to the persistent volume. Written through
 # write_json_atomic for the same reason the git-config write above is
 # guarded: a directory left at that path by a bad restore, or an unwritable
-# volume, must cost the seed and not the device (`set -e`, PID 1).
-if [ ! -f /workspace/CLAUDE.md ]; then
-  if ! write_json_atomic /workspace/CLAUDE.md 644 <<'MD'
+# volume, must cost the seed and not the device (`set -e`, PID 1). A
+# function, because ensure_events_contract below falls back to the same
+# brief when stripping its section would leave the file empty.
+seed_claude_md() {
+  write_json_atomic /workspace/CLAUDE.md 644 <<'MD'
 # Remote Worker Environment
 
 You are running inside a container as a Claude Code remote worker.
@@ -386,7 +398,9 @@ a tenant onboarding workflow that reached the cluster (namespace/quota
 created) but never finished registering, or checking real Argo Workflow /
 Application status.
 MD
-  then
+}
+if [ ! -f /workspace/CLAUDE.md ]; then
+  if ! seed_claude_md; then
     echo "[entrypoint] WARN could not seed /workspace/CLAUDE.md; the session starts without it" >&2
   fi
 fi
@@ -989,31 +1003,27 @@ ensure_events_contract() {  # $1 = present | absent
   # Everything outside the managed section: the old section and one blank
   # line after it are dropped, and the command substitution strips trailing
   # blank lines, so a rewrite yields the same bytes as the first write.
-  # The begin and end markers must pair up: an orphaned begin marker (its
-  # end line lost) would make awk drop operator prose up to the next end
-  # marker, and a stray end marker would eat a line of prose on every start.
-  # Unequal counts are ambiguous and are left untouched behind a WARN until
-  # someone repairs the markers by hand; equal counts are not (N complete
-  # sections, e.g. from a restore that merged two copies, have a defined
-  # extent) and are collapsed into one section, so the file heals itself.
-  # awk exits 3 for the same reason when a section runs to EOF, which is
-  # how an end-before-begin pair is caught.
+  # The markers must strictly alternate begin, end, begin, end: an orphaned
+  # begin marker (its end line lost, or nested inside another pair) would
+  # make awk drop operator prose up to the next end marker, and a stray end
+  # marker would eat a line of prose on every start. awk asserts the
+  # alternation in the pass it already makes and exits 3 otherwise; such a
+  # file is left untouched behind a WARN (with the marker counts, for the
+  # reader) until someone repairs it by hand. N complete sections in a row
+  # (a restore that merged two copies) do alternate, have a defined extent,
+  # and are collapsed into one, so that file heals itself.
   _eec_rest=""
   if [ -f "$CLAUDE_MD" ]; then
-    _eec_nb=$(grep -c -F -x -- "$EVENTS_BLOCK_BEGIN" "$CLAUDE_MD" 2>/dev/null) || _eec_nb=0
-    _eec_ne=$(grep -c -F -x -- "$EVENTS_BLOCK_END" "$CLAUDE_MD" 2>/dev/null) || _eec_ne=0
-    if [ "$_eec_nb" != "$_eec_ne" ]; then
-      echo "[entrypoint] WARN $CLAUDE_MD: mctl-events begin/end markers do not pair up ($_eec_nb/$_eec_ne); left untouched" >&2
-      return 0
-    fi
     if ! _eec_rest=$(awk -v b="$EVENTS_BLOCK_BEGIN" -v e="$EVENTS_BLOCK_END" '
-        $0 == b { skip = 1; next }
-        $0 == e { skip = 0; drop_blank = 1; next }
+        $0 == b { if (skip) exit 3; skip = 1; next }
+        $0 == e { if (!skip) exit 3; skip = 0; drop_blank = 1; next }
         skip { next }
         drop_blank && $0 == "" { drop_blank = 0; next }
         { drop_blank = 0; print }
         END { if (skip) exit 3 }' "$CLAUDE_MD" 2>/dev/null); then
-      echo "[entrypoint] WARN $CLAUDE_MD: the managed mctl-events section has no end marker, or the file is unreadable; left untouched" >&2
+      _eec_nb=$(grep -c -F -x -- "$EVENTS_BLOCK_BEGIN" "$CLAUDE_MD" 2>/dev/null) || _eec_nb=0
+      _eec_ne=$(grep -c -F -x -- "$EVENTS_BLOCK_END" "$CLAUDE_MD" 2>/dev/null) || _eec_ne=0
+      echo "[entrypoint] WARN $CLAUDE_MD: mctl-events markers do not alternate begin/end ($_eec_nb begin, $_eec_ne end), or the file is unreadable; left untouched" >&2
       return 0
     fi
   fi
@@ -1056,10 +1066,15 @@ MD
     echo "[entrypoint] CLAUDE.md: mctl-events contract $_eec_want, current"
   elif [ -z "$_eec_new" ]; then
     # absent, and the file held nothing but the section. The seed has
-    # already run this boot, so deleting the file here would start the
-    # session with no CLAUDE.md at all; a stale section is the lesser harm.
-    # Left alone with a line saying so, for the operator to replace.
-    echo "[entrypoint] WARN $CLAUDE_MD holds nothing but the mctl-events section; left in place, replace it by hand" >&2
+    # already run this boot (it skips an existing file), so neither
+    # deleting the file nor keeping the stale contract is right: the
+    # session would start with no brief, or with instructions for a tool
+    # that is not mounted. Write the environment brief instead.
+    if seed_claude_md; then
+      echo "[entrypoint] CLAUDE.md: mctl-events section removed; the file held nothing else and was reseeded"
+    else
+      echo "[entrypoint] WARN could not reseed $CLAUDE_MD; stale mctl-events section left in place" >&2
+    fi
   elif printf '%s\n' "$_eec_new" | write_json_atomic "$CLAUDE_MD" 644; then
     echo "[entrypoint] CLAUDE.md: mctl-events contract $_eec_want, written"
   else
