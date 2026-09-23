@@ -138,12 +138,11 @@ hydrates events and never acknowledges, check that the section is present in
 the file the running session was started with (`[entrypoint] CLAUDE.md:
 mctl-events contract present, written|current` in the pod log).
 
-Check the session before touching the transport —
-`kubectl -n labs logs <pod> -c base-service` shows the TUI, including a spend
-limit message. Once the session acknowledges, `pending` falls, reading resumes
-and both lags drain on their own. Nothing needs to be restarted, and an
-operator `XACK` would be a lie: it would mark an event handled that Claude
-never handled.
+Check the session before touching the transport — `kubectl -n labs logs <pod>
+-c base-service` shows the TUI, including a spend limit message. Once the
+session acknowledges, `pending` falls, reading resumes and both lags drain on
+their own. Nothing needs to be restarted, and an operator `XACK` would be a
+lie: it would mark an event handled that Claude never handled.
 
 ## Durable state
 

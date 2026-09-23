@@ -29,7 +29,7 @@ def function(first: str, last: str) -> str:
 
 
 def shell_source() -> str:
-    return (function("write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on failure", "}")
+    return (function("write_json_atomic() {  # $1 = destination, $2 = mode for a NEW file (default 600), stdin = content; leaves $1 alone on failure", "}")
             + function('CLAUDE_MD="/workspace/CLAUDE.md"', "}"))
 
 
@@ -94,6 +94,10 @@ class EventsContractTest(unittest.TestCase):
         self.run_fn()
         self.assertTrue(self.content().startswith(BEGIN))
         self.assertEqual(0o644, self.md.stat().st_mode & 0o777)  # documentation, not a credential
+        self.md.chmod(0o600)
+        self.md.write_text(self.content() + "\nmine\n")
+        self.run_fn()
+        self.assertEqual(0o600, self.md.stat().st_mode & 0o777)  # an existing file keeps its mode
         first = self.content()
         for _ in range(3):
             self.run_fn()
@@ -110,19 +114,20 @@ class EventsContractTest(unittest.TestCase):
         original = f"# top\n\n{BEGIN}\nhalf a section, end marker lost\n\n## operator prose after it\n"
         self.md.write_text(original)
         out = self.run_fn()
-        self.assertIn("found 1/0", out)
+        self.assertIn("do not pair up (1/0)", out)
         self.assertEqual(original, self.content())
 
     def test_unbalanced_markers_leave_the_file_untouched(self) -> None:
         """An orphaned begin marker before a real section would make the awk
         pass drop the prose between them; a stray end marker would eat a
-        line of prose on every start. Both are repair-by-hand cases."""
+        line of prose on every start; an end before a begin runs to EOF.
+        All are repair-by-hand cases."""
 
         cases = {
             "orphan begin then a real section": (
-                f"# top\n\n{BEGIN}\n\n## prose the orphan would swallow\n\n{BEGIN}\nbody\n{END}\n", "found 2/1"),
-            "stray end marker in prose": (f"# top\n\n{END}\n\nkeep me\n", "found 0/1"),
-            "two full sections": (f"{BEGIN}\nold\n{END}\n\n{BEGIN}\nold\n{END}\n", "found 2/2"),
+                f"# top\n\n{BEGIN}\n\n## prose the orphan would swallow\n\n{BEGIN}\nbody\n{END}\n", "do not pair up (2/1)"),
+            "stray end marker in prose": (f"# top\n\n{END}\n\nkeep me\n", "do not pair up (0/1)"),
+            "end before begin": (f"# top\n\n{END}\n\nkeep me\n\n{BEGIN}\nbody\n", "no end marker"),
         }
         for name, (original, expected) in cases.items():
             with self.subTest(name):
@@ -133,6 +138,19 @@ class EventsContractTest(unittest.TestCase):
                 out = self.run_fn("absent")
                 self.assertIn(expected, out)
                 self.assertEqual(original, self.content())
+
+    def test_two_complete_sections_collapse_into_one(self) -> None:
+        """Equal counts are unambiguous (a restore that merged two copies):
+        the file heals itself instead of freezing behind a WARN forever."""
+
+        self.md.write_text(f"# top\n\n{BEGIN}\nold\n{END}\n\n## middle\n\n{BEGIN}\nolder\n{END}\n\ntail\n")
+        out = self.run_fn()
+        self.assertNotIn("WARN", out)
+        text = self.content()
+        self.assertEqual(1, self.section_count())
+        self.assertNotIn("old\n", text)
+        self.assertTrue(text.startswith("# top\n\n## middle\n\ntail\n\n" + BEGIN), text)
+        self.assertEqual("# top\n\n## middle\n\ntail\n", (self.run_fn("absent"), self.content())[1])
 
     def test_outcome_vocabulary_matches_ack_event(self) -> None:
         """The heredoc is a copy of channel.py's INSTRUCTIONS for the model's
@@ -161,12 +179,17 @@ class EventsContractTest(unittest.TestCase):
         self.assertIn("absent, current", self.run_fn("absent"))
 
     def test_absent_with_no_file_and_with_a_file_that_held_only_the_section(self) -> None:
+        """The seed has already run by the time the section is stripped, so a
+        file holding nothing else is left in place rather than deleted: a
+        session with a stale section beats one with no CLAUDE.md at all."""
+
         self.assertNotIn("WARN", self.run_fn("absent"))
         self.assertFalse(self.md.exists())
         self.run_fn("present")
+        before = self.content()
         out = self.run_fn("absent")
-        self.assertIn("deleted", out)
-        self.assertFalse(self.md.exists())
+        self.assertIn("holds nothing but the mctl-events section; left in place", out)
+        self.assertEqual(before, self.content())
 
     def test_unwritable_directory_is_a_warning_not_an_abort(self) -> None:
         self.md.write_text("# top\n")

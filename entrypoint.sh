@@ -37,7 +37,7 @@ FULLSCREEN_UPSELL_THRESHOLD=3   # Ges in the pinned binary; the dialog stops at 
 # .tmp SUFFIX because the sidecar's mirror passes `--exclude '*.tmp'` and that glob only
 # matches a trailing extension; a mirror tick inside the write window would otherwise
 # upload the temp file to MinIO as a permanent stray object.
-write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on failure
+write_json_atomic() {  # $1 = destination, $2 = mode for a NEW file (default 600), stdin = content; leaves $1 alone on failure
   _wja_dst="$1"
   # A directory at the destination would make `mv` move the temp file INTO it and
   # exit 0, so the caller would believe it had written a config that does not
@@ -58,8 +58,11 @@ write_json_atomic() {  # $1 = destination, stdin = content; leaves $1 alone on f
   }
   # mv replaces the destination inode, so the new file would otherwise keep mktemp's
   # 600 instead of whatever the destination had. Copy the mode across when the
-  # destination exists; a freshly seeded file keeps mktemp's restrictive default.
-  _wja_mode=$(stat -c '%a' "$_wja_dst" 2>/dev/null || echo 600)
+  # destination exists; a freshly seeded file gets $2, or mktemp's restrictive
+  # default when the caller says nothing (the callers that say nothing write
+  # credentials; CLAUDE.md is documentation and asks for 644).
+  # GNU stat on the image; the BSD spelling keeps the tests honest on a Mac.
+  _wja_mode=$(stat -c '%a' "$_wja_dst" 2>/dev/null || stat -f '%Lp' "$_wja_dst" 2>/dev/null || echo "${2:-600}")
   if cat > "$_wja_tmp" && [ -s "$_wja_tmp" ] \
      && chmod "$_wja_mode" "$_wja_tmp" && mv -f "$_wja_tmp" "$_wja_dst"; then
     return 0
@@ -323,7 +326,7 @@ done
 # guarded: a directory left at that path by a bad restore, or an unwritable
 # volume, must cost the seed and not the device (`set -e`, PID 1).
 if [ ! -f /workspace/CLAUDE.md ]; then
-  if ! write_json_atomic /workspace/CLAUDE.md <<'MD'
+  if ! write_json_atomic /workspace/CLAUDE.md 644 <<'MD'
 # Remote Worker Environment
 
 You are running inside a container as a Claude Code remote worker.
@@ -385,10 +388,6 @@ Application status.
 MD
   then
     echo "[entrypoint] WARN could not seed /workspace/CLAUDE.md; the session starts without it" >&2
-  else
-    # write_json_atomic creates files 600 (it exists for credentials);
-    # CLAUDE.md is documentation and stays world-readable as before.
-    chmod 644 /workspace/CLAUDE.md 2>/dev/null || true
   fi
 fi
 
@@ -990,19 +989,21 @@ ensure_events_contract() {  # $1 = present | absent
   # Everything outside the managed section: the old section and one blank
   # line after it are dropped, and the command substitution strips trailing
   # blank lines, so a rewrite yields the same bytes as the first write.
-  # The markers must be either absent or exactly one balanced pair: an
-  # orphaned begin marker (its end line lost, or a header duplicated by a
-  # merge or a restore) would make awk drop operator prose up to the next
-  # end marker, and a stray end marker would eat a line of prose on every
-  # start. Anything else is left untouched behind a WARN until someone
-  # repairs the markers by hand. awk exits 3 for the same reason when the
-  # section runs to EOF.
+  # The begin and end markers must pair up: an orphaned begin marker (its
+  # end line lost) would make awk drop operator prose up to the next end
+  # marker, and a stray end marker would eat a line of prose on every start.
+  # Unequal counts are ambiguous and are left untouched behind a WARN until
+  # someone repairs the markers by hand; equal counts are not (N complete
+  # sections, e.g. from a restore that merged two copies, have a defined
+  # extent) and are collapsed into one section, so the file heals itself.
+  # awk exits 3 for the same reason when a section runs to EOF, which is
+  # how an end-before-begin pair is caught.
   _eec_rest=""
   if [ -f "$CLAUDE_MD" ]; then
     _eec_nb=$(grep -c -F -x -- "$EVENTS_BLOCK_BEGIN" "$CLAUDE_MD" 2>/dev/null) || _eec_nb=0
     _eec_ne=$(grep -c -F -x -- "$EVENTS_BLOCK_END" "$CLAUDE_MD" 2>/dev/null) || _eec_ne=0
-    if [ "$_eec_nb" -gt 1 ] || [ "$_eec_ne" -gt 1 ] || [ "$_eec_nb" != "$_eec_ne" ]; then
-      echo "[entrypoint] WARN $CLAUDE_MD: expected one mctl-events begin/end marker pair, found $_eec_nb/$_eec_ne; left untouched" >&2
+    if [ "$_eec_nb" != "$_eec_ne" ]; then
+      echo "[entrypoint] WARN $CLAUDE_MD: mctl-events begin/end markers do not pair up ($_eec_nb/$_eec_ne); left untouched" >&2
       return 0
     fi
     if ! _eec_rest=$(awk -v b="$EVENTS_BLOCK_BEGIN" -v e="$EVENTS_BLOCK_END" '
@@ -1054,18 +1055,12 @@ MD
   if [ -f "$CLAUDE_MD" ] && [ "$(cat "$CLAUDE_MD" 2>/dev/null)" = "$_eec_new" ]; then
     echo "[entrypoint] CLAUDE.md: mctl-events contract $_eec_want, current"
   elif [ -z "$_eec_new" ]; then
-    # absent, and the file held nothing but the section: write_json_atomic
-    # refuses an empty file, and the seed above recreates one on the next
-    # start, so the file goes.
-    if rm -f "$CLAUDE_MD" 2>/dev/null; then
-      echo "[entrypoint] CLAUDE.md: mctl-events section removed; the file held nothing else and was deleted"
-    else
-      echo "[entrypoint] WARN could not remove $CLAUDE_MD; stale mctl-events section left in place" >&2
-    fi
-  elif { [ -f "$CLAUDE_MD" ] && _eec_existed=1 || _eec_existed=0; } && printf '%s\n' "$_eec_new" | write_json_atomic "$CLAUDE_MD"; then
-    # An existing file keeps its mode (write_json_atomic copies it); a new
-    # one would be 600, and CLAUDE.md is documentation, not a credential.
-    [ "$_eec_existed" = 1 ] || chmod 644 "$CLAUDE_MD" 2>/dev/null || true
+    # absent, and the file held nothing but the section. The seed has
+    # already run this boot, so deleting the file here would start the
+    # session with no CLAUDE.md at all; a stale section is the lesser harm.
+    # Left alone with a line saying so, for the operator to replace.
+    echo "[entrypoint] WARN $CLAUDE_MD holds nothing but the mctl-events section; left in place, replace it by hand" >&2
+  elif printf '%s\n' "$_eec_new" | write_json_atomic "$CLAUDE_MD" 644; then
     echo "[entrypoint] CLAUDE.md: mctl-events contract $_eec_want, written"
   else
     echo "[entrypoint] WARN could not write $CLAUDE_MD; mctl-events contract not updated" >&2
