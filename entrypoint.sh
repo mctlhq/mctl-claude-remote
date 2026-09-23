@@ -337,8 +337,8 @@ done
 # volume, must cost the seed and not the device (`set -e`, PID 1). A
 # function, because ensure_events_contract below falls back to the same
 # brief when stripping its section would leave the file empty.
-seed_claude_md() {
-  write_json_atomic /workspace/CLAUDE.md 644 <<'MD'
+seed_claude_md() {  # $1 = destination (default /workspace/CLAUDE.md)
+  write_json_atomic "${1:-/workspace/CLAUDE.md}" 644 <<'MD'
 # Remote Worker Environment
 
 You are running inside a container as a Claude Code remote worker.
@@ -976,7 +976,11 @@ MCTL_EVENTS_MCP_CONFIG=""
 # between the markers on every start while the channel is enabled, removed
 # when it is not, and everything the operator wrote outside the markers is
 # kept byte for byte. The file is only touched when the section actually
-# differs, so the MinIO mirror is not churned.
+# differs, so the MinIO mirror is not churned. One exception, the only
+# branch that writes content of its own: when the section was the whole
+# file and the channel is off, the file is replaced by the environment
+# brief (seed_claude_md above), since neither a stale contract for an
+# unmounted tool nor no CLAUDE.md at all is acceptable for the session.
 #
 # Never fails the entrypoint: this is PID 1 and the device runs perfectly
 # well without the section, so every step is a tested condition and any
@@ -1070,7 +1074,7 @@ MD
     # deleting the file nor keeping the stale contract is right: the
     # session would start with no brief, or with instructions for a tool
     # that is not mounted. Write the environment brief instead.
-    if seed_claude_md; then
+    if seed_claude_md "$CLAUDE_MD"; then
       echo "[entrypoint] CLAUDE.md: mctl-events section removed; the file held nothing else and was reseeded"
     else
       echo "[entrypoint] WARN could not reseed $CLAUDE_MD; stale mctl-events section left in place" >&2

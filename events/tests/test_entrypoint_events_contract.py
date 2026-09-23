@@ -30,7 +30,7 @@ def function(first: str, last: str) -> str:
 
 def shell_source() -> str:
     return (function("write_json_atomic() {  # $1 = destination, $2 = mode for a NEW file (default 600), stdin = content; leaves $1 alone on failure", "}")
-            + function("seed_claude_md() {", "}")
+            + function("seed_claude_md() {  # $1 = destination (default /workspace/CLAUDE.md)", "}")
             + function('CLAUDE_MD="/workspace/CLAUDE.md"', "}"))
 
 
@@ -207,6 +207,32 @@ class EventsContractTest(unittest.TestCase):
         out = self.run_fn()
         self.assertIn("WARN could not write", out)
         self.assertEqual("# top\n", self.content())
+
+    def test_failed_reseed_keeps_the_stale_section_and_says_so(self) -> None:
+        self.run_fn("present")
+        section_only = self.content()
+        os.chmod(self.root, 0o555)
+        self.addCleanup(os.chmod, self.root, 0o755)
+        if os.access(self.root, os.W_OK):
+            self.skipTest("running as root: directory permissions are not enforced")
+        out = self.run_fn("absent")
+        self.assertIn("WARN could not reseed", out)
+        self.assertEqual(section_only, self.content())  # stale, but present
+
+    def test_reseed_writes_the_path_it_judged_not_a_hardcoded_one(self) -> None:
+        """seed_claude_md defaults to /workspace/CLAUDE.md; the reseed must
+        pass the path it inspected, which the test points elsewhere."""
+
+        self.run_fn("present")
+        script = shell_source().replace('CLAUDE_MD="/workspace/CLAUDE.md"', f'CLAUDE_MD="{self.md}"')
+        decoy = self.root / "decoy"
+        script = script.replace('"${1:-/workspace/CLAUDE.md}"', f'"${{1:-{decoy}}}"')
+        proc = subprocess.run(["/bin/sh", "-e", "-c", f"{script}\nensure_events_contract absent"],
+                              capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+        self.assertIn("was reseeded", proc.stdout)
+        self.assertFalse(decoy.exists(), "reseed wrote the hardcoded default instead of $CLAUDE_MD")
+        self.assertTrue(self.content().startswith("# Remote Worker Environment\n"))
 
 
 if __name__ == "__main__":
