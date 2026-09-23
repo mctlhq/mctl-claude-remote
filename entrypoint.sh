@@ -471,7 +471,11 @@ else
   # name could be a symlink or an unwritable file left by an earlier session,
   # and a failed redirection is fatal under `set -e`.
   _install_log=$(mktemp /tmp/claude-install.XXXXXX 2>/dev/null) || _install_log=/dev/null
-  if claude install "${TARGET_VER:-latest}" --force >"$_install_log" 2>&1; then
+  # Bounded, like the steward tick below: this is a ~100 MB download on
+  # PID 1, and a stalled connection would otherwise park the entrypoint
+  # here forever while an npm-global claude sat ready in /usr/local/bin.
+  # A timeout is a non-zero status and lands on the same WARN and fallback.
+  if timeout "${NATIVE_INSTALL_TIMEOUT:-600}" claude install "${TARGET_VER:-latest}" --force >"$_install_log" 2>&1; then
     _installed=ok
     tail -n 8 "$_install_log" || true
   else
@@ -549,7 +553,7 @@ NATIVE_NOW_TAG=$(printf '%s' "$NATIVE_NOW" | awk '{print $1}')  # same rule as n
 if [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_NOW" ] && [ -n "$TARGET_VER" ] && [ "$NATIVE_NOW_TAG" = "$TARGET_VER" ]; then
   export PATH="/workspace/.local/bin:$PATH"
   echo "[entrypoint] using native claude: $NATIVE_NOW"
-elif [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_NOW" ] && [ -z "$BUNDLED_VER" ]; then
+elif [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_NOW" ] && [ -z "$TARGET_VER" ]; then
   export PATH="/workspace/.local/bin:$PATH"
   echo "[entrypoint] WARN the image's claude reports no version, so there is no pin to enforce; using native claude: $NATIVE_NOW" >&2
 else

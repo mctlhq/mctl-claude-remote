@@ -15,6 +15,7 @@ import stat
 import subprocess
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -61,9 +62,11 @@ class NativePinTest(unittest.TestCase):
             case "$1" in
               --version)
                 [ "${{FAKE_VERSION:-ok}}" = fail ] && {{ echo "cannot start" >&2; exit 1; }}
+                [ "${{FAKE_VERSION:-ok}}" = blank ] && {{ echo "   "; exit 0; }}
                 echo "{PIN}" ;;
               install)
                 [ "${{FAKE_INSTALL:-ok}}" = fail ] && {{ echo "install failed"; exit 1; }}
+                [ "${{FAKE_INSTALL:-ok}}" = hang ] && {{ echo "downloading..."; sleep 30; exit 0; }}
                 [ "${{FAKE_INSTALL:-ok}}" = nofile ] && {{ echo "installed somewhere else"; exit 0; }}
                 mkdir -p "{self.versions}"
                 v="$2"; [ "${{FAKE_INSTALL:-ok}}" = corrupt ] && v="9.9.9"
@@ -79,7 +82,7 @@ class NativePinTest(unittest.TestCase):
         script = block().replace("/workspace", str(self.ws)).replace("/tmp/claude-install.", f"{self.tmp}/claude-install.")
         probe = 'printf "\\nPATH=%s\\n" "$PATH"'
         env = {**os.environ, "PATH": f"{self.root / 'bin'}:{os.environ['PATH']}",
-               "FAKE_INSTALL": install, "FAKE_VERSION": version}
+               "FAKE_INSTALL": install, "FAKE_VERSION": version, "NATIVE_INSTALL_TIMEOUT": "2"}
         proc = subprocess.run(["/bin/sh", "-e", "-c", script + probe], env=env,
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
@@ -88,6 +91,37 @@ class NativePinTest(unittest.TestCase):
         native = subprocess.run([str(self.native), "--version"], capture_output=True, text=True).stdout.strip() \
             if self.native.is_file() else ""
         return out, path, native
+
+    def test_fresh_workspace_installs_and_promotes_the_pin(self) -> None:
+        """The ordinary first boot: no native binary, a working installer."""
+
+        out, path, native = self.run_block()
+        self.assertIn("native claude replaced with versions/2.1.280", out)
+        self.assertTrue(self.native.is_file())
+        self.assertEqual(PIN, native)
+        self.assertTrue(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_stalled_install_is_cut_off_and_falls_back(self) -> None:
+        """A download that never returns must not park PID 1; the timeout is
+        a failed install like any other."""
+
+        fake_version_binary(self.native, "2.1.274")
+        started = time.monotonic()
+        out, path, native = self.run_block(install="hang")
+        self.assertLess(time.monotonic() - started, 20)
+        self.assertIn("WARN native install failed", out)
+        self.assertIn("using npm-global claude", out)
+        self.assertEqual("2.1.274 (Claude Code)", native)
+        self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_blank_version_line_counts_as_no_pin(self) -> None:
+        """A whitespace-only version line has no first field: every branch
+        of the block must agree that there is no pin."""
+
+        fake_version_binary(self.native, "2.1.274")
+        out, path, _ = self.run_block(version="blank")
+        self.assertIn("no pin to enforce; using native claude: 2.1.274 (Claude Code)", out)
+        self.assertTrue(path.startswith(f"{self.ws}/.local/bin:"), path)
 
     def test_stale_native_is_replaced_by_the_installers_download(self) -> None:
         fake_version_binary(self.native, "2.1.274")
