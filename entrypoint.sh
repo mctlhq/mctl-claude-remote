@@ -446,25 +446,56 @@ fi
 # same version as the bundled npm package; saves 30–60 s on normal restarts.
 # Some volume/restore mechanisms drop the exec bit, so chmod always runs.
 NATIVE_CLAUDE="/workspace/.local/bin/claude"
+NATIVE_VERSIONS="/workspace/.local/share/claude/versions"
 chmod +x "$NATIVE_CLAUDE" 2>/dev/null || true
 BUNDLED_VER=$(claude --version 2>/dev/null | head -1)
-NATIVE_VER=$("$NATIVE_CLAUDE" --version 2>/dev/null | head -1)
-if [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_VER" ] && [ "$NATIVE_VER" = "$BUNDLED_VER" ]; then
-  echo "[entrypoint] native claude already current ($NATIVE_VER); skipping install"
+TARGET_VER=$(printf '%s' "$BUNDLED_VER" | awk '{print $1}')
+native_ver() { "$NATIVE_CLAUDE" --version 2>/dev/null | head -1; }
+if [ -x "$NATIVE_CLAUDE" ] && [ -n "$BUNDLED_VER" ] && [ "$(native_ver)" = "$BUNDLED_VER" ]; then
+  echo "[entrypoint] native claude already current ($BUNDLED_VER); skipping install"
 else
   # Install the bundled (pinned) version, not `latest` — otherwise the runtime
   # harness floats past the image pin on every restart. Fall back to latest
   # only when the bundled version cannot be determined.
-  TARGET_VER=$(printf '%s' "$BUNDLED_VER" | awk '{print $1}')
   echo "[entrypoint] installing/refreshing native claude binary (${TARGET_VER:-latest})"
   claude install "${TARGET_VER:-latest}" --force 2>&1 | tail -8 || echo "[entrypoint] WARN native install failed; falling back to npm-global"
   chmod +x "$NATIVE_CLAUDE" 2>/dev/null || true
+  # `claude install <ver> --force` is not enough on its own. Observed on
+  # 2026-09-23 (0.12.4, #66): it downloaded versions/2.1.280 and left the
+  # regular file at ~/.local/bin/claude untouched (2.1.274, restored from
+  # MinIO), the PATH prepend below then put that file first, and the session
+  # ran three releases behind the image pin without any line saying so. The
+  # pinned build is put in place here, from the installer's own download,
+  # so what the session runs is decided by this script and not by what the
+  # installer chose to do with a pre-existing file.
+  if [ -n "$TARGET_VER" ] && [ "$(native_ver)" != "$BUNDLED_VER" ] && [ -f "$NATIVE_VERSIONS/$TARGET_VER" ]; then
+    chmod +x "$NATIVE_VERSIONS/$TARGET_VER" 2>/dev/null || true
+    if [ "$("$NATIVE_VERSIONS/$TARGET_VER" --version 2>/dev/null | head -1)" = "$BUNDLED_VER" ]; then
+      # Copy, not symlink: the workspace is mirrored to MinIO by the s3-sync
+      # sidecar and restored by an init container, and a symlink does not
+      # survive that round trip as a symlink. `.tmp` so the mirror skips the
+      # half-written file (see the `--exclude '*.tmp'` note at the top).
+      mkdir -p "$(dirname "$NATIVE_CLAUDE")"
+      if cp -f "$NATIVE_VERSIONS/$TARGET_VER" "$NATIVE_CLAUDE.tmp" && chmod +x "$NATIVE_CLAUDE.tmp" \
+         && mv -f "$NATIVE_CLAUDE.tmp" "$NATIVE_CLAUDE"; then
+        echo "[entrypoint] native claude replaced with versions/$TARGET_VER"
+      else
+        rm -f "$NATIVE_CLAUDE.tmp"
+        echo "[entrypoint] WARN could not replace native claude with versions/$TARGET_VER" >&2
+      fi
+    fi
+  fi
 fi
-if [ -x "$NATIVE_CLAUDE" ]; then
+# The native binary is used only when it IS the image pin. Anything else —
+# an install that failed, a stale file the replacement could not fix, a
+# version string that does not match — falls back to the npm-global copy
+# the image was built with, which is the pin by construction. A loud WARN,
+# because "which claude the session runs" has already drifted silently once.
+if [ -x "$NATIVE_CLAUDE" ] && [ -n "$BUNDLED_VER" ] && [ "$(native_ver)" = "$BUNDLED_VER" ]; then
   export PATH="/workspace/.local/bin:$PATH"
-  echo "[entrypoint] using native claude: $($NATIVE_CLAUDE --version 2>&1 | head -1)"
+  echo "[entrypoint] using native claude: $(native_ver)"
 else
-  echo "[entrypoint] using npm-global claude: $(claude --version 2>&1 | head -1)"
+  echo "[entrypoint] WARN native claude is '$(native_ver || true)', image pins '$BUNDLED_VER'; using npm-global claude: $(claude --version 2>&1 | head -1)" >&2
 fi
 
 # Optional pr-steward scheduler. Fires a headless `claude -p` tick on a cadence
