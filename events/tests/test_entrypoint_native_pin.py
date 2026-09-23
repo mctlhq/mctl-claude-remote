@@ -59,7 +59,9 @@ class NativePinTest(unittest.TestCase):
         executable(self.root / "bin/claude", textwrap.dedent(f"""\
             #!/bin/sh
             case "$1" in
-              --version) echo "{PIN}" ;;
+              --version)
+                [ "${{FAKE_VERSION:-ok}}" = fail ] && {{ echo "cannot start" >&2; exit 1; }}
+                echo "{PIN}" ;;
               install)
                 [ "${{FAKE_INSTALL:-ok}}" = fail ] && {{ echo "install failed"; exit 1; }}
                 mkdir -p "{self.versions}"
@@ -70,10 +72,13 @@ class NativePinTest(unittest.TestCase):
             esac
             """))
 
-    def run_block(self, install: str = "ok") -> tuple[str, str, str]:
-        script = block().replace("/workspace", str(self.ws))
+    def run_block(self, install: str = "ok", version: str = "ok") -> tuple[str, str, str]:
+        self.tmp = self.root / "tmp"
+        self.tmp.mkdir(exist_ok=True)
+        script = block().replace("/workspace", str(self.ws)).replace("/tmp/claude-install.", f"{self.tmp}/claude-install.")
         probe = 'printf "\\nPATH=%s\\n" "$PATH"'
-        env = {**os.environ, "PATH": f"{self.root / 'bin'}:{os.environ['PATH']}", "FAKE_INSTALL": install}
+        env = {**os.environ, "PATH": f"{self.root / 'bin'}:{os.environ['PATH']}",
+               "FAKE_INSTALL": install, "FAKE_VERSION": version}
         proc = subprocess.run(["/bin/sh", "-e", "-c", script + probe], env=env,
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
@@ -102,6 +107,7 @@ class NativePinTest(unittest.TestCase):
         fake_version_binary(self.native, "2.1.274")
         out, path, native = self.run_block(install="corrupt")
         self.assertNotIn("replaced", out)
+        self.assertIn("WARN versions/2.1.280 reports '9.9.9 (Claude Code)', not '2.1.280 (Claude Code)'; not promoting it", out)
         self.assertIn("WARN native claude is '2.1.274 (Claude Code)'", out)
         self.assertIn("using npm-global claude", out)
         self.assertEqual("2.1.274 (Claude Code)", native)  # left alone, not on PATH first
@@ -139,6 +145,62 @@ class NativePinTest(unittest.TestCase):
         self.assertEqual("2.1.274 (Claude Code)", native)
         self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
 
+
+    def test_stale_tmp_directory_without_a_native_binary_is_cleared_first(self) -> None:
+        """With no `claude` file, `cp` into a leftover claude.tmp directory and
+        `mv` of that directory both exit 0, so the chain would report
+        "replaced" while ~/.local/bin/claude had become a directory."""
+
+        (self.ws / ".local/bin/claude.tmp").mkdir(parents=True)
+        out, path, native = self.run_block()
+        self.assertIn("native claude replaced with versions/2.1.280", out)
+        self.assertTrue(self.native.is_file(), "native path must be the binary, not a directory")
+        self.assertEqual(PIN, native)
+        self.assertIn(f"using native claude: {PIN}", out)
+        self.assertTrue(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_no_image_pin_uses_a_native_binary_that_runs(self) -> None:
+        """When the image's own claude cannot report a version there is no pin
+        to enforce; a native binary that runs is the only way to start."""
+
+        fake_version_binary(self.native, "2.1.274")
+        out, path, native = self.run_block(version="fail")
+        self.assertIn("installing/refreshing native claude binary (latest)", out)
+        self.assertIn("no pin to enforce; using native claude: 2.1.274 (Claude Code)", out)
+        self.assertEqual("2.1.274 (Claude Code)", native)
+        self.assertTrue(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_no_image_pin_and_no_native_binary_falls_back_without_aborting(self) -> None:
+        out, path, native = self.run_block(version="fail")
+        self.assertIn("WARN native claude is '', image pins ''", out)
+        self.assertEqual("", native)
+        self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_no_image_pin_and_a_native_binary_that_does_not_run_falls_back(self) -> None:
+        """No pin is not a licence to put a broken native binary first."""
+
+        executable(self.native, "#!/bin/sh\nexit 1\n")
+        out, path, _ = self.run_block(version="fail")
+        self.assertNotIn("no pin to enforce", out)
+        self.assertIn("WARN native claude is '', image pins ''", out)
+        self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_install_log_never_follows_a_planted_symlink(self) -> None:
+        """/tmp is a pod-scoped tmpfs that outlives the container: a fixed log
+        name could be a symlink left by an earlier session, and `>` would
+        truncate its target."""
+
+        victim = self.root / "victim"
+        victim.write_text("precious\n")
+        (self.root / "tmp").mkdir(exist_ok=True)
+        (self.root / "tmp/claude-install.log").symlink_to(victim)
+        fake_version_binary(self.native, "2.1.274")
+        out, _, native = self.run_block()
+        self.assertEqual("precious\n", victim.read_text())
+        self.assertEqual(PIN, native)
+        self.assertIn("replaced", out)
+        # And the log itself is cleaned up: only the planted symlink remains.
+        self.assertEqual(["claude-install.log"], sorted(p.name for p in (self.root / "tmp").iterdir()))
 
     def test_non_directory_at_the_bin_path_is_a_warning_not_an_abort(self) -> None:
         """`mkdir -p ~/.local/bin` fails when a stale regular file sits there;
