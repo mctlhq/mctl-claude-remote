@@ -451,8 +451,14 @@ chmod +x "$NATIVE_CLAUDE" 2>/dev/null || true
 BUNDLED_VER=$(claude --version 2>/dev/null | head -n 1)
 TARGET_VER=$(printf '%s' "$BUNDLED_VER" | awk '{print $1}')
 native_ver() { "$NATIVE_CLAUDE" --version 2>/dev/null | head -n 1; }
-if [ -x "$NATIVE_CLAUDE" ] && [ -n "$BUNDLED_VER" ] && [ "$(native_ver)" = "$BUNDLED_VER" ]; then
-  echo "[entrypoint] native claude already current ($BUNDLED_VER); skipping install"
+# Version equality is what decides which binary the session runs, so it is
+# the version *number* (first field) that is compared, never the whole line:
+# a suffix the native build prints and the npm-global one does not would
+# otherwise disable the native binary on every device forever. The full
+# line is still what the log shows.
+native_tag() { native_ver | awk '{print $1}'; }
+if [ -x "$NATIVE_CLAUDE" ] && [ -n "$TARGET_VER" ] && [ "$(native_tag)" = "$TARGET_VER" ]; then
+  echo "[entrypoint] native claude already current ($(native_ver)); skipping install"
 else
   # Install the bundled (pinned) version, not `latest` — otherwise the runtime
   # harness floats past the image pin on every restart. Fall back to latest
@@ -481,9 +487,9 @@ else
   # pinned build is put in place here, from the installer's own download,
   # so what the session runs is decided by this script and not by what the
   # installer chose to do with a pre-existing file.
-  if [ -n "$TARGET_VER" ] && [ "$(native_ver)" != "$BUNDLED_VER" ] && [ -f "$NATIVE_VERSIONS/$TARGET_VER" ]; then
+  if [ -n "$TARGET_VER" ] && [ "$(native_tag)" != "$TARGET_VER" ] && [ -f "$NATIVE_VERSIONS/$TARGET_VER" ]; then
     chmod +x "$NATIVE_VERSIONS/$TARGET_VER" 2>/dev/null || true
-    if [ "$("$NATIVE_VERSIONS/$TARGET_VER" --version 2>/dev/null | head -n 1)" = "$BUNDLED_VER" ]; then
+    if [ "$("$NATIVE_VERSIONS/$TARGET_VER" --version 2>/dev/null | head -n 1 | awk '{print $1}')" = "$TARGET_VER" ]; then
       # Copy, not symlink: the workspace is mirrored to MinIO by the s3-sync
       # sidecar and restored by an init container, and a symlink does not
       # survive that round trip as a symlink. `.tmp` so the mirror skips the
@@ -492,13 +498,18 @@ else
       # script's `set -e`: whatever goes wrong here (a non-directory at
       # ~/.local/bin, an unwritable parent) ends in the WARN and the
       # npm-global fallback below, never in an aborted entrypoint and a
-      # crash-looping pod. A stale claude.tmp *directory* is removed first:
-      # with it in place `cp` copies INTO it, `chmod` and `mv` succeed on the
-      # directory, and the chain reports "replaced" while ~/.local/bin/claude
-      # has become a directory (the hazard write_json_atomic refuses above).
+      # crash-looping pod. Directories are the one case where cp/mv succeed
+      # while doing the wrong thing (the hazard write_json_atomic refuses
+      # above): a stale claude.tmp directory would take the copy INSIDE it
+      # and then be renamed over the destination, so it is removed first;
+      # a directory at the destination itself would take claude.tmp inside
+      # it, so that is refused, not removed: the operator may have put it
+      # there.
       mkdir -p "$(dirname "$NATIVE_CLAUDE")" 2>/dev/null || true
       rm -rf "$NATIVE_CLAUDE.tmp" 2>/dev/null || true
-      if cp -f "$NATIVE_VERSIONS/$TARGET_VER" "$NATIVE_CLAUDE.tmp" && chmod +x "$NATIVE_CLAUDE.tmp" \
+      if [ -d "$NATIVE_CLAUDE" ]; then
+        echo "[entrypoint] WARN $NATIVE_CLAUDE is a directory; refusing to replace it" >&2
+      elif cp -f "$NATIVE_VERSIONS/$TARGET_VER" "$NATIVE_CLAUDE.tmp" && chmod +x "$NATIVE_CLAUDE.tmp" \
          && mv -f "$NATIVE_CLAUDE.tmp" "$NATIVE_CLAUDE"; then
         echo "[entrypoint] native claude replaced with versions/$TARGET_VER"
       else
@@ -506,8 +517,14 @@ else
         echo "[entrypoint] WARN could not replace native claude with versions/$TARGET_VER" >&2
       fi
     else
-      echo "[entrypoint] WARN versions/$TARGET_VER reports '$("$NATIVE_VERSIONS/$TARGET_VER" --version 2>&1 | head -n 1)', not '$BUNDLED_VER'; not promoting it" >&2
+      echo "[entrypoint] WARN versions/$TARGET_VER reports '$("$NATIVE_VERSIONS/$TARGET_VER" --version 2>&1 | head -n 1)', not $TARGET_VER; not promoting it" >&2
     fi
+  elif [ -n "$TARGET_VER" ] && [ "$(native_tag)" != "$TARGET_VER" ]; then
+    # The install reported success (or failed above) and left nothing at the
+    # path this script promotes from: the installer's on-disk layout is a
+    # fact observed on one release, and the promotion silently becoming a
+    # no-op is the likeliest way this block stops working after the next one.
+    echo "[entrypoint] WARN no $NATIVE_VERSIONS/$TARGET_VER to promote; the installer's layout may have changed" >&2
   fi
 fi
 # The native binary is used only when it IS the image pin. Anything else —
@@ -520,7 +537,7 @@ fi
 # so a native binary that does run is the only thing that can start a
 # session. It is used, behind a WARN naming the missing pin.
 NATIVE_NOW=$(native_ver || true)
-if [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_NOW" ] && [ "$NATIVE_NOW" = "$BUNDLED_VER" ]; then
+if [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_NOW" ] && [ -n "$TARGET_VER" ] && [ "${NATIVE_NOW%% *}" = "$TARGET_VER" ]; then
   export PATH="/workspace/.local/bin:$PATH"
   echo "[entrypoint] using native claude: $NATIVE_NOW"
 elif [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_NOW" ] && [ -z "$BUNDLED_VER" ]; then

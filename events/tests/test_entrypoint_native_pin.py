@@ -64,6 +64,7 @@ class NativePinTest(unittest.TestCase):
                 echo "{PIN}" ;;
               install)
                 [ "${{FAKE_INSTALL:-ok}}" = fail ] && {{ echo "install failed"; exit 1; }}
+                [ "${{FAKE_INSTALL:-ok}}" = nofile ] && {{ echo "installed somewhere else"; exit 0; }}
                 mkdir -p "{self.versions}"
                 v="$2"; [ "${{FAKE_INSTALL:-ok}}" = corrupt ] && v="9.9.9"
                 printf '#!/bin/sh\\necho "%s (Claude Code)"\\n' "$v" > "{self.versions}/$2"
@@ -85,7 +86,7 @@ class NativePinTest(unittest.TestCase):
         out = proc.stdout + proc.stderr
         path = proc.stdout.rsplit("PATH=", 1)[1].strip()
         native = subprocess.run([str(self.native), "--version"], capture_output=True, text=True).stdout.strip() \
-            if self.native.exists() else ""
+            if self.native.is_file() else ""
         return out, path, native
 
     def test_stale_native_is_replaced_by_the_installers_download(self) -> None:
@@ -107,7 +108,7 @@ class NativePinTest(unittest.TestCase):
         fake_version_binary(self.native, "2.1.274")
         out, path, native = self.run_block(install="corrupt")
         self.assertNotIn("replaced", out)
-        self.assertIn("WARN versions/2.1.280 reports '9.9.9 (Claude Code)', not '2.1.280 (Claude Code)'; not promoting it", out)
+        self.assertIn("WARN versions/2.1.280 reports '9.9.9 (Claude Code)', not 2.1.280; not promoting it", out)
         self.assertIn("WARN native claude is '2.1.274 (Claude Code)'", out)
         self.assertIn("using npm-global claude", out)
         self.assertEqual("2.1.274 (Claude Code)", native)  # left alone, not on PATH first
@@ -158,6 +159,39 @@ class NativePinTest(unittest.TestCase):
         self.assertEqual(PIN, native)
         self.assertIn(f"using native claude: {PIN}", out)
         self.assertTrue(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_directory_at_the_native_path_is_refused_not_replaced(self) -> None:
+        """`mv claude.tmp claude` with a directory at `claude` moves the file
+        INTO it and exits 0; the chain must refuse instead of logging
+        "replaced", and must not remove what the operator put there."""
+
+        (self.native / "operator-file").parent.mkdir(parents=True)
+        (self.native / "operator-file").write_text("mine\n")
+        out, path, _ = self.run_block()
+        self.assertIn(f"WARN {self.native} is a directory; refusing to replace it", out)
+        self.assertNotIn("replaced", out)
+        self.assertIn("using npm-global claude", out)
+        self.assertTrue(self.native.is_dir())
+        self.assertEqual(["operator-file"], [p.name for p in self.native.iterdir()])  # nothing moved into it
+        self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_native_build_with_a_longer_version_line_still_counts_as_the_pin(self) -> None:
+        """Equality is on the version number, not the whole line."""
+
+        fake_version_binary(self.native, "2.1.280")
+        executable(self.native, '#!/bin/sh\necho "2.1.280 (Claude Code, native)"\n')
+        out, path, _ = self.run_block()
+        self.assertIn("already current (2.1.280 (Claude Code, native))", out)
+        self.assertIn("using native claude: 2.1.280 (Claude Code, native)", out)
+        self.assertTrue(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_install_that_leaves_no_versions_file_is_named_in_the_log(self) -> None:
+        fake_version_binary(self.native, "2.1.274")
+        out, path, native = self.run_block(install="nofile")
+        self.assertIn("WARN no " + str(self.versions) + "/2.1.280 to promote; the installer's layout may have changed", out)
+        self.assertIn("using npm-global claude", out)
+        self.assertEqual("2.1.274 (Claude Code)", native)
+        self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
 
     def test_no_image_pin_uses_a_native_binary_that_runs(self) -> None:
         """When the image's own claude cannot report a version there is no pin
