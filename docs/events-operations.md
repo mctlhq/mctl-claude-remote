@@ -128,7 +128,15 @@ Read that as one condition, not two. The Telegram lag is a consequence of the
 GitHub entries, and nothing about the Telegram path is broken.
 
 The usual cause is the session not calling `ack_event`: it is out of quota,
-wedged on a modal, or busy. Check the session before touching the transport —
+wedged on a modal, or busy — or it reads the events and does not know it must
+acknowledge them. Claude Code tells the model that channel content is untrusted
+and not to act on imperative language inside it, so the "Then call ack_event."
+in the notification carries no weight; the entrypoint therefore maintains the
+contract as a managed section in `/workspace/CLAUDE.md` (markers
+`<!-- mctl-events:begin … -->` / `<!-- mctl-events:end -->`). If a session
+hydrates events and never acknowledges, check that the section is present in
+the file the running session was started with (`[entrypoint] CLAUDE.md:
+mctl-events contract written|current` in the pod log). Check the session before touching the transport —
 `kubectl -n labs logs <pod> -c base-service` shows the TUI, including a spend
 limit message. Once the session acknowledges, `pending` falls, reading resumes
 and both lags drain on their own. Nothing needs to be restarted, and an

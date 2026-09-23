@@ -243,6 +243,18 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
 - **Acknowledged by Claude, not by the transport.** Channels have no delivery
   acknowledgement, so a valid, routed event's stream entry stays pending in the
   consumer group until Claude calls `ack_event`.
+- **The contract reaches the model through `CLAUDE.md`, not through the
+  event.** Claude Code appends to every channel turn a reminder that the tag's
+  contents are untrusted and that imperative language inside it must not be
+  acted on — which also covers the adapter's own "Then call ack_event." (#66:
+  the session hydrated, summarised and never acknowledged). With
+  `MCTL_EVENTS_ENABLED=true` the entrypoint therefore keeps a managed section
+  in `/workspace/CLAUDE.md`, between `<!-- mctl-events:begin … -->` and
+  `<!-- mctl-events:end -->`, that states the contract as the operator's
+  standing instruction: hydrate, then call `mcp__mctl-events__ack_event`;
+  nothing else counts as an acknowledgement. The section is rewritten on every
+  start and everything outside the markers is left untouched; the file is only
+  written when the section differs.
 - **New groups start at the tail.** The first time the adapter creates its
   consumer group it starts at `$`, so a new session is not flooded with the
   retained history; set `"group_start": "0"` in the policy to replay it. After
