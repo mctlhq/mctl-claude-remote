@@ -3,9 +3,13 @@ FROM node:22-slim
 # Pinned by default — the harness version must not float between rebuilds
 # (June's relay-TLS incidents were version-specific behavior). Bump via an
 # explicit commit, or override with --build-arg for a one-off (see issue #27).
-# 2.1.273: the first pin with a proven Channels round trip (event -> running
+# 2.1.273 was the first pin with a proven Channels round trip (event -> running
 # --remote-control session -> tool call), required by the mctl-events adapter.
-ARG CLAUDE_CODE_NPM_VERSION=2.1.273
+# 2.1.280: routine bump to npm latest on 2026-09-23, taken while recovering
+# the pod from an OAuth session that expired and could not be refreshed on
+# 2.1.273 (mctl-claude-remote#64); the Channels round trip must be re-proven
+# on this pin after rollout.
+ARG CLAUDE_CODE_NPM_VERSION=2.1.280
 
 # Matches the k3s-preview cluster's server version (kube.tf install_k3s_version
 # = v1.33.13+k3s1). kubectl tolerates +/-1 minor version skew from the server,
