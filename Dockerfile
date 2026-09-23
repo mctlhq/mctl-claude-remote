@@ -1,4 +1,4 @@
-FROM node:22-slim
+FROM node:25-slim
 
 # Pinned by default — the harness version must not float between rebuilds
 # (June's relay-TLS incidents were version-specific behavior). Bump via an
