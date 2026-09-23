@@ -253,9 +253,13 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
   reconnect. This works because the policy fixes the consumer name. An entry
   left pending by a consumer under a *different* name -- a renamed or scaled
   deployment -- is taken over once it has been idle for `reclaim_min_idle_ms`
-  and delivered again with `attempt > 1`; after `max_attempts` deliveries
-  without an acknowledgement it is audited as `rejected` and acknowledged, so a
-  poison event cannot loop forever. The attempt number is counted in Valkey
+  and delivered again with `attempt > 1`. This consumer's own in-flight events
+  are pushed again after the same idle window (audited as `delivered` with
+  `redelivery=idle`), so a notification the session missed is retried within
+  minutes instead of waiting for the next restart; after `max_attempts`
+  deliveries without an acknowledgement, on either path, the event is audited
+  as `rejected` and acknowledged, so a poison event cannot loop forever and
+  cannot hold a `max_inflight` slot forever. The attempt number is counted in Valkey
   (`mctl:events:state:attempt:<group>:<event_id>`) as the event is handed to
   Claude, not taken from the stream's own delivery count: re-reading a pending
   entry by id does not move that count, so a crash loop on one consumer name
@@ -270,8 +274,16 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
   acknowledged and audited as `skipped`.
   Beyond the routes it accepts only knobs the adapter honours:
   `max_inflight` (5), `block_ms` (5000), `group_start` (`$`),
-  `dedup_ttl_seconds` (86400), `reclaim_min_idle_ms` (300000) and
-  `max_attempts` (5); any other field is a startup error.
+  `dedup_ttl_seconds` (86400), `reclaim_min_idle_ms` (300000),
+  `max_attempts` (5) and `startup_grace_ms` (3000); any other field is a
+  startup error.
+- **Nothing is pushed until the handshake has settled.** Claude Code registers
+  its channel handler only after the server's capabilities have propagated
+  through its UI state (about a second after `initialized` on 2.1.280), sends
+  nothing to mark that moment, and drops a `notifications/claude/channel` that
+  arrives earlier without a trace. The adapter therefore starts consuming --
+  and re-pushing its pending list -- only once `startup_grace_ms` have passed
+  since the client's last handshake message (`initialized`, then `tools/list`).
 - **Audited, best effort.** Each stage (`received`, `delivered`,
   `delivery_failed`, `duplicate`, `acked`, `skipped`, `rejected`) is appended to `mctl:events:audit` with
   `event_id` and `correlation_id`. An audit write that fails is logged and

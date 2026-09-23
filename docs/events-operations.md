@@ -167,6 +167,25 @@ reading anything new, and re-delivers those entries. Observed on the 0.12.0
 rollout: five GitHub entries pending at kill, all five re-delivered 2m29s after
 the new pod started, none lost and none acknowledged on Claude's behalf.
 
+That first push is deliberately late. Claude Code registers its channel handler
+only after the server's capabilities have travelled through its UI state —
+about a second after `initialized` on 2.1.280 (`Channel notifications
+registered` in `mcp-logs-mctl-events/`) — and a notification that arrives
+before that is dropped without a trace. On 2026-09-23 (0.12.2, issue #67) the
+recovered entries were pushed 0.6 s after connect, 1.5 s before registration,
+and the session never saw them. The adapter now waits `startup_grace_ms`
+(3000) after the client's last handshake message before consuming at all, and
+logs `consumer started` when it does. If `delivered` records appear in the
+audit trail *before* that log line, the grace period is too short for the
+client in use.
+
+The second safety net is the idle redelivery: an in-flight event that Claude has
+not acknowledged within `reclaim_min_idle_ms` is pushed again with the next
+attempt number (`delivered` with `redelivery=idle`), up to `max_attempts`, after
+which it is audited as `rejected` and acknowledged so it stops holding a
+`max_inflight` slot. Before this, a missed push stayed in flight until the next
+restart and blocked every newer event behind it.
+
 This is why the consumer name is fixed in the policy. An entry left pending
 under a *different* consumer name is not recovered this way — it waits for
 `reclaim_min_idle_ms` and is then taken over, which is the slow path and only

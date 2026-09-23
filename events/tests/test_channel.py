@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import queue
 import threading
 import time
 import unittest
@@ -193,6 +194,44 @@ class WalkingSkeletonTest(unittest.TestCase):
         self.assertEqual(0, self.pending())
         replacement.no_notification(0.5)
 
+    def leave_one_pending(self, event_id: str) -> dict:
+        """Deliver an event and crash the adapter before it is acknowledged."""
+
+        self.claude.handshake()
+        self.wait_for_group()
+        doc = envelope(event_id)
+        self.publish(doc)
+        self.assertEqual(doc["id"], self.claude.notification()["params"]["meta"]["event_id"])
+        self.claude.kill()
+        self.assertEqual(1, self.pending())
+        return doc
+
+    def test_first_push_waits_for_the_handshake_to_settle(self) -> None:
+        """Claude Code registers its channel handler about a second after
+        `initialized` and silently drops a push that arrives before that, so the
+        recovered pending list must not be pushed the moment the handshake ends."""
+
+        doc = self.leave_one_pending("telegram:evt:v1:7:42:8001")
+        replacement = FakeClaude(self.valkey.url, {**POLICY, "startup_grace_ms": 1500})
+        self.addCleanup(replacement.close)
+        replacement.handshake()
+        replacement.no_notification(0.9)
+        pushed = replacement.notification(timeout=5)["params"]["meta"]
+        self.assertEqual((doc["id"], "2"), (pushed["event_id"], pushed["attempt"]))
+
+    def test_tools_list_restarts_the_settle_countdown(self) -> None:
+        """The client lists tools after `initialized`; the window counts from
+        whichever handshake message came last."""
+
+        self.leave_one_pending("telegram:evt:v1:7:42:8002")
+        replacement = FakeClaude(self.valkey.url, {**POLICY, "startup_grace_ms": 1500})
+        self.addCleanup(replacement.close)
+        replacement.handshake()
+        time.sleep(1.0)
+        replacement.request("tools/list", {})
+        replacement.no_notification(0.9)  # 1.9 s after initialized: still waiting
+        replacement.notification(timeout=5)
+
     def test_duplicate_after_a_restart_is_acknowledged_without_waking_the_session(self) -> None:
         """The dedup marker lives in Valkey, not in the adapter's memory."""
 
@@ -337,6 +376,89 @@ class InProcessAdapterTest(unittest.TestCase):
         attempts = [message["params"]["meta"]["attempt"] for message in pushed]
         self.assertEqual(["1", "2"], attempts)  # the third re-read is past the cap
         self.assertEqual(0, self.db.execute("XPENDING", STREAM, "claude-remote")[0])
+
+    def test_own_unacknowledged_event_is_pushed_again_after_reclaim_min_idle(self) -> None:
+        """A push the session missed used to stay in flight until the next
+        restart; now it is offered again, with the next attempt number."""
+
+        pushed: list[dict] = []
+        policy = policy_mod.from_dict({**POLICY, "reclaim_min_idle_ms": 50})
+        adapter = self.adapter(policy=policy, emit=pushed.append)
+        doc = envelope("telegram:evt:v1:7:42:7101")
+        self.db.execute("XADD", STREAM, "*", "envelope", json.dumps(doc))
+        self.assertEqual(1, adapter.read_once(block_ms=100))
+        self.assertEqual(0, adapter.redeliver_stale())  # not idle yet
+        time.sleep(0.06)
+
+        self.assertEqual(1, adapter.redeliver_stale())
+        self.assertEqual(["1", "2"], [message["params"]["meta"]["attempt"] for message in pushed])
+        self.assertEqual(2, adapter.inflight[doc["id"]].attempt)
+        self.assertEqual(0, adapter.redeliver_stale())  # the idle clock restarted with the push
+        self.assertEqual("acknowledged", adapter.ack(doc["id"], "handled", "")["status"])
+        self.assertEqual(0, self.db.execute("XPENDING", STREAM, "claude-remote")[0])
+        adapter.flush_audit()
+        self.assertEqual(["received", "delivered", "delivered", "acked"], self.audit_stages())
+
+    def test_redelivery_of_an_own_event_stops_at_max_attempts(self) -> None:
+        pushed: list[dict] = []
+        policy = policy_mod.from_dict({**POLICY, "reclaim_min_idle_ms": 50, "max_attempts": 1})
+        adapter = self.adapter(policy=policy, emit=pushed.append)
+        self.db.execute("XADD", STREAM, "*", "envelope", json.dumps(envelope("telegram:evt:v1:7:42:7102")))
+        self.assertEqual(1, adapter.read_once(block_ms=100))
+        time.sleep(0.06)
+
+        self.assertEqual(0, adapter.redeliver_stale())
+        self.assertEqual(1, len(pushed))  # attempt 2 is past the cap: not pushed again
+        self.assertEqual({}, adapter.inflight)  # the slot is free for newer events
+        self.assertEqual(0, self.db.execute("XPENDING", STREAM, "claude-remote")[0])
+        adapter.flush_audit()
+        self.assertEqual("rejected", self.audit_stages()[-1])
+
+    def test_a_redelivery_that_never_reached_claude_keeps_the_slot_and_the_attempt(self) -> None:
+        pushed: list[dict] = []
+        broken = False
+
+        def emit(message: dict) -> None:
+            if broken:
+                raise BrokenPipeError("stdout is gone")
+            pushed.append(message)
+
+        policy = policy_mod.from_dict({**POLICY, "reclaim_min_idle_ms": 50})
+        adapter = self.adapter(policy=policy, emit=emit)
+        doc = envelope("telegram:evt:v1:7:42:7103")
+        self.db.execute("XADD", STREAM, "*", "envelope", json.dumps(doc))
+        self.assertEqual(1, adapter.read_once(block_ms=100))
+        broken = True
+        time.sleep(0.06)
+
+        self.assertEqual(0, adapter.redeliver_stale())
+        self.assertEqual(1, adapter.inflight[doc["id"]].attempt)  # refunded, still in flight
+        self.assertEqual(b"1", self.db.execute(
+            "GET", "mctl:events:state:attempt:claude-remote:telegram%3Aevt%3Av1%3A7%3A42%3A7103"))
+        broken = False
+        self.assertEqual(1, adapter.redeliver_stale())  # still idle: tried again at once
+        self.assertEqual(["1", "2"], [message["params"]["meta"]["attempt"] for message in pushed])
+
+    def test_run_loop_pushes_a_stuck_event_again_without_a_restart(self) -> None:
+        """The wiring, not only the method: a live consumer retries on its own."""
+
+        pushed: "queue.Queue[dict]" = queue.Queue()
+        policy = policy_mod.from_dict({**POLICY, "block_ms": 200, "reclaim_min_idle_ms": 300})
+        adapter = self.adapter(policy=policy, emit=pushed.put)
+        consumer = threading.Thread(target=adapter.run, daemon=True)
+        consumer.start()
+        self.addCleanup(consumer.join, 3)
+        self.addCleanup(adapter.stop)
+        doc = envelope("telegram:evt:v1:7:42:7104")
+        self.db.execute("XADD", STREAM, "*", "envelope", json.dumps(doc))
+
+        first = pushed.get(timeout=5)["params"]["meta"]
+        second = pushed.get(timeout=5)["params"]["meta"]
+        self.assertEqual([(doc["id"], "1"), (doc["id"], "2")],
+                         [(m["event_id"], m["attempt"]) for m in (first, second)])
+        adapter.ack(doc["id"], "handled", "")
+        with self.assertRaises(queue.Empty):  # acknowledged: nothing more to retry
+            pushed.get(timeout=0.7)
 
     def test_a_notification_that_never_reached_claude_does_not_spend_an_attempt(self) -> None:
         """A stdio hiccup is not a delivery: the event has not been tried, so the

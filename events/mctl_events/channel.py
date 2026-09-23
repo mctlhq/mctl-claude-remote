@@ -17,8 +17,14 @@ Delivery contract:
   acknowledged by the adapter itself and recorded in the audit stream;
 - an acknowledged event id is remembered in Valkey for `dedup_ttl_seconds`, so
   a duplicate entry is a no-op across restarts, not only within one process;
-- entries left pending by a consumer that is gone are taken over after
-  `reclaim_min_idle_ms` and redelivered with `attempt > 1`, up to `max_attempts`.
+- an event Claude has not acknowledged after `reclaim_min_idle_ms` is pushed
+  again with `attempt > 1`, up to `max_attempts`; entries left pending by a
+  consumer that is gone are taken over the same way. A push the session never
+  saw (it registers its channel handler only after the handshake) is therefore
+  retried within minutes rather than frozen until the next restart;
+- nothing is pushed until the handshake has been quiet for `startup_grace_ms`:
+  Claude Code drops a channel notification that arrives before its handler is
+  registered, and the protocol has no message for that moment.
 
 The event is disposable, the source is canonical: Claude always hydrates current
 state from the subject references through the source system's MCP tools.
@@ -550,9 +556,10 @@ class Adapter:
             capacity = self.capacity()
             if capacity <= 0:
                 break
-            # This consumer's own idle entries are left alone: recover_pending
-            # re-reads them, and claiming them here would inflate the attempt
-            # number of an event Claude is still working on.
+            # This consumer's own idle entries are left alone: they are in
+            # `inflight` already and `redeliver_stale` pushes them again with
+            # the same idle window, so claiming them here would count one
+            # delivery twice.
             batch = self._abandoned_entries(
                 stream, self.policy.reclaim_min_idle_ms, min(RECLAIM_BATCH, capacity))
             if not batch:
@@ -574,6 +581,57 @@ class Adapter:
                 self._dispatch(stream, entry, flat or [])
                 claimed += 1
         return claimed
+
+    def redeliver_stale(self, now: float | None = None) -> int:
+        """Push this consumer's own unacknowledged events to Claude again.
+
+        Until 2026-09-23 an in-flight event was offered exactly once per process:
+        `recover_pending` re-reads the pending list at startup and `reclaim`
+        deliberately skips own entries, so a notification the session did not
+        act on -- above all one pushed before Claude Code had registered its
+        channel handler, which the client drops silently -- stayed in flight
+        until the next restart, holding a `max_inflight` slot and blocking every
+        newer event behind it. The idle window and the attempt cap are the ones
+        the takeover path already uses, so a stuck event ends in the audit trail
+        as `rejected` after `max_attempts` deliveries instead of never.
+
+        A session that is merely slow gets the same push with a higher attempt
+        and the standing instruction to check for an earlier side effect."""
+
+        now = time.time() if now is None else now
+        idle = self.policy.reclaim_min_idle_ms / 1000
+        pushed = 0
+        with self._lock:
+            for event_id, item in list(self.inflight.items()):
+                if now - item.delivered_at < idle:
+                    continue
+                env = item.envelope
+                attempt = self._bump_attempt(event_id)
+                if attempt > self.policy.max_attempts:
+                    self.audit("rejected", event_id, env.correlation_id, attempt=attempt,
+                               entries=len(item.entries),
+                               reason=f"not acknowledged after {self.policy.max_attempts} deliveries")
+                    self._mark_acked(event_id)
+                    for stream, entry_id in item.entries:
+                        self.commands.execute("XACK", stream, self.policy.group, entry_id)
+                    del self.inflight[event_id]
+                    self._lock.notify_all()
+                    continue
+                try:
+                    self.emit(notification_for(env, attempt))
+                except Exception as exc:  # noqa: BLE001 - stdio gone; the entry stays pending for recovery
+                    # Not delivered, so not counted: the event keeps its slot and
+                    # its earlier attempt, and is offered again on the next sweep
+                    # or by the replacement adapter.
+                    self._drop_attempt(event_id)
+                    self.audit("delivery_failed", event_id, env.correlation_id, attempt=attempt,
+                               reason=type(exc).__name__)
+                    _log("redelivery failed; entry left pending", event_id=event_id, error=str(exc)[:300])
+                    continue
+                item.attempt, item.delivered_at = attempt, now
+                self.audit("delivered", event_id, env.correlation_id, attempt=attempt, redelivery="idle")
+                pushed += 1
+        return pushed
 
     def _dispatch(self, stream: str, entry_id: str, flat: list[Any]) -> None:
         fields = dict(zip(flat[::2], flat[1::2]))
@@ -600,6 +658,11 @@ class Adapter:
                 next_reclaim = time.time() + RECLAIM_INTERVAL_SECONDS
                 while not self._stop.is_set():
                     self.read_once()
+                    # Cheap (an in-memory scan) and bounded by block_ms between
+                    # calls, so it runs every pass rather than on the reclaim
+                    # timer: a stuck event is retried as soon as it is idle
+                    # long enough, not up to a minute later.
+                    self.redeliver_stale()
                     if time.time() >= next_reclaim:
                         self.reclaim()
                         next_reclaim = time.time() + RECLAIM_INTERVAL_SECONDS
@@ -671,7 +734,7 @@ class Adapter:
 TOOLS = [
     {
         "name": "ack_event",
-        "description": "Acknowledge an MCTL event after handling it. An unacknowledged event stays pending in its stream and is delivered again when the adapter restarts or another consumer reclaims it.",
+        "description": "Acknowledge an MCTL event after handling it. An unacknowledged event stays pending in its stream and is delivered again, with a higher attempt number, after reclaim_min_idle_ms, when the adapter restarts, or when another consumer reclaims it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -701,6 +764,10 @@ class StdioServer:
 
     def __init__(self, stdin: TextIO, stdout: TextIO, on_ready: Callable[[], None]) -> None:
         self.stdin, self.stdout = stdin, stdout
+        # Called on every handshake message the client sends while setting up:
+        # `notifications/initialized`, then each `tools/list`. The caller
+        # decides when the client has gone quiet for long enough to be
+        # listening for channel pushes.
         self.on_ready = on_ready
         self.adapter: Adapter | None = None
         self._write = threading.Lock()
@@ -753,6 +820,7 @@ class StdioServer:
                 self.on_ready()
             elif method == "tools/list":
                 self._result(mid, {"tools": TOOLS})
+                self.on_ready()
             elif method == "tools/call":
                 params = message.get("params") or {}
                 try:
@@ -789,21 +857,62 @@ def main() -> int:
     adapter = Adapter(policy, Connection(endpoint), Connection(endpoint), server.send,
                       auditor=Connection(endpoint, timeout=AUDIT_TIMEOUT_SECONDS))
     server.adapter = adapter
-    started = threading.Event()
     consumer = threading.Thread(target=adapter.run, name="consumer", daemon=True)
-
-    def start() -> None:
-        # Only push once Claude has finished the handshake; a notification sent
-        # before `initialized` has nowhere to land.
-        if not started.is_set():
-            started.set()
-            consumer.start()
-
-    server.on_ready = start
-    _log("starting", group=policy.group, consumer=policy.consumer, streams=list(policy.streams))
+    starter = _DeferredStart(consumer, policy.startup_grace_ms / 1000)
+    server.on_ready = starter.touch
+    _log("starting", group=policy.group, consumer=policy.consumer, streams=list(policy.streams),
+         startup_grace_ms=policy.startup_grace_ms)
     server.serve()
-    adapter.close(consumer=consumer if started.is_set() else None)
+    adapter.close(consumer=starter.cancel())
     return 0
+
+
+class _DeferredStart:
+    """Start the consumer once the client's handshake has been quiet for `grace`.
+
+    Until 2026-09-23 the consumer started on `notifications/initialized` and
+    pushed its recovered pending list within a second -- about 1.5 s before
+    Claude Code 2.1.280 logged "Channel notifications registered". The client
+    registers that handler only after the server's capabilities have travelled
+    through its UI state, sends nothing to mark the moment, and drops a
+    notification that arrives earlier without a trace. Every handshake message
+    (`initialized`, then `tools/list`) restarts the countdown, so the first push
+    lands a full grace period after the client last spoke."""
+
+    def __init__(self, consumer: threading.Thread, grace: float) -> None:
+        self.consumer, self.grace = consumer, grace
+        self._lock = threading.Lock()
+        self._due: float | None = None
+        self._cancelled = False
+        self._thread: threading.Thread | None = None
+
+    def touch(self) -> None:
+        with self._lock:
+            if self._cancelled or self.consumer.is_alive():
+                return
+            self._due = time.monotonic() + self.grace
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._wait, name="starter", daemon=True)
+                self._thread.start()
+
+    def _wait(self) -> None:
+        while True:
+            with self._lock:
+                if self._cancelled:
+                    return
+                remaining = (self._due or 0.0) - time.monotonic()
+                if remaining <= 0:
+                    self.consumer.start()
+                    _log("consumer started", settled_ms=int(self.grace * 1000))
+                    return
+            time.sleep(min(remaining, 0.05))
+
+    def cancel(self) -> threading.Thread | None:
+        """Stop a pending start; returns the consumer if it was started."""
+
+        with self._lock:
+            self._cancelled = True
+            return self.consumer if self.consumer.is_alive() else None
 
 
 if __name__ == "__main__":

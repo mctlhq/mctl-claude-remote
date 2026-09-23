@@ -57,11 +57,21 @@ class Policy:
     # session again. Producers republish from an outbox within minutes; a day
     # covers that with room to spare and costs one small key per event.
     dedup_ttl_seconds: int = 86400
-    # An entry pending on *another* consumer for at least this long is taken
-    # over (XCLAIM) and delivered again. Only reached when the consumer name
-    # changes -- a plain restart keeps the name and re-reads its own pending
-    # list -- so the window is deliberately generous.
+    # An event unacknowledged for at least this long is delivered again with
+    # the next attempt number: this consumer's own in-flight events are pushed
+    # to the session once more (a push the session missed is not lost until
+    # the next restart), and an entry pending on *another* consumer is taken
+    # over (XCLAIM). Generous on purpose: a session that is simply slow to
+    # answer is told to check for an earlier side effect, not undercut.
     reclaim_min_idle_ms: int = 300000
+    # Delay between the client's last handshake message (`initialized`, then
+    # `tools/list`) and the first delivery. Claude Code registers its channel
+    # handler only after the server's capabilities have propagated through
+    # its UI state -- observed ~1 s after `initialized` on 2.1.280 -- and a
+    # notification pushed before that is dropped by the client without a
+    # trace. Nothing in the protocol marks the moment, so the adapter waits
+    # for the handshake to go quiet instead.
+    startup_grace_ms: int = 3000
     # Deliveries of one entry before it is rejected: a poison event that Claude
     # never acknowledges must not be reclaimed forever.
     max_attempts: int = 5
@@ -99,7 +109,7 @@ def from_dict(doc: Any) -> Policy:
     # Only knobs this adapter honours: accepting any other field would let an
     # operator believe a setting is in effect when nothing reads it.
     allowed = {"group", "consumer", "routes", "max_inflight", "block_ms", "group_start",
-               "dedup_ttl_seconds", "reclaim_min_idle_ms", "max_attempts"}
+               "dedup_ttl_seconds", "reclaim_min_idle_ms", "max_attempts", "startup_grace_ms"}
     unknown = sorted(set(doc) - allowed)
     if unknown:
         raise ValueError(f"unknown policy fields: {unknown}")
@@ -140,6 +150,7 @@ def from_dict(doc: Any) -> Policy:
         dedup_ttl_seconds=_positive(doc, "dedup_ttl_seconds", 86400),
         reclaim_min_idle_ms=_positive(doc, "reclaim_min_idle_ms", 300000),
         max_attempts=_positive(doc, "max_attempts", 5),
+        startup_grace_ms=_positive(doc, "startup_grace_ms", 3000),
     )
 
 
