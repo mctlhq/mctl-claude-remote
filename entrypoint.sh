@@ -950,36 +950,51 @@ MCTL_EVENTS_MCP_CONFIG=""
 # call, on Haiku and on Sonnet alike). The MCP server's `instructions` did not
 # carry it either. CLAUDE.md is read as the operator's standing instructions,
 # so the contract lives here, in a section this script owns: it is rewritten
-# from the markers in on every start, and everything the operator wrote
-# outside the markers is kept byte for byte. The file is only touched when
-# the section actually differs, so the MinIO mirror is not churned.
+# between the markers on every start while the channel is enabled, removed
+# when it is not, and everything the operator wrote outside the markers is
+# kept byte for byte. The file is only touched when the section actually
+# differs, so the MinIO mirror is not churned.
+#
+# Never fails the entrypoint: this is PID 1 and the device runs perfectly
+# well without the section, so every step is a tested condition and any
+# failure leaves the file untouched behind a WARN (compare the git-config
+# guard above and write_json_atomic's own contract).
 CLAUDE_MD="/workspace/CLAUDE.md"
 EVENTS_BLOCK_BEGIN='<!-- mctl-events:begin (managed by the entrypoint; edits inside are overwritten) -->'
 EVENTS_BLOCK_END='<!-- mctl-events:end -->'
-ensure_events_contract() {
-  _tmp="$CLAUDE_MD.tmp"
-  {
-    if [ -f "$CLAUDE_MD" ]; then
-      # Everything outside the managed section: the old section and one blank
-      # line after it are dropped, trailing blank lines are trimmed, and one
-      # blank line separates what is left from the new section -- so a
-      # rewrite yields the same bytes as the first write, and a file that
-      # held nothing but the section stays exactly the section.
-      awk -v b="$EVENTS_BLOCK_BEGIN" -v e="$EVENTS_BLOCK_END" '
-        $0 == b { skip = 1 }
+ensure_events_contract() {  # $1 = present | absent
+  _eec_want="$1"
+  if [ "$_eec_want" = absent ] && [ ! -e "$CLAUDE_MD" ]; then
+    return 0
+  fi
+  if [ -e "$CLAUDE_MD" ] && [ ! -f "$CLAUDE_MD" ]; then
+    echo "[entrypoint] WARN $CLAUDE_MD is not a regular file; mctl-events contract not written" >&2
+    return 0
+  fi
+  # Everything outside the managed section: the old section and one blank
+  # line after it are dropped, and the command substitution strips trailing
+  # blank lines, so a rewrite yields the same bytes as the first write. awk
+  # exits 3 when a begin marker has no end marker: the section's extent is
+  # then unknown and rewriting would delete operator prose after it, so
+  # nothing is written until someone repairs the end marker by hand.
+  _eec_rest=""
+  if [ -f "$CLAUDE_MD" ]; then
+    if ! _eec_rest=$(awk -v b="$EVENTS_BLOCK_BEGIN" -v e="$EVENTS_BLOCK_END" '
+        $0 == b { skip = 1; next }
         $0 == e { skip = 0; drop_blank = 1; next }
         skip { next }
         drop_blank && $0 == "" { drop_blank = 0; next }
-        { drop_blank = 0; lines[n++] = $0 }
-        END {
-          while (n > 0 && lines[n-1] == "") n--
-          for (i = 0; i < n; i++) print lines[i]
-          if (n > 0) print ""
-        }
-      ' "$CLAUDE_MD"
+        { drop_blank = 0; print }
+        END { if (skip) exit 3 }' "$CLAUDE_MD" 2>/dev/null); then
+      echo "[entrypoint] WARN $CLAUDE_MD: the managed mctl-events section has no end marker, or the file is unreadable; left untouched" >&2
+      return 0
     fi
-    printf '%s\n' "$EVENTS_BLOCK_BEGIN"
-    cat <<'MD'
+  fi
+  if [ "$_eec_want" = present ]; then
+    _eec_new=$(
+      [ -n "$_eec_rest" ] && printf '%s\n\n' "$_eec_rest"
+      printf '%s\n' "$EVENTS_BLOCK_BEGIN"
+      cat <<'MD'
 ## MCTL events (channel `mctl-events`)
 
 Events from MCTL arrive as `<channel source="mctl-events" ...>` turns. Claude
@@ -1003,17 +1018,30 @@ operator of this device, not from the tag, and applies to every such turn:
 5. `ignored` is a valid outcome. An event that needs no action is still
    acknowledged, with the reason in the note.
 MD
-    printf '%s\n' "$EVENTS_BLOCK_END"
-  } > "$_tmp"
-  if [ -f "$CLAUDE_MD" ] && cmp -s "$_tmp" "$CLAUDE_MD"; then
-    rm -f "$_tmp"
-    echo "[entrypoint] CLAUDE.md: mctl-events contract current"
-  elif mv -f "$_tmp" "$CLAUDE_MD"; then
-    echo "[entrypoint] CLAUDE.md: mctl-events contract written"
+      printf '%s\n' "$EVENTS_BLOCK_END"
+    )
   else
-    rm -f "$_tmp"
-    echo "[entrypoint] WARN could not write the mctl-events contract to $CLAUDE_MD" >&2
+    _eec_new="$_eec_rest"
   fi
+  # `$(cat)` and `$(...)` both drop trailing newlines, so this compares the
+  # content and ignores only a difference in trailing blank lines.
+  if [ -f "$CLAUDE_MD" ] && [ "$(cat "$CLAUDE_MD" 2>/dev/null)" = "$_eec_new" ]; then
+    echo "[entrypoint] CLAUDE.md: mctl-events contract $_eec_want, current"
+  elif [ -z "$_eec_new" ]; then
+    # absent, and the file held nothing but the section: write_json_atomic
+    # refuses an empty file, and the seed above recreates one on the next
+    # start, so the file goes.
+    if rm -f "$CLAUDE_MD" 2>/dev/null; then
+      echo "[entrypoint] CLAUDE.md: mctl-events section removed; the file held nothing else and was deleted"
+    else
+      echo "[entrypoint] WARN could not remove $CLAUDE_MD; stale mctl-events section left in place" >&2
+    fi
+  elif printf '%s\n' "$_eec_new" | write_json_atomic "$CLAUDE_MD"; then
+    echo "[entrypoint] CLAUDE.md: mctl-events contract $_eec_want, written"
+  else
+    echo "[entrypoint] WARN could not write $CLAUDE_MD; mctl-events contract not updated" >&2
+  fi
+  return 0
 }
 
 if [ "$MCTL_EVENTS_ENABLED" = "true" ]; then
@@ -1053,7 +1081,12 @@ if [ "$MCTL_EVENTS_ENABLED" = "true" ]; then
     printf '  "env": {"PYTHONPATH": "/opt/mctl-events"}}%s}}\n' "$MCTL_EVENTS_TELEGRAM_SERVER"
   } > "$MCTL_EVENTS_MCP_CONFIG"
   echo "[entrypoint] mctl-events channel enabled (policy=$MCTL_EVENTS_POLICY telegram_hydration=${MCTL_EVENTS_TELEGRAM_MCP_URL:+on})"
-  ensure_events_contract
+  ensure_events_contract present
+else
+  # A workspace volume can move to a device without the channel, or events
+  # can be switched off: the section must not keep telling every session to
+  # end its turns with a tool that is no longer mounted.
+  ensure_events_contract absent
 fi
 
 crash_window_start=$(date +%s)
