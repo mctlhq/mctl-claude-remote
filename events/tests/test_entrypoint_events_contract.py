@@ -9,6 +9,7 @@ image and on the CI runner.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import tempfile
@@ -92,6 +93,7 @@ class EventsContractTest(unittest.TestCase):
     def test_missing_file_is_created_and_stays_identical(self) -> None:
         self.run_fn()
         self.assertTrue(self.content().startswith(BEGIN))
+        self.assertEqual(0o644, self.md.stat().st_mode & 0o777)  # documentation, not a credential
         first = self.content()
         for _ in range(3):
             self.run_fn()
@@ -108,8 +110,47 @@ class EventsContractTest(unittest.TestCase):
         original = f"# top\n\n{BEGIN}\nhalf a section, end marker lost\n\n## operator prose after it\n"
         self.md.write_text(original)
         out = self.run_fn()
-        self.assertIn("no end marker", out)
+        self.assertIn("found 1/0", out)
         self.assertEqual(original, self.content())
+
+    def test_unbalanced_markers_leave_the_file_untouched(self) -> None:
+        """An orphaned begin marker before a real section would make the awk
+        pass drop the prose between them; a stray end marker would eat a
+        line of prose on every start. Both are repair-by-hand cases."""
+
+        cases = {
+            "orphan begin then a real section": (
+                f"# top\n\n{BEGIN}\n\n## prose the orphan would swallow\n\n{BEGIN}\nbody\n{END}\n", "found 2/1"),
+            "stray end marker in prose": (f"# top\n\n{END}\n\nkeep me\n", "found 0/1"),
+            "two full sections": (f"{BEGIN}\nold\n{END}\n\n{BEGIN}\nold\n{END}\n", "found 2/2"),
+        }
+        for name, (original, expected) in cases.items():
+            with self.subTest(name):
+                self.md.write_text(original)
+                out = self.run_fn()
+                self.assertIn(expected, out)
+                self.assertEqual(original, self.content())
+                out = self.run_fn("absent")
+                self.assertIn(expected, out)
+                self.assertEqual(original, self.content())
+
+    def test_outcome_vocabulary_matches_ack_event(self) -> None:
+        """The heredoc is a copy of channel.py's INSTRUCTIONS for the model's
+        eyes; teaching it an outcome `ack_event` rejects would fail every ack."""
+
+        channel = (ENTRYPOINT.parent / "events/mctl_events/channel.py").read_text(encoding="utf-8")
+        enum = re.search(r'"outcome": \{"type": "string", "enum": \[([^\]]+)\]\}', channel)
+        self.assertIsNotNone(enum, "ack_event's outcome enum not found in channel.py")
+        outcomes = re.findall(r'"([a-z]+)"', enum.group(1))
+        self.assertEqual(sorted(outcomes), sorted(re.findall(r'"([a-z]+)"', re.search(
+            r"if outcome not in \(([^)]+)\)", channel).group(1))), "channel.py disagrees with itself")
+        self.run_fn()
+        section = self.content()
+        outcome_line = next(l for l in section.splitlines() if "`outcome`" in l)
+        self.assertEqual(sorted(outcomes), sorted(re.findall(r"`([a-z]+)`", outcome_line.split("`outcome`", 1)[1])))
+        self.assertTrue(re.search(r"outcome \(([^)]+)\)", channel), "INSTRUCTIONS no longer names the outcomes")
+        self.assertEqual(sorted(outcomes),
+                         sorted(re.findall(r"[a-z]+", re.search(r"outcome \(([^)]+)\)", channel).group(1))))
 
     def test_absent_removes_the_section_and_keeps_the_rest(self) -> None:
         self.md.write_text("# top\n\nkeep me\n")

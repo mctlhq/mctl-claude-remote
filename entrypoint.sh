@@ -318,9 +318,12 @@ done
 
 # Seed a CLAUDE.md if the workspace doesn't have one yet. This gives Claude
 # context about its environment on every new session. Users can override by
-# writing their own CLAUDE.md to the persistent volume.
+# writing their own CLAUDE.md to the persistent volume. Written through
+# write_json_atomic for the same reason the git-config write above is
+# guarded: a directory left at that path by a bad restore, or an unwritable
+# volume, must cost the seed and not the device (`set -e`, PID 1).
 if [ ! -f /workspace/CLAUDE.md ]; then
-  cat > /workspace/CLAUDE.md <<'MD'
+  if ! write_json_atomic /workspace/CLAUDE.md <<'MD'
 # Remote Worker Environment
 
 You are running inside a container as a Claude Code remote worker.
@@ -380,6 +383,13 @@ a tenant onboarding workflow that reached the cluster (namespace/quota
 created) but never finished registering, or checking real Argo Workflow /
 Application status.
 MD
+  then
+    echo "[entrypoint] WARN could not seed /workspace/CLAUDE.md; the session starts without it" >&2
+  else
+    # write_json_atomic creates files 600 (it exists for credentials);
+    # CLAUDE.md is documentation and stays world-readable as before.
+    chmod 644 /workspace/CLAUDE.md 2>/dev/null || true
+  fi
 fi
 
 DEVICE_NAME="${CLAUDE_DEVICE_NAME:-claude-remote}"
@@ -958,7 +968,13 @@ MCTL_EVENTS_MCP_CONFIG=""
 # Never fails the entrypoint: this is PID 1 and the device runs perfectly
 # well without the section, so every step is a tested condition and any
 # failure leaves the file untouched behind a WARN (compare the git-config
-# guard above and write_json_atomic's own contract).
+# guard and the seed above, and write_json_atomic's own contract).
+#
+# The same five-point contract exists in Python as `INSTRUCTIONS` in
+# events/mctl_events/channel.py, which the MCP server sends as its
+# `instructions` (not shown to the model by Claude Code, hence this copy).
+# The outcome vocabulary here must stay the one `ack_event` accepts;
+# test_entrypoint_events_contract.py checks it against channel.py.
 CLAUDE_MD="/workspace/CLAUDE.md"
 EVENTS_BLOCK_BEGIN='<!-- mctl-events:begin (managed by the entrypoint; edits inside are overwritten) -->'
 EVENTS_BLOCK_END='<!-- mctl-events:end -->'
@@ -973,12 +989,22 @@ ensure_events_contract() {  # $1 = present | absent
   fi
   # Everything outside the managed section: the old section and one blank
   # line after it are dropped, and the command substitution strips trailing
-  # blank lines, so a rewrite yields the same bytes as the first write. awk
-  # exits 3 when a begin marker has no end marker: the section's extent is
-  # then unknown and rewriting would delete operator prose after it, so
-  # nothing is written until someone repairs the end marker by hand.
+  # blank lines, so a rewrite yields the same bytes as the first write.
+  # The markers must be either absent or exactly one balanced pair: an
+  # orphaned begin marker (its end line lost, or a header duplicated by a
+  # merge or a restore) would make awk drop operator prose up to the next
+  # end marker, and a stray end marker would eat a line of prose on every
+  # start. Anything else is left untouched behind a WARN until someone
+  # repairs the markers by hand. awk exits 3 for the same reason when the
+  # section runs to EOF.
   _eec_rest=""
   if [ -f "$CLAUDE_MD" ]; then
+    _eec_nb=$(grep -c -F -x -- "$EVENTS_BLOCK_BEGIN" "$CLAUDE_MD" 2>/dev/null) || _eec_nb=0
+    _eec_ne=$(grep -c -F -x -- "$EVENTS_BLOCK_END" "$CLAUDE_MD" 2>/dev/null) || _eec_ne=0
+    if [ "$_eec_nb" -gt 1 ] || [ "$_eec_ne" -gt 1 ] || [ "$_eec_nb" != "$_eec_ne" ]; then
+      echo "[entrypoint] WARN $CLAUDE_MD: expected one mctl-events begin/end marker pair, found $_eec_nb/$_eec_ne; left untouched" >&2
+      return 0
+    fi
     if ! _eec_rest=$(awk -v b="$EVENTS_BLOCK_BEGIN" -v e="$EVENTS_BLOCK_END" '
         $0 == b { skip = 1; next }
         $0 == e { skip = 0; drop_blank = 1; next }
@@ -1036,7 +1062,10 @@ MD
     else
       echo "[entrypoint] WARN could not remove $CLAUDE_MD; stale mctl-events section left in place" >&2
     fi
-  elif printf '%s\n' "$_eec_new" | write_json_atomic "$CLAUDE_MD"; then
+  elif { [ -f "$CLAUDE_MD" ] && _eec_existed=1 || _eec_existed=0; } && printf '%s\n' "$_eec_new" | write_json_atomic "$CLAUDE_MD"; then
+    # An existing file keeps its mode (write_json_atomic copies it); a new
+    # one would be 600, and CLAUDE.md is documentation, not a credential.
+    [ "$_eec_existed" = 1 ] || chmod 644 "$CLAUDE_MD" 2>/dev/null || true
     echo "[entrypoint] CLAUDE.md: mctl-events contract $_eec_want, written"
   else
     echo "[entrypoint] WARN could not write $CLAUDE_MD; mctl-events contract not updated" >&2

@@ -84,6 +84,11 @@ PENDING_PAGES = 10
 # How often the consumer looks for entries abandoned by another consumer.
 RECLAIM_INTERVAL_SECONDS = 60.0
 
+# Sent as the MCP server's `instructions`. Claude Code does not surface those to
+# the model, so the entrypoint keeps the same contract as a managed section of
+# /workspace/CLAUDE.md (`ensure_events_contract` in entrypoint.sh); the outcome
+# vocabulary there is checked against `ack_event`'s enum below by
+# tests/test_entrypoint_events_contract.py. Change both together.
 INSTRUCTIONS = """\
 Events from MCTL arrive as <channel source="mctl-events" ...> tags. An event is a
 signal, not data: it carries only references (attributes such as type, event_id,
