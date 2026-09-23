@@ -446,25 +446,123 @@ fi
 # same version as the bundled npm package; saves 30–60 s on normal restarts.
 # Some volume/restore mechanisms drop the exec bit, so chmod always runs.
 NATIVE_CLAUDE="/workspace/.local/bin/claude"
+NATIVE_VERSIONS="/workspace/.local/share/claude/versions"
 chmod +x "$NATIVE_CLAUDE" 2>/dev/null || true
-BUNDLED_VER=$(claude --version 2>/dev/null | head -1)
-NATIVE_VER=$("$NATIVE_CLAUDE" --version 2>/dev/null | head -1)
-if [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_VER" ] && [ "$NATIVE_VER" = "$BUNDLED_VER" ]; then
-  echo "[entrypoint] native claude already current ($NATIVE_VER); skipping install"
+BUNDLED_VER=$(claude --version 2>/dev/null | head -n 1)
+TARGET_VER=$(printf '%s' "$BUNDLED_VER" | awk '{print $1}')
+native_ver() { "$NATIVE_CLAUDE" --version 2>/dev/null | head -n 1; }
+# Version equality is what decides which binary the session runs, so it is
+# the version *number* (first field) that is compared, never the whole line:
+# a suffix the native build prints and the npm-global one does not would
+# otherwise disable the native binary on every device forever. The full
+# line is still what the log shows.
+native_tag() { native_ver | awk '{print $1}'; }
+if [ -x "$NATIVE_CLAUDE" ] && [ -n "$TARGET_VER" ] && [ "$(native_tag)" = "$TARGET_VER" ]; then
+  echo "[entrypoint] native claude already current ($(native_ver)); skipping install"
 else
   # Install the bundled (pinned) version, not `latest` — otherwise the runtime
   # harness floats past the image pin on every restart. Fall back to latest
   # only when the bundled version cannot be determined.
-  TARGET_VER=$(printf '%s' "$BUNDLED_VER" | awk '{print $1}')
   echo "[entrypoint] installing/refreshing native claude binary (${TARGET_VER:-latest})"
-  claude install "${TARGET_VER:-latest}" --force 2>&1 | tail -8 || echo "[entrypoint] WARN native install failed; falling back to npm-global"
+  # The installer's status is captured directly: with `... | tail -n 8 || echo`
+  # the `||` saw tail's status, never the installer's, so the WARN could not
+  # print (dash has no pipefail). The log is an mktemp file, not a fixed
+  # name: /tmp is a pod-scoped tmpfs that outlives the container, so a fixed
+  # name could be a symlink or an unwritable file left by an earlier session,
+  # and a failed redirection is fatal under `set -e`.
+  _install_log=$(mktemp /tmp/claude-install.XXXXXX 2>/dev/null) || _install_log=/dev/null
+  # Bounded, like the steward tick below: this is a ~100 MB download on
+  # PID 1, and a stalled connection would otherwise park the entrypoint
+  # here forever while an npm-global claude sat ready in /usr/local/bin.
+  # A timeout is a non-zero status and lands on the same WARN and fallback.
+  if timeout "${NATIVE_INSTALL_TIMEOUT:-600}" claude install "${TARGET_VER:-latest}" --force >"$_install_log" 2>&1; then
+    _installed=ok
+    tail -n 8 "$_install_log" || true
+  else
+    _installed=fail
+    tail -n 8 "$_install_log" || true
+    echo "[entrypoint] WARN native install failed; falling back to npm-global" >&2
+  fi
+  [ "$_install_log" = /dev/null ] || rm -f "$_install_log" 2>/dev/null || true
   chmod +x "$NATIVE_CLAUDE" 2>/dev/null || true
+  # `claude install <ver> --force` is not enough on its own. Observed on
+  # 2026-09-23 (0.12.4, #66): it downloaded versions/2.1.280 and left the
+  # regular file at ~/.local/bin/claude untouched (2.1.274, restored from
+  # MinIO), the PATH prepend below then put that file first, and the session
+  # ran three releases behind the image pin without any line saying so. The
+  # pinned build is put in place here, from the installer's own download,
+  # so what the session runs is decided by this script and not by what the
+  # installer chose to do with a pre-existing file.
+  if [ -n "$TARGET_VER" ] && [ "$(native_tag)" != "$TARGET_VER" ] && [ -f "$NATIVE_VERSIONS/$TARGET_VER" ]; then
+    chmod +x "$NATIVE_VERSIONS/$TARGET_VER" 2>/dev/null || true
+    if [ "$("$NATIVE_VERSIONS/$TARGET_VER" --version 2>/dev/null | head -n 1 | awk '{print $1}')" = "$TARGET_VER" ]; then
+      # Copy, not symlink: the workspace is mirrored to MinIO by the s3-sync
+      # sidecar and restored by an init container, and a symlink does not
+      # survive that round trip as a symlink. `.tmp` so the mirror skips the
+      # half-written file (see the `--exclude '*.tmp'` note at the top).
+      # Every command in this replacement is failure-transparent under the
+      # script's `set -e`: whatever goes wrong here (a non-directory at
+      # ~/.local/bin, an unwritable parent) ends in the WARN and the
+      # npm-global fallback below, never in an aborted entrypoint and a
+      # crash-looping pod. Directories are the one case where cp/mv succeed
+      # while doing the wrong thing (the hazard write_json_atomic refuses
+      # above): a stale claude.tmp directory would take the copy INSIDE it
+      # and then be renamed over the destination, so it is removed first;
+      # a directory at the destination itself would take claude.tmp inside
+      # it, so that is refused, not removed: the operator may have put it
+      # there.
+      mkdir -p "$(dirname "$NATIVE_CLAUDE")" 2>/dev/null || true
+      rm -rf "$NATIVE_CLAUDE.tmp" 2>/dev/null || true
+      if [ -d "$NATIVE_CLAUDE" ]; then
+        echo "[entrypoint] WARN $NATIVE_CLAUDE is a directory; refusing to replace it" >&2
+      elif cp -f "$NATIVE_VERSIONS/$TARGET_VER" "$NATIVE_CLAUDE.tmp" && chmod +x "$NATIVE_CLAUDE.tmp" \
+         && mv -f "$NATIVE_CLAUDE.tmp" "$NATIVE_CLAUDE"; then
+        echo "[entrypoint] native claude replaced with versions/$TARGET_VER"
+      else
+        rm -rf "$NATIVE_CLAUDE.tmp" 2>/dev/null || true
+        echo "[entrypoint] WARN could not replace native claude with versions/$TARGET_VER" >&2
+      fi
+    else
+      echo "[entrypoint] WARN versions/$TARGET_VER reports '$("$NATIVE_VERSIONS/$TARGET_VER" --version 2>&1 | head -n 1)', not $TARGET_VER; not promoting it" >&2
+    fi
+  elif [ -n "$TARGET_VER" ] && [ "$(native_tag)" != "$TARGET_VER" ]; then
+    # Nothing at the path this script promotes from. After a failed install
+    # that is expected and the line above already says why; after a
+    # successful one it means the installer's on-disk layout (a fact
+    # observed on one release) has changed, and the promotion would
+    # otherwise become a silent no-op. The message states the fact, and
+    # the diagnosis only when it applies.
+    if [ "$_installed" = ok ]; then
+      echo "[entrypoint] WARN install succeeded but left no $NATIVE_VERSIONS/$TARGET_VER to promote; the installer's layout may have changed" >&2
+    else
+      echo "[entrypoint] WARN no $NATIVE_VERSIONS/$TARGET_VER to promote" >&2
+    fi
+  fi
 fi
-if [ -x "$NATIVE_CLAUDE" ]; then
+# The native binary is used only when it IS the image pin. Anything else —
+# an install that failed, a stale file the replacement could not fix, a
+# version string that does not match — falls back to the npm-global copy
+# the image was built with, which is the pin by construction. A loud WARN,
+# because "which claude the session runs" has already drifted silently once.
+# One exception: when the image's own claude cannot even report a version
+# there is no pin to enforce and `claude install` has nothing to run with,
+# so a native binary that does run is the only thing that can start a
+# session. It is used, behind a WARN naming the missing pin.
+NATIVE_NOW=$(native_ver || true)
+NATIVE_NOW_TAG=$(printf '%s' "$NATIVE_NOW" | awk '{print $1}')  # same rule as native_tag and TARGET_VER
+if [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_NOW" ] && [ -n "$TARGET_VER" ] && [ "$NATIVE_NOW_TAG" = "$TARGET_VER" ]; then
   export PATH="/workspace/.local/bin:$PATH"
-  echo "[entrypoint] using native claude: $($NATIVE_CLAUDE --version 2>&1 | head -1)"
+  echo "[entrypoint] using native claude: $NATIVE_NOW"
+elif [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_NOW" ] && [ -z "$TARGET_VER" ]; then
+  export PATH="/workspace/.local/bin:$PATH"
+  echo "[entrypoint] WARN the image's claude reports no version, so there is no pin to enforce; using native claude: $NATIVE_NOW" >&2
 else
-  echo "[entrypoint] using npm-global claude: $(claude --version 2>&1 | head -1)"
+  # Appended, not dropped: ~/.local/bin is also where a session's own
+  # `pip install --user` / npm-prefix tools land, and a stale claude must
+  # not un-PATH them. At the end of PATH the npm-global claude in
+  # /usr/local/bin still wins the lookup.
+  export PATH="$PATH:/workspace/.local/bin"
+  echo "[entrypoint] WARN native claude is '$NATIVE_NOW', image pins '$BUNDLED_VER'; using npm-global claude: $(claude --version 2>&1 | head -n 1)" >&2
 fi
 
 # Optional pr-steward scheduler. Fires a headless `claude -p` tick on a cadence
