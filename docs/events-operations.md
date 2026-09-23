@@ -140,9 +140,10 @@ mctl-events contract present, written|current` in the pod log). If that line
 is missing, the pod log says why the entrypoint refused to touch the file —
 `markers do not alternate begin/end` (or the file is unreadable, the same
 WARN), `is not a regular file`, `could not write` — and the session you are
-looking at was started without the contract. On a fresh device also look for
-`WARN could not seed /workspace/CLAUDE.md`, logged much earlier and without
-`mctl-events` in the text. Repair the file by hand and restart.
+looking at was started without the contract. When the file was missing, empty
+or a directory at start, the seed's own `WARN could not seed
+/workspace/CLAUDE.md` is logged as well, much earlier and without `mctl-events`
+in the text. Repair the file by hand and restart.
 
 Check the session before touching the transport — `kubectl -n labs logs <pod>
 -c base-service` shows the TUI, including a spend limit message. Once the

@@ -111,9 +111,9 @@ class EventsContractTest(unittest.TestCase):
 
         seed = (function("write_json_atomic() {  # $1 = destination, $2 = mode for a NEW file (default 600), stdin = content; leaves $1 alone on failure", "}")
                 + function("seed_claude_md() {  # $1 = destination (default /workspace/CLAUDE.md)", "}")
-                + function("if [ ! -s /workspace/CLAUDE.md ]; then", "fi"))
+                + function("if [ ! -s /workspace/CLAUDE.md ] || [ -d /workspace/CLAUDE.md ]; then", "fi"))
         seed, n = re.subn(re.escape("/workspace/CLAUDE.md"), str(self.md), seed)
-        self.assertGreaterEqual(n, 3)
+        self.assertEqual(5, n, "the seed block's path literals moved; this fixture asserts nothing")
         for before, expect_seed in (("", True), ("mine\n", False)):
             with self.subTest(repr(before)):
                 self.md.write_text(before)
@@ -121,11 +121,22 @@ class EventsContractTest(unittest.TestCase):
                 self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
                 if expect_seed:
                     self.assertTrue(self.content().startswith("# Remote Worker Environment\n"), self.content()[:60])
+                    # Over an existing inode the mode is preserved, not reset to 644.
+                    self.assertEqual(0o644, self.md.stat().st_mode & 0o777)
                 else:
                     self.assertEqual(before, self.content())
         self.md.unlink()
         subprocess.run(["/bin/sh", "-e", "-c", seed], check=True, capture_output=True, timeout=30)
         self.assertTrue(self.content().startswith("# Remote Worker Environment\n"))
+        # A directory (a bad restore) reaches the seed and is refused with a
+        # WARN; PID 1 survives and nothing is moved into it.
+        self.md.unlink()
+        self.md.mkdir()
+        proc = subprocess.run(["/bin/sh", "-e", "-c", seed], capture_output=True, text=True, timeout=30)
+        self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+        self.assertIn("WARN could not seed", proc.stderr)
+        self.assertEqual([], list(self.md.iterdir()))
+        self.md.rmdir()
 
     def test_directory_at_the_path_is_a_warning_not_a_write(self) -> None:
         self.md.mkdir()
