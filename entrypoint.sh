@@ -448,9 +448,9 @@ fi
 NATIVE_CLAUDE="/workspace/.local/bin/claude"
 NATIVE_VERSIONS="/workspace/.local/share/claude/versions"
 chmod +x "$NATIVE_CLAUDE" 2>/dev/null || true
-BUNDLED_VER=$(claude --version 2>/dev/null | head -1)
+BUNDLED_VER=$(claude --version 2>/dev/null | head -n 1)
 TARGET_VER=$(printf '%s' "$BUNDLED_VER" | awk '{print $1}')
-native_ver() { "$NATIVE_CLAUDE" --version 2>/dev/null | head -1; }
+native_ver() { "$NATIVE_CLAUDE" --version 2>/dev/null | head -n 1; }
 if [ -x "$NATIVE_CLAUDE" ] && [ -n "$BUNDLED_VER" ] && [ "$(native_ver)" = "$BUNDLED_VER" ]; then
   echo "[entrypoint] native claude already current ($BUNDLED_VER); skipping install"
 else
@@ -458,7 +458,17 @@ else
   # harness floats past the image pin on every restart. Fall back to latest
   # only when the bundled version cannot be determined.
   echo "[entrypoint] installing/refreshing native claude binary (${TARGET_VER:-latest})"
-  claude install "${TARGET_VER:-latest}" --force 2>&1 | tail -8 || echo "[entrypoint] WARN native install failed; falling back to npm-global"
+  # The installer's status is captured directly: with `... | tail -8 || echo`
+  # the `||` saw tail's status, never the installer's, so the WARN could not
+  # print (dash has no pipefail).
+  _install_log="/tmp/claude-install.log"
+  if claude install "${TARGET_VER:-latest}" --force >"$_install_log" 2>&1; then
+    tail -8 "$_install_log" || true
+  else
+    tail -8 "$_install_log" || true
+    echo "[entrypoint] WARN native install failed; falling back to npm-global" >&2
+  fi
+  rm -f "$_install_log" 2>/dev/null || true
   chmod +x "$NATIVE_CLAUDE" 2>/dev/null || true
   # `claude install <ver> --force` is not enough on its own. Observed on
   # 2026-09-23 (0.12.4, #66): it downloaded versions/2.1.280 and left the
@@ -470,17 +480,22 @@ else
   # installer chose to do with a pre-existing file.
   if [ -n "$TARGET_VER" ] && [ "$(native_ver)" != "$BUNDLED_VER" ] && [ -f "$NATIVE_VERSIONS/$TARGET_VER" ]; then
     chmod +x "$NATIVE_VERSIONS/$TARGET_VER" 2>/dev/null || true
-    if [ "$("$NATIVE_VERSIONS/$TARGET_VER" --version 2>/dev/null | head -1)" = "$BUNDLED_VER" ]; then
+    if [ "$("$NATIVE_VERSIONS/$TARGET_VER" --version 2>/dev/null | head -n 1)" = "$BUNDLED_VER" ]; then
       # Copy, not symlink: the workspace is mirrored to MinIO by the s3-sync
       # sidecar and restored by an init container, and a symlink does not
       # survive that round trip as a symlink. `.tmp` so the mirror skips the
       # half-written file (see the `--exclude '*.tmp'` note at the top).
-      mkdir -p "$(dirname "$NATIVE_CLAUDE")"
+      # Every command in this replacement is failure-transparent under the
+      # script's `set -e`: whatever goes wrong here (a non-directory at
+      # ~/.local/bin, an unwritable parent, a stale claude.tmp directory)
+      # ends in the WARN and the npm-global fallback below, never in an
+      # aborted entrypoint and a crash-looping pod.
+      mkdir -p "$(dirname "$NATIVE_CLAUDE")" 2>/dev/null || true
       if cp -f "$NATIVE_VERSIONS/$TARGET_VER" "$NATIVE_CLAUDE.tmp" && chmod +x "$NATIVE_CLAUDE.tmp" \
          && mv -f "$NATIVE_CLAUDE.tmp" "$NATIVE_CLAUDE"; then
         echo "[entrypoint] native claude replaced with versions/$TARGET_VER"
       else
-        rm -f "$NATIVE_CLAUDE.tmp"
+        rm -rf "$NATIVE_CLAUDE.tmp" 2>/dev/null || true
         echo "[entrypoint] WARN could not replace native claude with versions/$TARGET_VER" >&2
       fi
     fi
@@ -495,7 +510,12 @@ if [ -x "$NATIVE_CLAUDE" ] && [ -n "$BUNDLED_VER" ] && [ "$(native_ver)" = "$BUN
   export PATH="/workspace/.local/bin:$PATH"
   echo "[entrypoint] using native claude: $(native_ver)"
 else
-  echo "[entrypoint] WARN native claude is '$(native_ver || true)', image pins '$BUNDLED_VER'; using npm-global claude: $(claude --version 2>&1 | head -1)" >&2
+  # Appended, not dropped: ~/.local/bin is also where a session's own
+  # `pip install --user` / npm-prefix tools land, and a stale claude must
+  # not un-PATH them. At the end of PATH the npm-global claude in
+  # /usr/local/bin still wins the lookup.
+  export PATH="$PATH:/workspace/.local/bin"
+  echo "[entrypoint] WARN native claude is '$(native_ver || true)', image pins '$BUNDLED_VER'; using npm-global claude: $(claude --version 2>&1 | head -n 1)" >&2
 fi
 
 # Optional pr-steward scheduler. Fires a headless `claude -p` tick on a cadence
