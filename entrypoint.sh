@@ -178,30 +178,45 @@ JSON
 # none of those three strings occur anywhere in the binary, so the dialog kept firing
 # and parked the headless session (deployed 0.10.1 wedged on it in labs on 2026-08-23).
 # Grep the shipped binary before changing these keys again.
-# "model": "haiku" pins this deployment's default model to the latest Haiku, so a
-# restart or a workspace restored from an older S3 snapshot can't silently fall back
-# to whatever Sonnet/Opus default the CLI shipped with. The alias (not a dated
-# model ID) tracks Anthropic's "latest Haiku" the same way an interactive `/model
-# haiku` selection would, so it keeps picking up new Haiku releases automatically.
+# "model" pins this deployment's default model, so a restart or a workspace
+# restored from an older S3 snapshot can't silently fall back to whatever
+# Sonnet/Opus default the CLI shipped with. CLAUDE_REMOTE_MODEL selects it;
+# the default stays "haiku" (#62, a cost decision for the operator session).
+# An alias (not a dated model ID) tracks Anthropic's "latest <family>" the same
+# way an interactive `/model` selection would, so it keeps picking up new
+# releases automatically. Deployments that run the inbound events Channel must
+# set this to "sonnet": on Haiku the session answered its first channel event
+# by writing a fake acknowledgement to /tmp with Bash instead of calling
+# mcp__mctl-events__ack_event (#66), which left every entry unacknowledged,
+# saturated max_inflight and stopped the adapter reading for four days.
+# The value is interpolated into a jq program and a JSON seed, so it is
+# restricted to the characters a model alias or ID can contain; anything else
+# falls back to the default rather than producing a broken settings.json.
+CLAUDE_REMOTE_MODEL="${CLAUDE_REMOTE_MODEL:-haiku}"
+case "$CLAUDE_REMOTE_MODEL" in
+  *[!A-Za-z0-9._-]*|"")
+    echo "[entrypoint] WARN CLAUDE_REMOTE_MODEL='$CLAUDE_REMOTE_MODEL' is not a model alias/ID; using haiku" >&2
+    CLAUDE_REMOTE_MODEL=haiku ;;
+esac
 ensure_json /workspace/.claude/settings.json \
-  'if (.skipDangerousModePermissionPrompt == true
+  "if (.skipDangerousModePermissionPrompt == true
        and .skipAutoPermissionPrompt == true
-       and .permissions.defaultMode? == "auto"
+       and .permissions.defaultMode? == \"auto\"
        and .permissions.allow_bypass_permissions? == true
-       and .model == "haiku")
-   then "ok" else "no" end' \
-  '.skipDangerousModePermissionPrompt = true
+       and .model == \"$CLAUDE_REMOTE_MODEL\")
+   then \"ok\" else \"no\" end" \
+  ".skipDangerousModePermissionPrompt = true
    | .skipAutoPermissionPrompt = true
-   | .permissions.defaultMode = "auto"
+   | .permissions.defaultMode = \"auto\"
    | .permissions.allow_bypass_permissions = true
-   | .model = "haiku"' <<'JSON' || true
+   | .model = \"$CLAUDE_REMOTE_MODEL\"" <<JSON || true
 {
   "permissions": { "defaultMode": "auto", "allow_bypass_permissions": true },
   "skipDangerousModePermissionPrompt": true,
   "skipAutoPermissionPrompt": true,
   "tui": "default",
   "resumeReturnDismissed": true,
-  "model": "haiku"
+  "model": "$CLAUDE_REMOTE_MODEL"
 }
 JSON
 
