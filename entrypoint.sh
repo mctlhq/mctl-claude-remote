@@ -336,7 +336,10 @@ done
 # guarded: a directory left at that path by a bad restore, or an unwritable
 # volume, must cost the seed and not the device (`set -e`, PID 1). A
 # function, because ensure_events_contract below falls back to the same
-# brief when stripping its section would leave the file empty.
+# brief when stripping its section would leave the file empty. `-s`, not
+# `-f`: a 0-byte file (a truncating write caught by the mirror's 60 s tick,
+# handed back by restore-state) is as good as no file, and nothing
+# downstream would ever repair it.
 seed_claude_md() {  # $1 = destination (default /workspace/CLAUDE.md)
   write_json_atomic "${1:-/workspace/CLAUDE.md}" 644 <<'MD'
 # Remote Worker Environment
@@ -399,7 +402,7 @@ created) but never finished registering, or checking real Argo Workflow /
 Application status.
 MD
 }
-if [ ! -f /workspace/CLAUDE.md ]; then
+if [ ! -s /workspace/CLAUDE.md ]; then
   if ! seed_claude_md; then
     echo "[entrypoint] WARN could not seed /workspace/CLAUDE.md; the session starts without it" >&2
   fi

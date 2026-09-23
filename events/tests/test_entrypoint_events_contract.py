@@ -105,6 +105,28 @@ class EventsContractTest(unittest.TestCase):
             self.run_fn()
         self.assertEqual(first, self.content())
 
+    def test_seed_treats_an_empty_file_like_a_missing_one(self) -> None:
+        """A 0-byte CLAUDE.md (a truncating write caught by the mirror tick)
+        must be seeded; a non-empty operator file must never be."""
+
+        seed = (function("write_json_atomic() {  # $1 = destination, $2 = mode for a NEW file (default 600), stdin = content; leaves $1 alone on failure", "}")
+                + function("seed_claude_md() {  # $1 = destination (default /workspace/CLAUDE.md)", "}")
+                + function("if [ ! -s /workspace/CLAUDE.md ]; then", "fi"))
+        seed, n = re.subn(re.escape("/workspace/CLAUDE.md"), str(self.md), seed)
+        self.assertGreaterEqual(n, 3)
+        for before, expect_seed in (("", True), ("mine\n", False)):
+            with self.subTest(repr(before)):
+                self.md.write_text(before)
+                proc = subprocess.run(["/bin/sh", "-e", "-c", seed], capture_output=True, text=True, timeout=30)
+                self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+                if expect_seed:
+                    self.assertTrue(self.content().startswith("# Remote Worker Environment\n"), self.content()[:60])
+                else:
+                    self.assertEqual(before, self.content())
+        self.md.unlink()
+        subprocess.run(["/bin/sh", "-e", "-c", seed], check=True, capture_output=True, timeout=30)
+        self.assertTrue(self.content().startswith("# Remote Worker Environment\n"))
+
     def test_directory_at_the_path_is_a_warning_not_a_write(self) -> None:
         self.md.mkdir()
         out = self.run_fn()
@@ -224,9 +246,11 @@ class EventsContractTest(unittest.TestCase):
         pass the path it inspected, which the test points elsewhere."""
 
         self.run_fn("present")
-        script = shell_source().replace('CLAUDE_MD="/workspace/CLAUDE.md"', f'CLAUDE_MD="{self.md}"')
+        script, n = re.subn(re.escape('CLAUDE_MD="/workspace/CLAUDE.md"'), f'CLAUDE_MD="{self.md}"', shell_source())
+        self.assertEqual(1, n, "CLAUDE_MD assignment no longer matches; this fixture asserts nothing")
         decoy = self.root / "decoy"
-        script = script.replace('"${1:-/workspace/CLAUDE.md}"', f'"${{1:-{decoy}}}"')
+        script, n = re.subn(re.escape('"${1:-/workspace/CLAUDE.md}"'), f'"${{1:-{decoy}}}"', script)
+        self.assertEqual(1, n, "seed_claude_md's default no longer matches; this fixture asserts nothing")
         proc = subprocess.run(["/bin/sh", "-e", "-c", f"{script}\nensure_events_contract absent"],
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)

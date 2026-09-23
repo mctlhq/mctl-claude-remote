@@ -137,11 +137,12 @@ contract as a managed section in `/workspace/CLAUDE.md` (markers
 hydrates events and never acknowledges, check that the section is present in
 the file the running session was started with (`[entrypoint] CLAUDE.md:
 mctl-events contract present, written|current` in the pod log). If that line
-is missing, the pod log carries a `WARN` from the same place saying why the
-entrypoint refused to touch the file — markers that do not alternate
-begin/end, a directory at the path, an unwritable volume, a failed reseed —
-and the session you are looking at was started without the contract. Repair
-the file by hand and restart.
+is missing, the pod log says why the entrypoint refused to touch the file —
+`markers do not alternate begin/end` (or the file is unreadable, the same
+WARN), `is not a regular file`, `could not write` — and the session you are
+looking at was started without the contract. On a fresh device also look for
+`WARN could not seed /workspace/CLAUDE.md`, logged much earlier and without
+`mctl-events` in the text. Repair the file by hand and restart.
 
 Check the session before touching the transport — `kubectl -n labs logs <pod>
 -c base-service` shows the TUI, including a spend limit message. Once the
