@@ -126,6 +126,8 @@ class NativePinTest(unittest.TestCase):
         fake_version_binary(self.native, "2.1.274")
         out, path, native = self.run_block(install="fail")
         self.assertIn("WARN native install failed", out)
+        self.assertIn("WARN no " + str(self.versions) + "/2.1.280 to promote\n", out)  # the fact, not a layout diagnosis
+        self.assertNotIn("layout may have changed", out)
         self.assertIn("WARN native claude is '2.1.274 (Claude Code)'", out)
         self.assertEqual("2.1.274 (Claude Code)", native)
         self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
@@ -178,17 +180,26 @@ class NativePinTest(unittest.TestCase):
     def test_native_build_with_a_longer_version_line_still_counts_as_the_pin(self) -> None:
         """Equality is on the version number, not the whole line."""
 
-        fake_version_binary(self.native, "2.1.280")
         executable(self.native, '#!/bin/sh\necho "2.1.280 (Claude Code, native)"\n')
         out, path, _ = self.run_block()
         self.assertIn("already current (2.1.280 (Claude Code, native))", out)
         self.assertIn("using native claude: 2.1.280 (Claude Code, native)", out)
         self.assertTrue(path.startswith(f"{self.ws}/.local/bin:"), path)
 
+    def test_tab_separated_version_line_is_parsed_the_same_everywhere(self) -> None:
+        """One first-field rule for the fast path, the promotion check and the
+        gate: a tab after the number must not make the halves disagree."""
+
+        executable(self.native, '#!/bin/sh\nprintf "2.1.280\\t(Claude Code)\\n"\n')
+        out, path, _ = self.run_block()
+        self.assertIn("already current", out)
+        self.assertNotIn("WARN", out)
+        self.assertTrue(path.startswith(f"{self.ws}/.local/bin:"), path)
+
     def test_install_that_leaves_no_versions_file_is_named_in_the_log(self) -> None:
         fake_version_binary(self.native, "2.1.274")
         out, path, native = self.run_block(install="nofile")
-        self.assertIn("WARN no " + str(self.versions) + "/2.1.280 to promote; the installer's layout may have changed", out)
+        self.assertIn("WARN install succeeded but left no " + str(self.versions) + "/2.1.280 to promote; the installer's layout may have changed", out)
         self.assertIn("using npm-global claude", out)
         self.assertEqual("2.1.274 (Claude Code)", native)
         self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)

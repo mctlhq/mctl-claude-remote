@@ -472,8 +472,10 @@ else
   # and a failed redirection is fatal under `set -e`.
   _install_log=$(mktemp /tmp/claude-install.XXXXXX 2>/dev/null) || _install_log=/dev/null
   if claude install "${TARGET_VER:-latest}" --force >"$_install_log" 2>&1; then
+    _installed=ok
     tail -n 8 "$_install_log" || true
   else
+    _installed=fail
     tail -n 8 "$_install_log" || true
     echo "[entrypoint] WARN native install failed; falling back to npm-global" >&2
   fi
@@ -520,11 +522,17 @@ else
       echo "[entrypoint] WARN versions/$TARGET_VER reports '$("$NATIVE_VERSIONS/$TARGET_VER" --version 2>&1 | head -n 1)', not $TARGET_VER; not promoting it" >&2
     fi
   elif [ -n "$TARGET_VER" ] && [ "$(native_tag)" != "$TARGET_VER" ]; then
-    # The install reported success (or failed above) and left nothing at the
-    # path this script promotes from: the installer's on-disk layout is a
-    # fact observed on one release, and the promotion silently becoming a
-    # no-op is the likeliest way this block stops working after the next one.
-    echo "[entrypoint] WARN no $NATIVE_VERSIONS/$TARGET_VER to promote; the installer's layout may have changed" >&2
+    # Nothing at the path this script promotes from. After a failed install
+    # that is expected and the line above already says why; after a
+    # successful one it means the installer's on-disk layout (a fact
+    # observed on one release) has changed, and the promotion would
+    # otherwise become a silent no-op. The message states the fact, and
+    # the diagnosis only when it applies.
+    if [ "$_installed" = ok ]; then
+      echo "[entrypoint] WARN install succeeded but left no $NATIVE_VERSIONS/$TARGET_VER to promote; the installer's layout may have changed" >&2
+    else
+      echo "[entrypoint] WARN no $NATIVE_VERSIONS/$TARGET_VER to promote" >&2
+    fi
   fi
 fi
 # The native binary is used only when it IS the image pin. Anything else —
@@ -537,7 +545,8 @@ fi
 # so a native binary that does run is the only thing that can start a
 # session. It is used, behind a WARN naming the missing pin.
 NATIVE_NOW=$(native_ver || true)
-if [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_NOW" ] && [ -n "$TARGET_VER" ] && [ "${NATIVE_NOW%% *}" = "$TARGET_VER" ]; then
+NATIVE_NOW_TAG=$(printf '%s' "$NATIVE_NOW" | awk '{print $1}')  # same rule as native_tag and TARGET_VER
+if [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_NOW" ] && [ -n "$TARGET_VER" ] && [ "$NATIVE_NOW_TAG" = "$TARGET_VER" ]; then
   export PATH="/workspace/.local/bin:$PATH"
   echo "[entrypoint] using native claude: $NATIVE_NOW"
 elif [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_NOW" ] && [ -z "$BUNDLED_VER" ]; then
