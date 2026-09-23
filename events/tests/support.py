@@ -101,6 +101,9 @@ POLICY = {
     "group": "claude-remote",
     "consumer": "test-consumer",
     "block_ms": 200,
+    # The fake client registers nothing, so the settle window only slows tests
+    # down; the two tests about it set their own.
+    "startup_grace_ms": 100,
     "routes": [
         {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"],
          "types": ["telegram.message.*"], "subject": {"account_id": ["7"]}},
