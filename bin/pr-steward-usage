@@ -28,8 +28,10 @@ capture follows, ADR-012):
 
 PR attribution: a tick may act on several PRs, and its usage cannot be split
 between them honestly. `target_repo` / `pr_number` are set only when the
-steward's structured log shows actions on exactly one PR of a configured repo
-during this tick; otherwise both are absent.
+steward's structured log, read from this tick's byte window, shows actions on
+exactly one PR of a configured repo under exactly one tick_id; otherwise both
+are absent. Every doubt fails toward absent: an unknown window start (offset
+-1), a window larger than the read cap, several tick_ids or several PRs.
 
 It never fails the tick: usage capture is observability. Every problem is a
 warning on stderr and exit status 0. It never prints the token.
@@ -51,6 +53,8 @@ STAGE = "shepherd"
 DISPATCH_REPO = "mctlhq/.github"
 EVENT_TYPE = "pr-steward-usage"
 MAX_RECORDS = 20
+LOG_TAIL_CAP = 1 << 20
+DEFAULT_CONFIG = "/workspace/pr-steward.config.json"
 REPO_RE = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 
 
@@ -80,10 +84,14 @@ def result_entry(raw: str) -> dict[str, Any] | None:
     return results[-1] if results else None
 
 
-def acted_pr(log_tail: str, repos: set[str]) -> tuple[str, int] | None:
+def acted_pr(log_tail: str | None, repos: set[str]) -> tuple[str, int] | None:
     """The single (repo, pr) the tick's structured log lines name, or None
-    when there are zero or several, or the repo is not a configured one."""
+    when the window is unknown, there are zero or several PRs, the lines carry
+    other than exactly one tick_id, or the repo is not a configured one."""
+    if log_tail is None:
+        return None
     seen: set[tuple[str, int]] = set()
+    ticks: set[Any] = set()
     for line in log_tail.splitlines():
         try:
             entry = json.loads(line)
@@ -91,12 +99,18 @@ def acted_pr(log_tail: str, repos: set[str]) -> tuple[str, int] | None:
             continue
         if not isinstance(entry, dict):
             continue
+        tick = entry.get("tick_id")
+        ticks.add(tick if isinstance(tick, str) and tick else None)
         repo, pr = entry.get("repo"), entry.get("pr")
         if not isinstance(repo, str) or not REPO_RE.match(repo) or repo not in repos:
             continue
         if isinstance(pr, bool) or not isinstance(pr, int) or pr <= 0:
             continue
         seen.add((repo, pr))
+    if len(ticks) > 1 or None in ticks:
+        if seen:
+            warn("tick window holds lines from several or unnamed tick_ids; usage left unattributed")
+        return None
     return next(iter(seen)) if len(seen) == 1 else None
 
 
@@ -139,6 +153,8 @@ def build_records(result: dict[str, Any], target: tuple[str, int] | None,
             "recorded_at": captured_at,
         }
         records.append({k: v for k, v in record.items() if v is not None})
+    if len(records) > MAX_RECORDS:
+        warn(f"{len(records)} models in one tick; only the first {MAX_RECORDS} are recorded")
     return records[:MAX_RECORDS]
 
 
@@ -155,15 +171,26 @@ def configured(config_path: str) -> tuple[set[str], str | None]:
     return repos, log if isinstance(log, str) else None
 
 
-def log_tail(path: str | None, offset: int) -> str:
+def log_tail(path: str | None, offset: int) -> str | None:
+    """This tick's log window, or None when it cannot be known whole: no log
+    path, a negative (unknown) start, an unreadable file, or more than
+    LOG_TAIL_CAP bytes (a partial window could name one PR of several)."""
     if not path:
-        return ""
+        return None
+    if offset < 0:
+        warn("tick log window start unknown; usage left unattributed")
+        return None
     try:
         with open(path, "rb") as fh:
-            fh.seek(max(offset, 0))
-            return fh.read(1 << 20).decode("utf-8", "replace")
+            fh.seek(offset)
+            data = fh.read(LOG_TAIL_CAP + 1)
     except OSError:
-        return ""
+        warn("steward log unreadable; usage left unattributed")
+        return None
+    if len(data) > LOG_TAIL_CAP:
+        warn("tick log window exceeds the read cap; usage left unattributed")
+        return None
+    return data.decode("utf-8", "replace")
 
 
 def dispatch(records: list[dict[str, Any]], token_file: str) -> bool:
@@ -177,7 +204,13 @@ def dispatch(records: list[dict[str, Any]], token_file: str) -> bool:
         warn("empty GitHub App token file; usage records not sent")
         return False
     body = json.dumps({"event_type": EVENT_TYPE, "client_payload": {"records": records}})
-    env = dict(os.environ, GH_TOKEN=token)
+    # The ledger's dispatch target is a github.com repository. A token minted
+    # for another host is not sent there, and the dispatch is pinned to
+    # github.com rather than following an inherited GH_HOST.
+    if os.environ.get("GH_HOST", "github.com") != "github.com":
+        warn("GH_HOST is not github.com; the github.com usage dispatch is skipped")
+        return False
+    env = dict(os.environ, GH_TOKEN=token, GH_HOST="github.com")
     try:
         proc = subprocess.run(  # noqa: S603 - fixed argv, token only in env
             ["gh", "api", "--method", "POST", f"repos/{DISPATCH_REPO}/dispatches", "--input", "-"],
@@ -195,7 +228,7 @@ def dispatch(records: list[dict[str, Any]], token_file: str) -> bool:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("--result", required=True, help="the tick's `claude -p --output-format json` stdout")
-    parser.add_argument("--config", default=os.environ.get("PR_STEWARD_CONFIG", ""))
+    parser.add_argument("--config", default=os.environ.get("PR_STEWARD_CONFIG") or DEFAULT_CONFIG)
     parser.add_argument("--log-offset", type=int, default=0, help="steward log size before the tick")
     parser.add_argument("--token-file", default=os.environ.get("GH_APP_TOKEN_FILE", "/run/steward/gh-token"))
     parser.add_argument("--out", help="also write {\"records\": [...]} here")
@@ -209,7 +242,7 @@ def main(argv: list[str] | None = None) -> int:
     if result is None:
         warn("tick left no readable result entry; its model usage was NOT measured")
         return 0
-    repos, log_path = configured(args.config) if args.config else (set(), None)
+    repos, log_path = configured(args.config)
     target = acted_pr(log_tail(log_path, args.log_offset), repos)
     captured_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     records = build_records(result, target, captured_at)

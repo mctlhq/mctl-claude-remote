@@ -610,9 +610,13 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
   STEWARD_CLAUDE_BIN="$(command -v claude)"
   STEWARD_PRECHECK=/opt/steward/bin/pr-steward-precheck
   STEWARD_USAGE=/opt/steward/bin/pr-steward-usage
+  # Resolved once and passed to the converter explicitly, so the two cannot
+  # disagree about which config they read. Same default as the precheck and
+  # the skill.
+  STEWARD_CONFIG_PATH="${PR_STEWARD_CONFIG:-/workspace/pr-steward.config.json}"
   # The skill's structured log (one JSON line per PR action), read only to
   # attribute a tick's usage to a PR when it acted on exactly one.
-  STEWARD_ACTION_LOG="$(jq -r '.logging.file // empty' "${PR_STEWARD_CONFIG:-/etc/steward/pr-steward.config.json}" 2>/dev/null || true)"
+  STEWARD_ACTION_LOG="$(jq -r '.logging.file // empty' "$STEWARD_CONFIG_PATH" 2>/dev/null || true)"
   STEWARD_TICK_TIMEOUT="${PR_STEWARD_TICK_TIMEOUT_SECONDS:-1800}"
   # Guard against a misconfigured value: `timeout 0` kills the tick instantly
   # and a negative value errors out, silently breaking every tick.
@@ -641,14 +645,25 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
         # directly. The steward log offset lets the converter see only this
         # tick's structured lines, for single-PR attribution.
         STEWARD_RESULT="$STEWARD_LOG_DIR/tick-result.json"
-        STEWARD_LOG_OFFSET=$(stat -c %s "$STEWARD_ACTION_LOG" 2>/dev/null || echo 0)
+        # -1 = the window start is unknown, which the converter treats as "no
+        # attribution", never as "the whole file". A log that does not exist
+        # yet is a known start: everything in it after the tick is this tick's.
+        if [ -z "$STEWARD_ACTION_LOG" ]; then
+          STEWARD_LOG_OFFSET=-1
+        elif [ ! -e "$STEWARD_ACTION_LOG" ]; then
+          STEWARD_LOG_OFFSET=0
+        else
+          STEWARD_LOG_OFFSET=$(stat -c %s "$STEWARD_ACTION_LOG" 2>/dev/null || echo -1)
+        fi
         timeout "$STEWARD_TICK_TIMEOUT" "$STEWARD_CLAUDE_BIN" -p "Run the pr-steward skill" \
           --model "$STEWARD_MODEL" --output-format json \
           --no-session-persistence --dangerously-skip-permissions >"$STEWARD_RESULT" 2>>"$STEWARD_SCHED_LOG" \
           || echo "[scheduler $(date -u +%FT%TZ)] tick exited non-zero (timeout/error)" >>"$STEWARD_SCHED_LOG"
-        jq -r 'if type == "object" then (.result // empty) else empty end' "$STEWARD_RESULT" >>"$STEWARD_SCHED_LOG" 2>/dev/null || true
-        [ -x "$STEWARD_USAGE" ] && "$STEWARD_USAGE" --result "$STEWARD_RESULT" \
-          --log-offset "$STEWARD_LOG_OFFSET" >>"$STEWARD_SCHED_LOG" 2>&1 || true
+        jq -r 'if type == "array" then ([.[] | select(type == "object" and .type == "result")] | last | .result? // empty)
+               elif type == "object" then (.result // empty) else empty end' \
+          "$STEWARD_RESULT" >>"$STEWARD_SCHED_LOG" 2>/dev/null || true
+        [ -x "$STEWARD_USAGE" ] && timeout 120 "$STEWARD_USAGE" --result "$STEWARD_RESULT" \
+          --config "$STEWARD_CONFIG_PATH" --log-offset "$STEWARD_LOG_OFFSET" >>"$STEWARD_SCHED_LOG" 2>&1 || true
         rm -f "$STEWARD_RESULT"
       fi
     done

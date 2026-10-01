@@ -144,8 +144,9 @@ and uploads a `model-usage-records` artifact, which the in-cluster usage
 collector already sweeps into the ledger. No ledger credential ever lives in
 this pod: the tick runs with `--dangerously-skip-permissions`, so anything on
 disk is readable by the model. `target_repo` / `pr_number` are set only when the
-tick's structured log names exactly one PR of a configured repo; a tick that
-touched several PRs is recorded without PR attribution. Capture never fails a
+tick's structured log window names exactly one PR of a configured repo under
+exactly one `tick_id`; a tick that touched several PRs, or whose window cannot
+be known whole, is recorded without PR attribution. Capture never fails a
 tick. The tick's final message still lands in `scheduler.log`.
 
 `merge_mode` and `merge_method` are top-level defaults, but any `repos[]` entry may
