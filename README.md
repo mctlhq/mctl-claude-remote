@@ -134,6 +134,21 @@ Each tick is wrapped in `timeout` (`PR_STEWARD_TICK_TIMEOUT_SECONDS`, default
 unset (or `0`) to disable the scheduler; you can still drive ticks from any
 external scheduler (e.g. a Claude RemoteTrigger routine) instead.
 
+**Model usage of scheduled ticks (mctlhq/.github#50).** Each tick runs with
+`--output-format json`; `bin/pr-steward-usage` turns the tick's result entry
+into ADR-012 usage records (`agent: pr-steward`, `devloop_stage: shepherd`, one
+record per model, absent counters left absent, no text, no cost) and sends them
+as a `repository_dispatch` (`pr-steward-usage`) to `mctlhq/.github` with the
+steward's own App token. That repository's `steward-usage.yml` validates them
+and uploads a `model-usage-records` artifact, which the in-cluster usage
+collector already sweeps into the ledger. No ledger credential ever lives in
+this pod: the tick runs with `--dangerously-skip-permissions`, so anything on
+disk is readable by the model. `target_repo` / `pr_number` are set only when the
+tick's structured log window names exactly one PR of a configured repo under
+exactly one `tick_id`; a tick that touched several PRs, or whose window cannot
+be known whole, is recorded without PR attribution. Capture never fails a
+tick. The tick's final message still lands in `scheduler.log`.
+
 `merge_mode` and `merge_method` are top-level defaults, but any `repos[]` entry may
 override them — so one repo can auto-merge (`when-green`) while the rest stay
 escalate-only (`never`). The effective values for a PR are
