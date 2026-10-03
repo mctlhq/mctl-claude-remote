@@ -19,6 +19,20 @@
 # line after the PR's last entry, or an unparseable head SHA all leave the PR a
 # candidate — an unknown state is never treated as idle.
 #
+# Review remediation owned elsewhere (fix_mode): a repos[] entry with
+# "fix_mode": "never" says another actor (the DevLoop shepherd) owns fixing
+# review findings on its PRs, and the steward owns only the merge path once the
+# PR is approved. For such an entry a PR is a candidate only when its
+# reviewDecision is APPROVED, so no paid tick runs while the shepherd may still
+# be pushing fixes — one mutation owner per PR head during remediation. Absent
+# or "auto" keeps today's behaviour. An unrecognized value is treated as
+# "never" with a warning: the owner asked the steward not to fix, so a typo
+# must not hand fixing back to it; the merge path is unaffected. Fail-safe: a
+# PR object without a string reviewDecision is a malformed body — the repo's
+# query counts as failed (exit 2 when every repo fails), never as "nothing to
+# do". An empty reviewDecision (no review required, or none yet) is a valid
+# read meaning "not approved": the PR waits, as the steward could not merge it.
+#
 # Generic: every repo and filter comes from the config file. Read-only — makes
 # no GitHub mutations. The GitHub App token is read from a file and exported
 # only for the gh calls; it is never printed.
@@ -86,6 +100,7 @@ while [ "$i" -lt "$repos_count" ]; do
   author="$(jq -r ".repos[$i].pr_filter.author // \"\"" "$CONFIG")"
   labels_json="$(jq -c ".repos[$i].pr_filter.labels // []" "$CONFIG")"
   merge_mode="$(jq -r --arg default_mode "$DEFAULT_MERGE_MODE" ".repos[$i].merge_mode // \$default_mode" "$CONFIG")"
+  fix_mode="$(jq -r ".repos[$i].fix_mode // \"auto\"" "$CONFIG")"
   i=$((i + 1))
   [ -n "$name" ] && [ "$name" != "null" ] || continue
 
@@ -94,7 +109,7 @@ while [ "$i" -lt "$repos_count" ]; do
   # only author/labels (no head_prefix) would match every open PR and fire a
   # tick needlessly. head: is a prefix match; the jq startswith below re-
   # confirms it and drops PRs already in a terminal steward state.
-  set -- pr list -R "$name" --state open --limit 200 --json number,headRefName,headRefOid,labels
+  set -- pr list -R "$name" --state open --limit 200 --json number,headRefName,headRefOid,labels,reviewDecision
   search=""
   [ -n "$prefix" ] && [ "$prefix" != "null" ] && search="head:$prefix"
   [ -n "$author" ] && [ "$author" != "null" ] && search="${search:+$search }author:$author"
@@ -131,17 +146,27 @@ EOF
                 echo "precheck: $name: unrecognized merge_mode '$merge_mode'; not skipping idle ready-to-merge PRs" >&2 ;;
   esac
 
+  # fix_mode: see the header. Unrecognized → "never" (more restrictive on
+  # fixing; the merge path still runs once the PR is approved).
+  case "$fix_mode" in
+    auto)  fix_never=false ;;
+    never) fix_never=true ;;
+    *)     fix_never=true
+           echo "precheck: $name: unrecognized fix_mode '$fix_mode'; treating as 'never' (candidate only when APPROVED)" >&2 ;;
+  esac
+
   # --limit 200 without pagination: the precheck only needs ONE non-terminal,
   # non-idle in-scope PR, so this is wrong only in the unlikely case where all
   # 200 returned PRs are terminal or idle while a candidate is paged out.
-  # Output: "<candidates> <idle>". The idle test is wrapped in try so any
+  # Output: "<candidates> <idle> <held>"; held = fix_mode never and not
+  # APPROVED. The idle test is wrapped in try so any
   # surprise in its inputs counts the PR as a candidate, never as idle. A body
   # jq cannot read at all is a failed query, counted like a gh failure — not
   # an empty list.
   if ! counts="$(printf '%s' "$raw" \
           | jq -r --arg pfx "$prefix" --arg merged "$TERMINAL_MERGED" --arg esc "$TERMINAL_ESCALATED" \
                   --arg rtm "$READY_TO_MERGE" --arg repo "$name" --argjson never "$never" \
-                  --argjson state "$log_state" '
+                  --argjson fixnever "$fix_never" --argjson state "$log_state" '
               def idle:
                 $never
                 and ([.labels[].name] | index($rtm)) != null
@@ -151,17 +176,23 @@ EOF
                        and (.headRefOid | type) == "string"
                        and (.headRefOid | ascii_downcase | test("^[0-9a-f]{40}$"))
                        and (.headRefOid | ascii_downcase | startswith($s.sha | ascii_downcase)));
-              [ .[]
+              if $fixnever and (map(type == "object" and (.reviewDecision | type) == "string") | all | not)
+              then error("reviewDecision unreadable") else . end
+              | [ .[]
                 | select($pfx == "" or $pfx == "null" or (.headRefName | startswith($pfx)))
                 | select([.labels[].name] | (index($merged) or index($esc)) | not)
-                | (try idle catch false)
-              ] | "\(map(select(. | not)) | length) \(map(select(.)) | length)"' 2>/dev/null)"; then
+                | if $fixnever and .reviewDecision != "APPROVED" then "held"
+                  elif (try idle catch false) then "idle"
+                  else "candidate" end
+              ] | "\(map(select(. == "candidate")) | length) \(map(select(. == "idle")) | length) \(map(select(. == "held")) | length)"' 2>/dev/null)"; then
     echo "precheck: unreadable gh pr list output for $name" >&2
     errors=$((errors + 1))
     continue
   fi
   hits="${counts%% *}"
-  idle="${counts##* }"
+  rest="${counts#* }"
+  idle="${rest%% *}"
+  held="${rest##* }"
 
   if [ "${hits:-0}" -gt 0 ]; then
     echo "precheck: $name has $hits candidate PR(s)"
@@ -169,6 +200,9 @@ EOF
   fi
   if [ "${idle:-0}" -gt 0 ]; then
     echo "precheck: $name has $idle idle PR(s) (ready-to-merge at an unchanged head, merge_mode=never)"
+  fi
+  if [ "${held:-0}" -gt 0 ]; then
+    echo "precheck: $name has $held PR(s) awaiting approval (fix_mode=never: review remediation is owned elsewhere)"
   fi
 done
 

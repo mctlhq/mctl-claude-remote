@@ -23,7 +23,8 @@
       "name": "OWNER/REPO",
       "pr_filter": {
         "head_prefix": "feat/agents-"
-      }
+      },
+      "fix_mode": "never"
     },
     {
       "name": "OWNER/ANOTHER_REPO",

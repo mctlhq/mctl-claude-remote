@@ -161,6 +161,21 @@ escalate-only (`never`). The effective values for a PR are
 `repo.merge_mode ?? merge_mode ?? "never"` and
 `repo.merge_method ?? merge_method ?? "merge"`. See `pr-steward.config.example.json`.
 
+**Review remediation owned elsewhere (`fix_mode`).** A `repos[]` entry may set
+`"fix_mode": "never"` when another actor — e.g. the DevLoop shepherd — fixes review
+findings on that entry's PRs. The steward then stays out of the remediation phase
+entirely: the pre-check makes such a PR a candidate only once its `reviewDecision`
+is `APPROVED` (so no model run happens before that), and the skill never labels,
+clones, pushes or posts the review trigger for an unapproved PR or one with P1/P2
+at head (it logs `action=wait reason=fix-owned-by-shepherd`). Once approved, the
+merge path — §8 merge / ready-to-merge, update-branch, bot-thread resolution — is
+unchanged. `"auto"` or no key keeps today's behaviour. An unrecognized value is
+treated as `"never"` with a warning. A PR object whose `reviewDecision` is missing
+or not a string makes that repo's query a failed one (exit 2 when every repo fails),
+never "nothing to do"; an empty `reviewDecision` (no review required, or none yet)
+means "not approved". `reviewDecision` is readable by the App installation token
+in `gh pr list` (unlike `statusCheckRollup`).
+
 **Kill switch:** the automation is inert unless `PR_STEWARD_ENABLED=true`. Set it
 to anything else (or leave it unset) and the container is a plain remote-control
 device. The skill itself re-checks the flag on every tick.

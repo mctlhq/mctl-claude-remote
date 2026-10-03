@@ -44,7 +44,8 @@ Keys (see `pr-steward.config.example.json`):
 | `label_prefix` | Label namespace (default `steward`). |
 | `review_trigger` | Comment text that triggers the review bot (e.g. `@claude review`). |
 | `review_bots[]` | Bot logins codex-watch should match. v1 pilots are Claude-only: `["claude[bot]"]`. Add `"chatgpt-codex-connector[bot]"` only once dual-bot gating is supported. |
-| `repos[]` | `{ name: "owner/repo", pr_filter: { head_prefix?, author?, labels[]? }, merge_mode?, merge_method? }`. All filter keys optional; see §4. `merge_mode`/`merge_method` are optional per-repo overrides of the top-level defaults (above). |
+| `repos[]` | `{ name: "owner/repo", pr_filter: { head_prefix?, author?, labels[]? }, merge_mode?, merge_method?, fix_mode? }`. All filter keys optional; see §4. `merge_mode`/`merge_method` are optional per-repo overrides of the top-level defaults (above). `fix_mode` is per-repo only (below). |
+| `repos[].fix_mode` | Who remediates review findings on this entry's PRs. `"auto"` (default when absent — today's behaviour): the steward fixes P1/P2 findings (§7). `"never"`: another actor (the DevLoop shepherd CWFT) owns review remediation, and the steward owns **only the merge path once the PR is `APPROVED`** — see §4.1. Any unrecognized value → treat as `"never"` and log a warning: an owner who said "do not fix" must not get fixing back through a typo, and the merge path is unaffected. |
 | `github_app.token_file` | Path the refresh loop writes the installation token to. |
 | `gitops` | Optional `{ repo, agents_state_path, branch_prefix }` for the best-effort `.status.yaml` write-back after a `when-green` merge (see §8.1). Omit to skip write-back. |
 | `escalation` | `{ channel, ... }` — how to ping a human. |
@@ -131,10 +132,46 @@ If `pr_filter` has no keys at all, the steward would match every open PR in the 
 treat an empty filter as a misconfiguration and `action=skip reason=empty-pr-filter`
 rather than touching unfiltered PRs.
 
+Apply the §4.1 fix-ownership gate **before** anything below — including the
+`${LP}:owned` label.
+
 On first pickup of a PR (one that passed every filter), add label `${LP}:owned`. Treat
 any PR carrying `${LP}:owned` as in scope even if the filter would otherwise miss it
 (so we keep finishing a PR whose branch/labels change mid-flight) — but a PR that fails
 `head_prefix` and does **not** already carry `${LP}:owned` is out of scope.
+
+## 4.1 Fix-ownership gate (`fix_mode: never`)
+
+Invariant: for one PR head in its review-remediation phase there is exactly **one**
+mutation owner. In a repo entry whose effective `fix_mode` is `never` (explicit, or an
+unrecognized value per §1), that owner is the DevLoop shepherd, not the steward.
+`bin/pr-steward-precheck` already holds such PRs back until `reviewDecision ==
+"APPROVED"`, so normally the model never runs for them; this section is the backstop
+for a tick that runs anyway (another PR fired it, a manual tick, an approval dismissed
+mid-tick).
+
+For each such PR, after the draft check and before any mutation:
+- If `reviewDecision != "APPROVED"` (including empty/unreadable), **or** the review at
+  the current `head` (§6, read-only) shows P1/P2 findings: do **not** add or remove any
+  `${LP}:*` label (not even `${LP}:owned`), do not post `review_trigger`, do not clone,
+  edit, commit or push, do not run §7. Log
+  `action=wait reason=fix-owned-by-shepherd head_sha=<head>` and move on to the next PR.
+- Never post `review_trigger` for such a PR, even once approved: the shepherd owns the
+  review loop, and a manual trigger starts a redundant paid review. Watching the review
+  read-only via codex-watch is fine. When no review result exists at the current head,
+  `approved` (head-anchored by "dismiss stale approvals on push", §5) is the verdict:
+  the review bot approves only with no P1/P2.
+- Once `APPROVED` with no P1/P2 at head, continue with §4/§5 as usual: ownership label,
+  §8 merge / ready-to-merge, §8.2 update-branch and §8.3 bot-thread resolution are
+  unchanged. The P1/P2 row of §5 never leads to §7 for such a PR — it leads to the wait
+  above.
+
+`action=wait` is never the precheck's idle signal (`action=ready-to-merge
+reason=clean-green`, §8), so this line can only make a PR a candidate again, never idle
+it. Do not log it in a tick that also logs the clean-green decision for the same PR.
+
+Entries without `fix_mode` (or with `"auto"`) — e.g. `claude/*` and `fix/*` repos — are
+untouched by this section.
 
 ## 5. Per-PR decision (mirror of run_shepherd.py `decide()`)
 
@@ -220,6 +257,7 @@ Apply, in order:
 |---|---|
 | PR merged or closed externally | remove all `${LP}:*` labels; `action=drop` |
 | review bot has not responded for current `head` yet | `action=wait reason=awaiting-review` |
+| **P1/P2 findings at current `head`**, effective `fix_mode=never` | **§4.1 wait** — `action=wait reason=fix-owned-by-shepherd`; no label, no fix, no push |
 | **P1/P2 findings at current `head`** | if `attempt >= max_attempts` → **escalate (max-attempt)**, add `${LP}:escalated`, stop. Else → **§7 apply fix** |
 | no P1/P2, `mergeable`, `checks_green`, `approved`, **`effective_merge_mode=when-green`** | **§8 merge** — re-verify at head, then `gh pr merge`. |
 | no P1/P2, `mergeable`, `checks_green` (and either `effective_merge_mode=never` or not yet `approved`) | **§8 ready-to-merge escalation** — add `${LP}:ready-to-merge`, ping once, **DO NOT MERGE** |
@@ -264,6 +302,8 @@ Per PR, per tick:
      reviewer is Action-based with no new push pending): **§9 escalate** (bot silent twice).
 
 ## 7. Apply a fix (P1/P2 findings present, attempt < max)
+
+Never for a PR whose repo entry has effective `fix_mode: never` — §4.1 waits instead.
 
 1. Add `${LP}:fixing`.
 2. Clone/refresh into a temp dir and check out the PR branch:
