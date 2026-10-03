@@ -225,7 +225,7 @@ Apply, in order:
 | no P1/P2, `mergeable`, `checks_green` (and either `effective_merge_mode=never` or not yet `approved`) | **§8 ready-to-merge escalation** — add `${LP}:ready-to-merge`, ping once, **DO NOT MERGE** |
 | no P1/P2, `checks_green`, `approved`, `effective_merge_mode=when-green`, in-scope, **`behind`** (and not `dirty`) | **§8.2 bring branch up to date** — `gh pr update-branch`; do NOT merge this tick |
 | no P1/P2, `checks_green`, `effective_merge_mode=when-green`, **`blocked`**, and `auto_resolve_bot_threads` is true | **§8.3 evaluate blocking threads** — §8.3 classifies the unresolved threads, resolves them if all are bot-only nits, else escalates; do NOT merge this tick |
-| no P1/P2, **`behind` or `blocked`** in a repo whose `effective_merge_mode` is **not** `when-green` | **§9 ready-to-merge / non-review escalation** — the steward does not auto-advance branches it will not merge; a human merges (and updates the branch). Treat like the `never` ready-to-merge path. |
+| no P1/P2, **`behind` or `blocked`** in a repo whose `effective_merge_mode` is **not** `when-green` | **§9 ready-to-merge / non-review escalation** — the steward does not auto-advance branches it will not merge; a human merges (and updates the branch). Treat like the `never` ready-to-merge path, **except the log line**: log `action=escalate reason=behind` / `reason=blocked`, never `action=ready-to-merge reason=clean-green` (even when you add `${LP}:ready-to-merge`). Mergeability here can change without the head moving (`BEHIND`→`DIRTY` from base movement, a check flipping red), so the precheck must keep surfacing the PR. |
 | no P1/P2 findings but `dirty` (real conflict) / checks not green / build failure NOT from review / `blocked` for any other (non-thread) reason | **§9 non-review escalation** |
 | watcher timed out | §6 timeout handling |
 
@@ -309,6 +309,15 @@ A PR reaches this section when it has no P1/P2 at head, is `mergeable`, and
   ping again).
 - Send ONE escalation (§10, template `ready-to-merge`).
 - **Do not run `gh pr merge`.** A human merges.
+- **Only when this section was reached from the §5 `mergeable` + `checks_green` row** (not
+  from the `behind`/`blocked` row, which logs its own `action=escalate`): log
+  `action=ready-to-merge reason=clean-green head_sha=<head>` (`result=labeled` when the
+  label was just added, `result=already-labeled` when it was present), as the **last** log
+  line for this PR in the tick. The scheduler's precheck reads it: while the PR keeps the
+  label and the same head in a `never` repo, it skips the PR instead of firing another
+  paid tick that would only conclude "no action". `head_sha` must be the full 40-char
+  head commit you evaluated; without it, or without `reason=clean-green`, the PR keeps
+  being ticked.
 
 ### effective_merge_mode = when-green — gated auto-merge
 Only proceed if **`approved`** is also true (§5). If not approved yet, fall back to the
@@ -482,6 +491,9 @@ One JSON line per PR action, appended to `logging.file` and echoed to stdout:
 ```json
 {"ts":"<iso>","tick_id":"<id>","repo":"owner/repo","pr":123,"head_sha":"<sha>","attempt":1,"action":"address-review","result":"pushed","reason":"","p1":1,"p2":0,"p3":2}
 ```
+
+`bin/pr-steward-precheck` reads this file (last 5000 lines) to skip idle ready-to-merge
+PRs (§8), so keep each line one complete JSON object with `repo`, `pr` and `head_sha`.
 
 NEVER include a token, JWT, or any `ghs_`/`sk-ant-` string. If a value might contain
 one, redact it to `***`.

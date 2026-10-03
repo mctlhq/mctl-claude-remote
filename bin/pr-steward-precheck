@@ -2,10 +2,22 @@
 # pr-steward-precheck — cheap gate for the scheduler loop.
 #
 # Exits 0 if at least one in-scope PR needs a steward tick (open, matching a
-# configured repo's pr_filter — head_prefix / author / labels — and not already
-# in a terminal steward state). Exits 1 when there is nothing to do, so the
-# caller can skip spawning a token-costly `claude -p` tick. Exits 2 on
-# config/auth error or when every repo query failed (broken, not idle).
+# configured repo's pr_filter — head_prefix / author / labels — not already in
+# a terminal steward state, and not idle as described below). Exits 1 when
+# there is nothing to do, so the caller can skip spawning a token-costly
+# `claude -p` tick. Exits 2 on config/auth error or when every repo query
+# failed (broken, not idle).
+#
+# Idle ready-to-merge PRs (mctlhq/mctl-claude-remote#74): in a repo whose
+# effective merge_mode is "never", a PR labelled <prefix>:ready-to-merge waits
+# for a human, and every further tick at the same head concludes "no action".
+# Such a PR is skipped when the steward's own structured log (config
+# .logging.file) shows that its latest entry for the PR recorded the
+# ready-to-merge decision at the head the PR still has. A new push, the label
+# being removed, or any later steward entry for the PR makes it a candidate
+# again. Fail-safe: no log, an unreadable log, no matching entry, a malformed
+# line after the PR's last entry, or an unparseable head SHA all leave the PR a
+# candidate — an unknown state is never treated as idle.
 #
 # Generic: every repo and filter comes from the config file. Read-only — makes
 # no GitHub mutations. The GitHub App token is read from a file and exported
@@ -21,6 +33,44 @@ TOKEN_FILE="${GH_APP_TOKEN_FILE:-/run/steward/gh-token}"
 LABEL_PREFIX="$(jq -r '.label_prefix // "steward"' "$CONFIG")"
 TERMINAL_MERGED="${LABEL_PREFIX}:merged"
 TERMINAL_ESCALATED="${LABEL_PREFIX}:escalated"
+READY_TO_MERGE="${LABEL_PREFIX}:ready-to-merge"
+# Top-level default for repos without their own merge_mode. jq's // falls
+# through only on null/false, matching the skill's `repo ?? top ?? "never"`.
+DEFAULT_MERGE_MODE="$(jq -r '.merge_mode // "never"' "$CONFIG")"
+
+# Latest steward entry per PR, from the structured log the skill writes. Built
+# once per run; keys are "<owner/repo lowercased>#<pr>". The value says whether
+# that latest entry recorded the clean+green ready-to-merge decision (skill §8:
+# action=ready-to-merge reason=clean-green) and at which head. Only that exact
+# shape counts: the skill's behind/blocked never-path also labels
+# ready-to-merge but logs action=escalate, because its mergeability can change
+# (BEHIND -> DIRTY, a check going red) without the head moving. A
+# line that is not a JSON object cannot be attributed to a PR, so it resets
+# every PR seen before it to "unknown": a corrupt write after a PR's
+# ready-to-merge entry must not let that older entry stand as the latest.
+# Only the last STEWARD_LOG_LINES lines are read — a PR whose entry scrolled
+# out has no entry, so it is a candidate, and its next tick logs a fresh one.
+# Any failure (no .logging.file, missing or unreadable file, jq error) yields
+# an empty map: every PR stays a candidate.
+STEWARD_LOG="$(jq -r '.logging.file // empty' "$CONFIG" 2>/dev/null || true)"
+STEWARD_LOG_LINES=5000
+log_state='{}'
+if [ -n "$STEWARD_LOG" ] && [ -r "$STEWARD_LOG" ]; then
+  log_state="$(tail -n "$STEWARD_LOG_LINES" "$STEWARD_LOG" 2>/dev/null \
+    | jq -R -s -c '
+        reduce (split("\n")[] | select(test("\\S"))) as $line ({};
+          ($line | try fromjson catch null) as $e
+          | if ($e | type) != "object" then
+              map_values({rtm: false, sha: ""})
+            elif ($e.repo | type) == "string"
+                 and (($e.pr | tostring) | test("^[0-9]+$")) then
+              .[($e.repo | ascii_downcase) + "#" + ($e.pr | tostring)] = {
+                rtm: ($e.action == "ready-to-merge" and $e.reason == "clean-green"),
+                sha: (if ($e.head_sha | type) == "string" then $e.head_sha else "" end)
+              }
+            else . end)' 2>/dev/null)" || log_state='{}'
+  printf '%s' "$log_state" | jq -e 'type == "object"' >/dev/null 2>&1 || log_state='{}'
+fi
 
 # App token via gh's GH_TOKEN env. Never echoed; gh embeds it in no output.
 GH_TOKEN="$(cat "$TOKEN_FILE")"
@@ -35,6 +85,7 @@ while [ "$i" -lt "$repos_count" ]; do
   prefix="$(jq -r ".repos[$i].pr_filter.head_prefix // \"\"" "$CONFIG")"
   author="$(jq -r ".repos[$i].pr_filter.author // \"\"" "$CONFIG")"
   labels_json="$(jq -c ".repos[$i].pr_filter.labels // []" "$CONFIG")"
+  merge_mode="$(jq -r --arg def "$DEFAULT_MERGE_MODE" ".repos[$i].merge_mode // \$def" "$CONFIG")"
   i=$((i + 1))
   [ -n "$name" ] && [ "$name" != "null" ] || continue
 
@@ -43,7 +94,7 @@ while [ "$i" -lt "$repos_count" ]; do
   # only author/labels (no head_prefix) would match every open PR and fire a
   # tick needlessly. head: is a prefix match; the jq startswith below re-
   # confirms it and drops PRs already in a terminal steward state.
-  set -- pr list -R "$name" --state open --limit 200 --json number,headRefName,labels
+  set -- pr list -R "$name" --state open --limit 200 --json number,headRefName,headRefOid,labels
   search=""
   [ -n "$prefix" ] && [ "$prefix" != "null" ] && search="head:$prefix"
   [ -n "$author" ] && [ "$author" != "null" ] && search="${search:+$search }author:$author"
@@ -67,19 +118,57 @@ EOF
   fi
   rm -f "$err"
 
-  # --limit 200 without pagination: the precheck only needs ONE non-terminal
-  # in-scope PR, so this is wrong only in the unlikely case where all 200
-  # returned PRs are terminal-labelled while a non-terminal one is paged out.
-  hits="$(printf '%s' "$raw" \
-          | jq --arg pfx "$prefix" --arg merged "$TERMINAL_MERGED" --arg esc "$TERMINAL_ESCALATED" \
-              '[ .[]
-                 | select($pfx == "" or $pfx == "null" or (.headRefName | startswith($pfx)))
-                 | select([.labels[].name] | (index($merged) or index($esc)) | not)
-               ] | length' 2>/dev/null || echo 0)"
+  # Idle skipping applies only when the effective mode is literally "never".
+  # "when-green" PRs also get ready-to-merge while awaiting approval, and an
+  # approval does not move the head, so they must keep ticking. An
+  # unrecognized value is treated as unknown: the PR stays a candidate.
+  # The skill would run an unrecognized value as "never" (with a warning); say
+  # so here too, since such a repo keeps paying for no-op ticks until fixed.
+  case "$merge_mode" in
+    never)      never=true ;;
+    when-green) never=false ;;
+    *)          never=false
+                echo "precheck: $name: unrecognized merge_mode '$merge_mode'; not skipping idle ready-to-merge PRs" >&2 ;;
+  esac
+
+  # --limit 200 without pagination: the precheck only needs ONE non-terminal,
+  # non-idle in-scope PR, so this is wrong only in the unlikely case where all
+  # 200 returned PRs are terminal or idle while a candidate is paged out.
+  # Output: "<candidates> <idle>". The idle test is wrapped in try so any
+  # surprise in its inputs counts the PR as a candidate, never as idle. A body
+  # jq cannot read at all is a failed query, counted like a gh failure — not
+  # an empty list.
+  if ! counts="$(printf '%s' "$raw" \
+          | jq -r --arg pfx "$prefix" --arg merged "$TERMINAL_MERGED" --arg esc "$TERMINAL_ESCALATED" \
+                  --arg rtm "$READY_TO_MERGE" --arg repo "$name" --argjson never "$never" \
+                  --argjson state "$log_state" '
+              def idle:
+                $never
+                and ([.labels[].name] | index($rtm)) != null
+                and ($state[($repo | ascii_downcase) + "#" + (.number | tostring)] as $s
+                     | $s != null and $s.rtm == true
+                       and ($s.sha | ascii_downcase | test("^[0-9a-f]{12,40}$"))
+                       and (.headRefOid | type) == "string"
+                       and (.headRefOid | ascii_downcase | test("^[0-9a-f]{40}$"))
+                       and (.headRefOid | ascii_downcase | startswith($s.sha | ascii_downcase)));
+              [ .[]
+                | select($pfx == "" or $pfx == "null" or (.headRefName | startswith($pfx)))
+                | select([.labels[].name] | (index($merged) or index($esc)) | not)
+                | (try idle catch false)
+              ] | "\(map(select(. | not)) | length) \(map(select(.)) | length)"' 2>/dev/null)"; then
+    echo "precheck: unreadable gh pr list output for $name" >&2
+    errors=$((errors + 1))
+    continue
+  fi
+  hits="${counts%% *}"
+  idle="${counts##* }"
 
   if [ "${hits:-0}" -gt 0 ]; then
     echo "precheck: $name has $hits candidate PR(s)"
     exit 0
+  fi
+  if [ "${idle:-0}" -gt 0 ]; then
+    echo "precheck: $name has $idle idle PR(s) (ready-to-merge at an unchanged head, merge_mode=never)"
   fi
 done
 

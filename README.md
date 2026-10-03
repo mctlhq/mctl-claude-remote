@@ -128,7 +128,13 @@ driver is needed. Before each tick a cheap GitHub pre-check
 (`bin/pr-steward-precheck`) lists open PRs across the configured repos using the
 already-minted App token, and the model run is spawned **only** when an in-scope
 PR is not yet in a terminal `<label_prefix>:merged` / `<label_prefix>:escalated`
-state. Idle cadences therefore cost a single GitHub API call, not Claude usage.
+state. In a repo whose effective `merge_mode` is `never`, a PR already labelled
+`<label_prefix>:ready-to-merge` is also skipped while its head is the one the
+steward's own log (`logging.file`) last recorded the clean+green
+ready-to-merge decision (`action=ready-to-merge reason=clean-green`) at; a new push,
+the label's removal or any later steward entry for the PR makes it a candidate
+again, and a missing or unreadable log keeps it a candidate.
+Idle cadences therefore cost a single GitHub API call, not Claude usage.
 Each tick is wrapped in `timeout` (`PR_STEWARD_TICK_TIMEOUT_SECONDS`, default
 1800s) so a stuck turn cannot wedge the loop. Leave `PR_STEWARD_SCHEDULE_SECONDS`
 unset (or `0`) to disable the scheduler; you can still drive ticks from any
