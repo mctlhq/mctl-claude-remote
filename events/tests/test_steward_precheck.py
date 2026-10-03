@@ -17,6 +17,7 @@ import stat
 import subprocess
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -70,8 +71,8 @@ class PrecheckTest(unittest.TestCase):
             '    case "$a" in repos/*) path="${a%%\\?*}" ;; esac\n'
             '    [ "$prev" = "--jq" ] && expr="$a"; prev="$a"\n'
             '  done\n'
-            '  key="$(printf "%s" "$path" | sed -e "s#^repos/##" -e "s#/pulls/#_#" -e "s#/reviews\\$##" | tr / _)"\n'
-            f'  body="{self.bodies}/reviews_$key.json"\n'
+            '  key="$(printf "%s" "${path#repos/}" | tr / _)"\n'
+            f'  body="{self.bodies}/api_$key.json"\n'
             '  [ -f "$body" ] || { echo "HTTP 404: Not Found" >&2; exit 1; }\n'
             '  jq -r "$expr" "$body" || exit 1\n'
             '  exit 0\n'
@@ -104,7 +105,7 @@ class PrecheckTest(unittest.TestCase):
             if fix_mode is not None:
                 entry_["fix_mode"] = fix_mode
             repos = [entry_]
-        config = {"label_prefix": "steward", "repos": repos}
+        config = {"label_prefix": "steward", "review_bots": ["claude[bot]"], "repos": repos}
         if top_mode is not None:
             config["merge_mode"] = top_mode
         if top_fix_mode is not None:
@@ -116,10 +117,21 @@ class PrecheckTest(unittest.TestCase):
     def serve(self, prs, repo=REPO):
         (self.bodies / (repo.replace("/", "_") + ".json")).write_text(json.dumps(prs))
 
-    def serve_reviews(self, number=1492, approved=(HEAD_A,), other=(), repo=REPO):
-        reviews = [{"state": "APPROVED", "commit_id": sha} for sha in approved]
-        reviews += [{"state": state, "commit_id": sha} for state, sha in other]
-        (self.bodies / f"reviews_{repo.replace('/', '_')}_{number}.json").write_text(json.dumps(reviews))
+    def serve_reviews(self, number=1492, approved=(HEAD_A,), other=(), repo=REPO,
+                      login="claude[bot]", association="NONE"):
+        reviews = [{"state": "APPROVED", "commit_id": sha, "user": {"login": login},
+                    "author_association": association} for sha in approved]
+        reviews += [{"state": state, "commit_id": sha, "user": {"login": login},
+                     "author_association": association} for state, sha in other]
+        self.reviews_path(number, repo).write_text(json.dumps(reviews))
+
+    def reviews_path(self, number=1492, repo=REPO):
+        return self.bodies / f"api_{repo.replace('/', '_')}_pulls_{number}_reviews.json"
+
+    def serve_commit(self, sha, hours_ago, repo=REPO):
+        when = datetime.now(timezone.utc) - timedelta(hours=hours_ago)
+        body = {"sha": sha, "commit": {"committer": {"date": when.strftime("%Y-%m-%dT%H:%M:%SZ")}}}
+        (self.bodies / f"api_{repo.replace('/', '_')}_commits_{sha}.json").write_text(json.dumps(body))
 
     def api_calls(self):
         argv = self.root / "argv"
@@ -334,21 +346,93 @@ class PrecheckTest(unittest.TestCase):
         self.write_config(fix_mode="never")
         self.serve([pr(labels=(), review="APPROVED", head=HEAD_B)])
         self.serve_reviews(approved=(HEAD_A,), other=(("COMMENTED", HEAD_B),))
+        self.serve_commit(HEAD_B, hours_ago=1)
         self.write_log()
         proc = self.assertExit(1)
         self.assertIn("1 PR(s) awaiting approval at head", proc.stdout)
+
+    def test_fix_mode_never_stale_approval_past_stuck_hours_is_a_candidate(self):
+        # The reviewer never re-ran on this head (e.g. after the steward's own
+        # update-branch): after stuck_hours the PR is released so the skill
+        # escalates it once instead of it vanishing in silence.
+        self.write_config(fix_mode="never")
+        self.serve([pr(labels=(), review="APPROVED", head=HEAD_B)])
+        self.serve_reviews(approved=(HEAD_A,))
+        self.serve_commit(HEAD_B, hours_ago=7)
+        proc = self.assertExit(0)
+        self.assertIn("candidate for escalation", proc.stdout)
+
+    def test_stuck_hours_comes_from_the_config(self):
+        self.write_config(fix_mode="never")
+        cfg = json.loads(self.config.read_text())
+        cfg["stuck_hours"] = 2
+        self.config.write_text(json.dumps(cfg))
+        self.serve([pr(labels=(), review="APPROVED", head=HEAD_B)])
+        self.serve_reviews(approved=(HEAD_A,))
+        self.serve_commit(HEAD_B, hours_ago=3)
+        self.assertExit(0)
+
+    def test_fix_mode_never_failed_head_commit_read_is_a_failed_query(self):
+        self.write_config(fix_mode="never")
+        self.serve([pr(labels=(), review="APPROVED", head=HEAD_B)])
+        self.serve_reviews(approved=(HEAD_A,))
+        proc = self.assertExit(2)
+        self.assertIn("head commit read failed", proc.stderr)
+
+    def test_fix_mode_never_uncounted_approval_at_head_does_not_anchor(self):
+        # reviewDecision is APPROVED from a stale counted review; the only
+        # approval at head is from a read-only account.
+        self.write_config(fix_mode="never")
+        self.serve([pr(labels=(), review="APPROVED", head=HEAD_B)])
+        reviews = [
+            {"state": "APPROVED", "commit_id": HEAD_A, "user": {"login": "claude[bot]"}, "author_association": "NONE"},
+            {"state": "APPROVED", "commit_id": HEAD_B, "user": {"login": "drive-by"}, "author_association": "CONTRIBUTOR"},
+        ]
+        self.reviews_path().write_text(json.dumps(reviews))
+        self.serve_commit(HEAD_B, hours_ago=1)
+        self.assertExit(1)
+
+    def test_fix_mode_never_counted_reviewers(self):
+        cases = (("claude[bot]", "NONE"), ("someone", "MEMBER"), ("someone", "OWNER"), ("someone", "COLLABORATOR"))
+        for login, association in cases:
+            with self.subTest(login=login, association=association):
+                self.write_config(fix_mode="never")
+                cfg = json.loads(self.config.read_text())
+                cfg["review_bots"] = ["claude[bot]"]
+                self.config.write_text(json.dumps(cfg))
+                self.serve([pr(labels=(), review="APPROVED")])
+                self.serve_reviews(approved=(HEAD_A,), login=login, association=association)
+                self.assertExit(0)
+
+    def test_bot_approval_without_review_bots_config_does_not_anchor(self):
+        self.write_config(fix_mode="never")
+        cfg = json.loads(self.config.read_text())
+        del cfg["review_bots"]
+        self.config.write_text(json.dumps(cfg))
+        self.serve([pr(labels=(), review="APPROVED")])
+        self.serve_reviews(approved=(HEAD_A,))
+        self.serve_commit(HEAD_A, hours_ago=1)
+        self.assertExit(1)
+
+    def test_fix_mode_never_stops_at_the_first_candidate(self):
+        self.write_config(fix_mode="never")
+        self.serve([pr(number=n, labels=(), review="APPROVED") for n in (1, 2, 3)])
+        for n in (1, 2, 3):
+            self.serve_reviews(number=n, approved=(HEAD_A,))
+        self.assertExit(0)
+        self.assertEqual(len(self.api_calls()), 1)
 
     def test_fix_mode_never_failed_reviews_read_is_a_failed_query(self):
         self.write_config(fix_mode="never")
         self.serve([pr(labels=(), review="APPROVED")])
         self.write_log()
         proc = self.assertExit(2)
-        self.assertIn("gh api reviews failed", proc.stderr)
+        self.assertIn("reviews read failed", proc.stderr)
 
     def test_fix_mode_never_unparsable_reviews_body_is_a_failed_query(self):
         self.write_config(fix_mode="never")
         self.serve([pr(labels=(), review="APPROVED")])
-        (self.bodies / f"reviews_{REPO.replace('/', '_')}_1492.json").write_text("<html>oops</html>")
+        self.reviews_path().write_text("<html>oops</html>")
         self.write_log()
         self.assertExit(2)
 

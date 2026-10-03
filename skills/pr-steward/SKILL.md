@@ -150,11 +150,14 @@ unrecognized value per §1), that owner is the DevLoop shepherd, not the steward
 the backstop for a tick that runs anyway (another PR fired it, a manual tick, an
 approval dismissed mid-tick).
 
-`approved_at_head` = `reviewDecision == "APPROVED"` **and** at least one review with
-`state == "APPROVED"` whose `commit_id` is the current `head`:
+`approved_at_head` = `reviewDecision == "APPROVED"` **and** at least one *counted*
+review with `state == "APPROVED"` whose `commit_id` is the current `head`. Counted =
+the reviewer's login is in `review_bots[]`, or its `author_association` is `OWNER`,
+`MEMBER` or `COLLABORATOR` (a read-only account's approval must not pair with a stale
+counted one):
 ```sh
 gh api --paginate "repos/$REPO/pulls/<N>/reviews?per_page=100" \
-  --jq '.[] | select(.state == "APPROVED") | .commit_id'
+  --jq '.[] | select(.state == "APPROVED") | [.commit_id, .user.login, .author_association] | @tsv'
 ```
 `reviewDecision` alone is not head-anchored: without "dismiss stale approvals on push"
 an approval of an older head survives a shepherd fix push, and the steward would then
@@ -164,8 +167,20 @@ is unknown — treat it as false (never merge on it).
 For each such PR, after the draft check and before any mutation (the §5 `drop` row for
 a PR merged or closed externally still applies — cleaning labels off a closed PR races
 no one):
-- If not `approved_at_head` (unapproved, empty/unreadable `reviewDecision`, a stale
-  approval of an older head, or an unreadable reviews list): do **not** add or
+- If `reviewDecision == "APPROVED"` but not `approved_at_head` (a stale approval: the
+  reviewer has not approved the current head) **and** the head commit
+  (`gh api repos/$REPO/commits/<head> --jq .commit.committer.date`) is older than
+  `stuck_hours`: the review never re-ran on this head — a silent reviewer, or a head the
+  steward itself created in §8.2 whose `claude-review.yml` run never happened. Nobody
+  else is watching that state (the shepherd is waiting on the same review), so it stays
+  in steward scope: `action=escalate reason=review-missing-at-head`, add
+  `${LP}:escalated` (idempotent), send ONE §9 `non-review` escalation ("approved at an
+  older head, no review at `<head>` for `<n>`h"). Do not post `review_trigger`, do not
+  push. The precheck releases exactly this state as a candidate once the head is that
+  old, so this is the one tick it costs; a human removes `${LP}:escalated` to re-arm.
+- Otherwise, if not `approved_at_head` (unapproved, empty/unreadable `reviewDecision`,
+  a stale approval at a head younger than `stuck_hours`, or an unreadable reviews
+  list): do **not** add or
   remove any `${LP}:*` label (not even `${LP}:owned`), do not post `review_trigger`, do
   not clone, edit, commit or push, do not run §7. Log
   `action=wait reason=fix-owned-by-shepherd head_sha=<head>` and move on to the next PR.
@@ -196,10 +211,13 @@ no one):
 reason=clean-green`, §8), so this line can only make a PR a candidate again, never idle
 it. Do not log it in a tick that also logs the clean-green decision for the same PR.
 
-Stalled remediation of an unapproved PR (the shepherd never pushes a fix, the review
-never approves) is out of steward scope: the precheck holds the PR, so the §9
-`stuck_hours` check never runs for it, and the shepherd's own DevLoop monitoring owns
-that alert. The precheck reports held PRs in the scheduler log (`N PR(s) awaiting
+Stalled **remediation** of an unapproved PR (the review responded with P1/P2 and the
+shepherd never pushes a fix, or the review never approves) is out of steward scope: the
+owner's rule is that the steward runs no model before approval, so the precheck holds
+the PR, the §9 `stuck_hours` check never runs for it, and the shepherd's own DevLoop
+monitoring owns that alert. A PR that **was** approved and then lost its review at the
+current head (silent reviewer, or the steward's own §8.2 head) is not remediation and
+stays in steward scope via the `review-missing-at-head` escalation above. The precheck reports held PRs in the scheduler log (`N PR(s) awaiting
 approval at head`).
 
 Entries whose effective `fix_mode` is `"auto"` (absent everywhere, or set to it) — e.g.
@@ -329,7 +347,9 @@ Per PR, per tick:
      as `awaiting-review`).
    - `status=timeout` → the reviewer never responded. Effective `fix_mode: never`:
      no re-post and no `${LP}:reposted`; take `approved_at_head` as the verdict (§4.1)
-     and continue with §5 — if it is false, wait per §4.1 (the precheck holds the PR).
+     and continue with §5. If it is false, apply §4.1: the `review-missing-at-head`
+     escalation once the head is older than `stuck_hours` (this replaces "bot silent
+     twice" for these PRs), else wait (the precheck holds the PR until then).
      Otherwise, for a comment-driven reviewer and if `${LP}:reposted` is absent: re-post `review_trigger`, relaunch the watcher,
      add `${LP}:reposted`, `action=wait reason=review-timeout-reposted`. For an
      Action-based reviewer a repost will NOT schedule a run (only a new push does), so a
@@ -474,7 +494,9 @@ The steward brings the branch current rather than merging stale code or escalati
    the bot approval is dropped and `claude-review.yml` + required checks re-run on the new
    head. **Do NOT merge this tick** — the head just changed and is unreviewed/unchecked
    until the bot re-approves and checks go green. A later tick re-evaluates the refreshed
-   head and merges via §8 when clean+green+approved+`CLEAN`.
+   head and merges via §8 when clean+green+approved+`CLEAN`. (Effective `fix_mode:
+   never`: if the review never re-runs on the new head, §4.1's
+   `review-missing-at-head` escalation fires after `stuck_hours`.)
 4. On success: bump the attempt label (remove `${LP}:update-attempt-{n}`, add
    `${LP}:update-attempt-{n+1}`), keep `${LP}:owned`,
    `action=update-branch result=updated attempt=<n+1>`.

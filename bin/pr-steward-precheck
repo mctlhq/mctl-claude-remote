@@ -35,9 +35,17 @@
 # read meaning "not approved": the PR waits, as the steward could not merge it.
 # APPROVED is also head-anchored: without "dismiss stale approvals on push" an
 # approval survives a shepherd fix push, so an approved PR is a candidate only
-# when an APPROVED review names its current head (one REST call per such PR,
-# after every other filter). A stale approval holds the PR; a failed or
-# unparsable reviews read counts as a failed query, like a failed list.
+# when a counted APPROVED review names its current head (one paginated REST
+# request per such PR, after every other filter, stopping at the first
+# candidate). Counted = the reviewer is in review_bots[] or is an OWNER /
+# MEMBER / COLLABORATOR — an approval by a read-only account does not anchor.
+# A stale approval holds the PR, but not forever: once the head commit is older
+# than stuck_hours (default 6) with no counted approval at it — the reviewer
+# never re-ran, e.g. after the steward's own update-branch — the PR becomes a
+# candidate again so the skill escalates it once (reason=review-missing-at-head,
+# a terminal label) instead of the PR vanishing in silence. A failed or
+# unparsable reviews or commit read counts as a failed query, like a failed
+# list.
 #
 # Generic: every repo and filter comes from the config file. Read-only — makes
 # no GitHub mutations. The GitHub App token is read from a file and exported
@@ -62,6 +70,9 @@ DEFAULT_MERGE_MODE="$(jq -r '.merge_mode // "never"' "$CONFIG")"
 # tostring turns any non-string (false, null, 0, {}) into a token the case
 # below does not recognize, which warns and fails closed to "never".
 DEFAULT_FIX_MODE="$(jq -r 'if has("fix_mode") then (.fix_mode | tostring) else "auto" end' "$CONFIG")"
+# Inputs of the fix_mode-never approval-at-head check (see the header).
+REVIEW_BOTS="$(jq -c '.review_bots // [] | if type == "array" then map(select(type == "string")) else [] end' "$CONFIG")"
+STUCK_HOURS="$(jq -r '.stuck_hours | if type == "number" and . >= 1 then floor else 6 end' "$CONFIG")"
 
 # Latest steward entry per PR, from the structured log the skill writes. Built
 # once per run; keys are "<owner/repo lowercased>#<pr>". The value says whether
@@ -215,24 +226,47 @@ EOF
   held="${rest##* }"
 
   # Approval-at-head check for fix_mode-never PRs (see the header). A failed
-  # reviews read fails the repo's query unless another PR already fires.
+  # read fails the repo's query unless another PR already fires. The first
+  # candidate decides the repo, so the loop stops there.
   verify_failed=0
   while read -r num sha; do
     [ -n "$num" ] || continue
     err="$(mktemp)"
-    if ! approved_shas="$(gh api --paginate "repos/$name/pulls/$num/reviews?per_page=100" \
-            --jq '.[] | select(.state == "APPROVED") | .commit_id' 2>"$err" </dev/null)"; then
-      echo "precheck: gh api reviews failed for $name#$num: $(cat "$err")" >&2
+    if ! rows="$(gh api --paginate "repos/$name/pulls/$num/reviews?per_page=100" \
+            --jq '.[] | select(.state == "APPROVED") | [.commit_id, .user.login, .author_association] | @tsv' \
+            2>"$err" </dev/null)" \
+       || ! counted="$(printf '%s\n' "$rows" | jq -R -r --arg sha "$sha" --argjson bots "$REVIEW_BOTS" '
+              select(test("\\S")) | split("\t")
+              | select((.[0] | ascii_downcase) == ($sha | ascii_downcase))
+              | select(.[1] as $login | any($bots[]; . == $login)
+                       or .[2] == "OWNER" or .[2] == "MEMBER" or .[2] == "COLLABORATOR")
+              | .[0]' 2>/dev/null)"; then
+      echo "precheck: reviews read failed for $name#$num: $(cat "$err")" >&2
+      rm -f "$err"
+      verify_failed=1
+      continue
+    fi
+    if [ -n "$counted" ]; then
+      rm -f "$err"
+      hits=$((hits + 1))
+      break
+    fi
+    # Stale approval: held while the head is younger than stuck_hours.
+    if ! committed="$(gh api "repos/$name/commits/$sha" --jq '.commit.committer.date' 2>"$err" </dev/null)" \
+       || ! age_hours="$(jq -n -r --arg d "$committed" '(now - ($d | fromdateiso8601)) / 3600 | floor' 2>/dev/null)" \
+       || ! [ "$age_hours" -eq "$age_hours" ] 2>/dev/null; then
+      echo "precheck: head commit read failed for $name#$num: $(cat "$err")" >&2
       rm -f "$err"
       verify_failed=1
       continue
     fi
     rm -f "$err"
-    if printf '%s\n' "$approved_shas" | grep -qix "$sha"; then
+    if [ "$age_hours" -ge "$STUCK_HOURS" ]; then
+      echo "precheck: $name#$num approved, but no counted approval at head for ${age_hours}h (>= stuck_hours=$STUCK_HOURS); candidate for escalation"
       hits=$((hits + 1))
-    else
-      held=$((held + 1))
+      break
     fi
+    held=$((held + 1))
   done <<VERIFY
 $(printf '%s\n' "$counts" | tail -n +2)
 VERIFY

@@ -166,9 +166,13 @@ top level, as a default: `repo.fix_mode ?? fix_mode ?? "auto"`) may set
 `"fix_mode": "never"` when another actor — e.g. the DevLoop shepherd — fixes review
 findings on that entry's PRs. The steward then stays out of the remediation phase
 entirely. The pre-check makes such a PR a candidate only once its `reviewDecision`
-is `APPROVED` **and** an `APPROVED` review names its current head (one REST reviews
-call per such PR, so a stale approval that survived a shepherd push does not
-count), so no model run happens before that. The skill never labels, clones,
+is `APPROVED` **and** a counted `APPROVED` review (a `review_bots[]` login, or an
+`OWNER`/`MEMBER`/`COLLABORATOR`) names its current head — one paginated REST reviews
+request per such PR, stopping at the first candidate — so a stale approval that
+survived a shepherd push does not count, and no model run happens before that. A
+stale approval is held only until the head commit is older than `stuck_hours`; then
+the PR is released once so the skill escalates it
+(`action=escalate reason=review-missing-at-head`) instead of it stalling in silence. The skill never labels, clones,
 pushes or posts the review trigger for a PR that is not approved at its head (it
 logs `action=wait reason=fix-owned-by-shepherd`); a PR approved at its head while
 P1/P2 findings are open there is escalated once
@@ -177,7 +181,7 @@ Once approved at head, the merge path — §8 merge / ready-to-merge, update-bra
 bot-thread resolution — is unchanged. `"auto"` or no key anywhere keeps today's
 behaviour. An unrecognized or non-string value (including `false`) is treated as
 `"never"` with a warning. An in-scope PR object whose `reviewDecision` is missing
-or not a string, or a failed or unparsable reviews read, makes that repo's query a
+or not a string, or a failed or unparsable reviews or head-commit read, makes that repo's query a
 failed one (exit 2 when no repo has a candidate), never "nothing to do"; an empty
 `reviewDecision` (no review required, or none yet) means "not approved". Both
 `reviewDecision` in `gh pr list` (unlike `statusCheckRollup`) and the REST reviews
