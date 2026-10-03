@@ -309,6 +309,12 @@ A PR reaches this section when it has no P1/P2 at head, is `mergeable`, and
   ping again).
 - Send ONE escalation (§10, template `ready-to-merge`).
 - **Do not run `gh pr merge`.** A human merges.
+- Log `action=ready-to-merge head_sha=<head>` (`result=labeled` when the label was just
+  added, `result=already-labeled` when it was present), as the **last** log line for this
+  PR in the tick. The scheduler's precheck reads it: while the PR keeps the label and the
+  same head in a `never` repo, it skips the PR instead of firing another paid tick that
+  would only conclude "no action". `head_sha` must be the full head commit you
+  evaluated; without it the PR keeps being ticked.
 
 ### effective_merge_mode = when-green — gated auto-merge
 Only proceed if **`approved`** is also true (§5). If not approved yet, fall back to the
@@ -482,6 +488,9 @@ One JSON line per PR action, appended to `logging.file` and echoed to stdout:
 ```json
 {"ts":"<iso>","tick_id":"<id>","repo":"owner/repo","pr":123,"head_sha":"<sha>","attempt":1,"action":"address-review","result":"pushed","reason":"","p1":1,"p2":0,"p3":2}
 ```
+
+`bin/pr-steward-precheck` reads this file (last 5000 lines) to skip idle ready-to-merge
+PRs (§8), so keep each line one complete JSON object with `repo`, `pr` and `head_sha`.
 
 NEVER include a token, JWT, or any `ghs_`/`sk-ant-` string. If a value might contain
 one, redact it to `***`.
