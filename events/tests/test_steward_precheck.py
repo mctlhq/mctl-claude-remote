@@ -451,6 +451,30 @@ class PrecheckTest(unittest.TestCase):
         proc = self.assertExit(2)
         self.assertIn("permission read failed", proc.stderr)
 
+    def test_fix_mode_never_rate_limited_permission_read_is_transient(self):
+        self.write_config(fix_mode="never")
+        self.serve([pr(labels=(), review="APPROVED")])
+        self.serve_reviews(approved=(HEAD_A,), login="someone", association="MEMBER")
+        self.serve_permission("someone", None,
+                              error="gh: You have exceeded a secondary rate limit. (HTTP 403)")
+        self.serve_commit(HEAD_A, hours_ago=7)
+        proc = self.assertExit(2)
+        self.assertIn("permission read failed", proc.stderr)
+
+    def test_fix_mode_never_permission_body_with_one_field(self):
+        # A custom org role may come with only one of role_name/permission.
+        for body, code in (({"permission": "write"}, 0), ({"role_name": "maintain"}, 0),
+                           ({"role_name": "custom-reviewer", "permission": "write"}, 0),
+                           ({"role_name": "custom-reader", "permission": "read"}, 1), ({}, 1)):
+            with self.subTest(body=body):
+                self.write_config(fix_mode="never")
+                self.serve([pr(labels=(), review="APPROVED")])
+                self.serve_reviews(approved=(HEAD_A,), login="someone", association="MEMBER")
+                (self.bodies / f"api_{REPO.replace('/', '_')}_collaborators_someone_permission.json").write_text(
+                    json.dumps(body))
+                self.serve_commit(HEAD_A, hours_ago=1)
+                self.assertExit(code)
+
     def test_fix_mode_never_permission_denied_or_missing_does_not_count_and_is_not_silent(self):
         # 403/404 is a definitive answer about one reviewer: the approval does
         # not count, the PR is held, and after stuck_hours it is released for

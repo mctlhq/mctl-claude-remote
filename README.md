@@ -191,9 +191,10 @@ behaviour. An unrecognized or non-string value (including `false`) is treated as
 `"never"` with a warning. An in-scope PR object whose `reviewDecision` is missing
 or not a string, or a failed or unparsable reviews or head-commit read, makes that repo's query a
 failed one (exit 2 when no repo has a candidate), never "nothing to do"; an empty
-`reviewDecision` (no review required, or none yet) means "not approved". Both
-`reviewDecision` in `gh pr list` (unlike `statusCheckRollup`) and the REST reviews
-list are readable by the App installation token.
+`reviewDecision` (no review required, or none yet) means "not approved". All four
+reads are readable by the App installation token (verified live): `reviewDecision`
+in `gh pr list` (unlike `statusCheckRollup`), the REST reviews list,
+`collaborators/<login>/permission` and `commits/<sha>`.
 
 **Kill switch:** the automation is inert unless `PR_STEWARD_ENABLED=true`. Set it
 to anything else (or leave it unset) and the container is a plain remote-control

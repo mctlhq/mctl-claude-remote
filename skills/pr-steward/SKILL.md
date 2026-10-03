@@ -157,26 +157,29 @@ reviewer has write access — `role_name` or the legacy `permission` (which fold
 `maintain` into `write`) is `admin`, `maintain` or `write`. `author_association` is no
 proxy (a maintainer reports `MEMBER`, never `OWNER`, in an org repo, and
 `MEMBER`/`COLLABORATOR` do not imply write); a review bot's own review reports `NONE`,
-which is why `review_bots[]` must be set. A 403/404 on the permission read means that
-reviewer does not count; any other failure means `approved_at_head` is unknown:
+which is why `review_bots[]` must be set. A 403/404 on the permission read (other than
+a rate limit) means that reviewer does not count; any other failure means
+`approved_at_head` is unknown:
 ```sh
 gh api --paginate "repos/$REPO/pulls/<N>/reviews?per_page=100" \
   --jq '.[] | select(.state == "APPROVED") | [.commit_id, .user.login] | @tsv'
 # for each non-bot login approving <head>:
-gh api "repos/$REPO/collaborators/<login>/permission" --jq '[.role_name, .permission] | @tsv'
+gh api "repos/$REPO/collaborators/<login>/permission" --jq '[.role_name // "", .permission // ""] | @tsv'
 ```
 `reviewDecision` alone is not head-anchored: without "dismiss stale approvals on push"
 an approval of an older head survives a shepherd fix push, and the steward would then
-treat code no reviewer saw as approved. If the reviews read fails, `approved_at_head`
-is unknown — treat it as false (never merge on it).
+treat code no reviewer saw as approved. If a read fails transiently, `approved_at_head`
+is **unknown**: never merge on it, and never escalate on it either — unknown is not
+"observed absent". It takes the `wait` bullet below.
 
 For each such PR, after the draft check and before any mutation (the §5 `drop` row for
 a PR merged or closed externally still applies — cleaning labels off a closed PR races
 no one):
-- If `reviewDecision == "APPROVED"` but not `approved_at_head` (a stale approval: the
-  reviewer has not approved the current head) **and** the head commit
+- If `reviewDecision == "APPROVED"` and the reads **succeeded** and showed no counted
+  approval at the current head (a stale approval; a 403/404 permission answer counts as
+  a successful "does not count"), **and** the head commit read succeeded and the commit
   (`gh api repos/$REPO/commits/<head> --jq .commit.committer.date`) is older than
-  `stuck_hours`: the review never re-ran on this head — a silent reviewer, or a head the
+  `stuck_hours` (the precheck applies the same condition): the review never re-ran on this head — a silent reviewer, or a head the
   steward itself created in §8.2 whose `claude-review.yml` run never happened, in a repo
   **without** "dismiss stale approvals on push" (with it, the approval is dismissed and
   the PR is simply unapproved — see below). Nobody else is watching that state (the
@@ -189,8 +192,9 @@ no one):
   the one tick it costs. A review still queued after `stuck_hours` is escalated too —
   the ping is the point; a human removes `${LP}:escalated` to re-arm once it lands.
 - Otherwise, if not `approved_at_head` (unapproved, empty/unreadable `reviewDecision`,
-  a stale approval at a head younger than `stuck_hours`, or an unreadable reviews
-  list): do **not** add or
+  a stale approval at a head younger than `stuck_hours`, or `approved_at_head` /
+  head age unknown because a reviews, permission or commit read failed transiently —
+  whatever the head age): do **not** add or
   remove any `${LP}:*` label (not even `${LP}:owned`), do not post `review_trigger`, do
   not clone, edit, commit or push, do not run §7. Log
   `action=wait reason=fix-owned-by-shepherd head_sha=<head>` and move on to the next PR.

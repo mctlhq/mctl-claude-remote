@@ -43,7 +43,8 @@
 # the reviewer has write access (repos/<repo>/collaborators/<login>/permission
 # role_name or legacy permission is admin, maintain or write —
 # author_association is no proxy: MEMBER/COLLABORATOR do not imply write, and
-# a maintainer is never OWNER in an org repo). A 403/404 on that read is a
+# a maintainer is never OWNER in an org repo). A 403/404 (not a rate limit) on
+# that read is a
 # definitive "does not count" for that reviewer (the PR falls to the stale
 # path below and is escalated, never silently blocked); any other failure is a
 # failed query. A
@@ -277,7 +278,8 @@ EOF
         esac
         if ! perm="$(gh api "repos/$name/collaborators/$login/permission" \
                 --jq '[.role_name // "", .permission // ""] | @tsv' 2>"$err" </dev/null)"; then
-          if grep -q 'HTTP 40[34]' "$err"; then
+          # A 403 can also be a (secondary) rate limit: that is transient.
+          if grep -q 'HTTP 40[34]' "$err" && ! grep -qi 'rate limit' "$err"; then
             uncounted="$uncounted $login"
           else
             echo "precheck: permission read failed for $login on $name: $(cat "$err")" >&2
@@ -300,7 +302,7 @@ LOGINS
       continue
     fi
     if [ -z "$counted" ] && [ -n "$uncounted" ]; then
-      echo "precheck: $name#$num: approval at head by${uncounted} does not count (not in review_bots[], no write access)" >&2
+      echo "precheck: $name#$num: approval at head by${uncounted} does not count (not in review_bots[], write access not confirmed)" >&2
     fi
     if [ -n "$counted" ]; then
       rm -f "$err"
