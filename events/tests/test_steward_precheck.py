@@ -81,7 +81,8 @@ class PrecheckTest(unittest.TestCase):
             GH_APP_TOKEN_FILE=str(self.token),
         )
 
-    def write_config(self, top_mode="never", repo_mode=None, repos=None, logging=True, fix_mode=None):
+    def write_config(self, top_mode="never", repo_mode=None, repos=None, logging=True, fix_mode=None,
+                     top_fix_mode=None):
         if repos is None:
             entry_ = {"name": REPO, "pr_filter": {"head_prefix": "feat/agents-"}}
             if repo_mode is not None:
@@ -92,6 +93,8 @@ class PrecheckTest(unittest.TestCase):
         config = {"label_prefix": "steward", "repos": repos}
         if top_mode is not None:
             config["merge_mode"] = top_mode
+        if top_fix_mode is not None:
+            config["fix_mode"] = top_fix_mode
         if logging:
             config["logging"] = {"file": str(self.log)}
         self.config.write_text(json.dumps(config))
@@ -354,6 +357,33 @@ class PrecheckTest(unittest.TestCase):
                 self.serve([body])
                 proc = self.assertExit(2)
                 self.assertIn("unreadable gh pr list output", proc.stderr)
+
+    def test_top_level_fix_mode_never_is_inherited(self):
+        # A key placed next to the top-level merge_mode must not be silently
+        # ignored: that would hand fixing back to the steward.
+        self.write_config(top_fix_mode="never")
+        self.serve([pr(labels=(), review="REVIEW_REQUIRED")])
+        self.assertExit(1)
+
+    def test_per_repo_auto_overrides_top_level_never(self):
+        self.write_config(top_fix_mode="never", fix_mode="auto")
+        self.serve([pr(labels=(), review="REVIEW_REQUIRED")])
+        self.assertExit(0)
+
+    def test_unknown_top_level_fix_mode_warns_and_behaves_as_never(self):
+        self.write_config(top_fix_mode="sometimes")
+        self.serve([pr(labels=(), review="REVIEW_REQUIRED")])
+        proc = self.assertExit(1)
+        self.assertIn("unrecognized fix_mode 'sometimes'", proc.stderr)
+
+    def test_out_of_scope_pr_with_unreadable_review_decision_does_not_fail_the_repo(self):
+        self.write_config(fix_mode="never")
+        stray = pr(number=5, labels=(), branch="dependabot/x")
+        del stray["reviewDecision"]
+        terminal = pr(number=6, labels=("steward:merged",))
+        del terminal["reviewDecision"]
+        self.serve([stray, terminal, pr(number=7, labels=(), review="APPROVED")])
+        self.assertExit(0)
 
     def test_fix_mode_never_failed_query_is_broken_not_idle(self):
         self.write_config(fix_mode="never")

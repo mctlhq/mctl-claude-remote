@@ -19,13 +19,14 @@
 # line after the PR's last entry, or an unparseable head SHA all leave the PR a
 # candidate — an unknown state is never treated as idle.
 #
-# Review remediation owned elsewhere (fix_mode): a repos[] entry with
-# "fix_mode": "never" says another actor (the DevLoop shepherd) owns fixing
+# Review remediation owned elsewhere (fix_mode): an effective fix_mode of
+# "never" (repos[] entry, else the top-level default, else "auto") says another actor (the DevLoop shepherd) owns fixing
 # review findings on its PRs, and the steward owns only the merge path once the
 # PR is approved. For such an entry a PR is a candidate only when its
 # reviewDecision is APPROVED, so no paid tick runs while the shepherd may still
 # be pushing fixes — one mutation owner per PR head during remediation. Absent
-# or "auto" keeps today's behaviour. An unrecognized value is treated as
+# everywhere or "auto" keeps today's behaviour. The top-level key is a default
+# like merge_mode, so a key placed there is honoured, not silently ignored. An unrecognized value is treated as
 # "never" with a warning: the owner asked the steward not to fix, so a typo
 # must not hand fixing back to it; the merge path is unaffected. Fail-safe: a
 # PR object without a string reviewDecision is a malformed body — the repo's
@@ -51,6 +52,7 @@ READY_TO_MERGE="${LABEL_PREFIX}:ready-to-merge"
 # Top-level default for repos without their own merge_mode. jq's // falls
 # through only on null/false, matching the skill's `repo ?? top ?? "never"`.
 DEFAULT_MERGE_MODE="$(jq -r '.merge_mode // "never"' "$CONFIG")"
+DEFAULT_FIX_MODE="$(jq -r '.fix_mode // "auto"' "$CONFIG")"
 
 # Latest steward entry per PR, from the structured log the skill writes. Built
 # once per run; keys are "<owner/repo lowercased>#<pr>". The value says whether
@@ -100,7 +102,7 @@ while [ "$i" -lt "$repos_count" ]; do
   author="$(jq -r ".repos[$i].pr_filter.author // \"\"" "$CONFIG")"
   labels_json="$(jq -c ".repos[$i].pr_filter.labels // []" "$CONFIG")"
   merge_mode="$(jq -r --arg default_mode "$DEFAULT_MERGE_MODE" ".repos[$i].merge_mode // \$default_mode" "$CONFIG")"
-  fix_mode="$(jq -r ".repos[$i].fix_mode // \"auto\"" "$CONFIG")"
+  fix_mode="$(jq -r --arg default_fix "$DEFAULT_FIX_MODE" ".repos[$i].fix_mode // \$default_fix" "$CONFIG")"
   i=$((i + 1))
   [ -n "$name" ] && [ "$name" != "null" ] || continue
 
@@ -176,11 +178,11 @@ EOF
                        and (.headRefOid | type) == "string"
                        and (.headRefOid | ascii_downcase | test("^[0-9a-f]{40}$"))
                        and (.headRefOid | ascii_downcase | startswith($s.sha | ascii_downcase)));
-              if $fixnever and (map(type == "object" and (.reviewDecision | type) == "string") | all | not)
-              then error("reviewDecision unreadable") else . end
-              | [ .[]
+              [ .[]
                 | select($pfx == "" or $pfx == "null" or (.headRefName | startswith($pfx)))
                 | select([.labels[].name] | (index($merged) or index($esc)) | not)
+                | if $fixnever and (.reviewDecision | type) != "string"
+                  then error("reviewDecision unreadable") else . end
                 | if $fixnever and .reviewDecision != "APPROVED" then "held"
                   elif (try idle catch false) then "idle"
                   else "candidate" end
