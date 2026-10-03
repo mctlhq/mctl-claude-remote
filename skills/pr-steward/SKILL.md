@@ -152,9 +152,10 @@ approval dismissed mid-tick).
 
 `approved_at_head` = `reviewDecision == "APPROVED"` **and** at least one *counted*
 review with `state == "APPROVED"` whose `commit_id` is the current `head`. Counted =
-the reviewer's login is in `review_bots[]`, or its `author_association` is `OWNER`,
-`MEMBER` or `COLLABORATOR` (a read-only account's approval must not pair with a stale
-counted one):
+the reviewer's login is in `review_bots[]` (compare case-insensitively), or its
+`author_association` is `OWNER`. `MEMBER`/`COLLABORATOR` do not imply write access, so
+their approval must not pair with a stale counted one; a review bot's own review
+reports `NONE`, which is why `review_bots[]` must be set:
 ```sh
 gh api --paginate "repos/$REPO/pulls/<N>/reviews?per_page=100" \
   --jq '.[] | select(.state == "APPROVED") | [.commit_id, .user.login, .author_association] | @tsv'
@@ -171,9 +172,13 @@ no one):
   reviewer has not approved the current head) **and** the head commit
   (`gh api repos/$REPO/commits/<head> --jq .commit.committer.date`) is older than
   `stuck_hours`: the review never re-ran on this head — a silent reviewer, or a head the
-  steward itself created in §8.2 whose `claude-review.yml` run never happened. Nobody
-  else is watching that state (the shepherd is waiting on the same review), so it stays
-  in steward scope: `action=escalate reason=review-missing-at-head`, add
+  steward itself created in §8.2 whose `claude-review.yml` run never happened, in a repo
+  **without** "dismiss stale approvals on push" (with it, the approval is dismissed and
+  the PR is simply unapproved — see below). Nobody else is watching that state (the
+  shepherd is waiting on the same review), so it stays in steward scope. First check
+  that the review is not merely in flight: if a check run of the review workflow on
+  `<head>` is `queued`/`in_progress`, `action=wait reason=review-in-flight` and stop.
+  Otherwise `action=escalate reason=review-missing-at-head`, add
   `${LP}:escalated` (idempotent), send ONE §9 `non-review` escalation ("approved at an
   older head, no review at `<head>` for `<n>`h"). Do not post `review_trigger`, do not
   push. The precheck releases exactly this state as a candidate once the head is that
@@ -215,9 +220,17 @@ Stalled **remediation** of an unapproved PR (the review responded with P1/P2 and
 shepherd never pushes a fix, or the review never approves) is out of steward scope: the
 owner's rule is that the steward runs no model before approval, so the precheck holds
 the PR, the §9 `stuck_hours` check never runs for it, and the shepherd's own DevLoop
-monitoring owns that alert. A PR that **was** approved and then lost its review at the
-current head (silent reviewer, or the steward's own §8.2 head) is not remediation and
-stays in steward scope via the `review-missing-at-head` escalation above. The precheck reports held PRs in the scheduler log (`N PR(s) awaiting
+monitoring owns that alert. A PR whose approval survived onto an unreviewed head (no
+dismiss-stale-approvals) is not remediation and stays in steward scope via the
+`review-missing-at-head` escalation above.
+
+**Known gap, by the owner's rule:** in a repo **with** "dismiss stale approvals on
+push", a push — including the steward's own §8.2 `update-branch` — dismisses the
+approval, so the PR reads as unapproved and is held like any remediation PR. If the
+review then never runs on that head (Actions outage, quota, a cancelled run), nothing
+in the steward notices: running the model before approval is exactly what the owner
+ruled out. The scheduler log shows the PR as held at every tick; a reviewer-silence
+alert for held PRs belongs to the shepherd / DevLoop monitoring. The precheck reports held PRs in the scheduler log (`N PR(s) awaiting
 approval at head`).
 
 Entries whose effective `fix_mode` is `"auto"` (absent everywhere, or set to it) — e.g.
@@ -496,7 +509,8 @@ The steward brings the branch current rather than merging stale code or escalati
    until the bot re-approves and checks go green. A later tick re-evaluates the refreshed
    head and merges via §8 when clean+green+approved+`CLEAN`. (Effective `fix_mode:
    never`: if the review never re-runs on the new head, §4.1's
-   `review-missing-at-head` escalation fires after `stuck_hours`.)
+   `review-missing-at-head` escalation fires after `stuck_hours` only when the approval
+   survived the push; a dismissed approval leaves the PR held — §4.1 "Known gap".)
 4. On success: bump the attempt label (remove `${LP}:update-attempt-{n}`, add
    `${LP}:update-attempt-{n+1}`), keep `${LP}:owned`,
    `action=update-branch result=updated attempt=<n+1>`.

@@ -166,13 +166,18 @@ top level, as a default: `repo.fix_mode ?? fix_mode ?? "auto"`) may set
 `"fix_mode": "never"` when another actor — e.g. the DevLoop shepherd — fixes review
 findings on that entry's PRs. The steward then stays out of the remediation phase
 entirely. The pre-check makes such a PR a candidate only once its `reviewDecision`
-is `APPROVED` **and** a counted `APPROVED` review (a `review_bots[]` login, or an
-`OWNER`/`MEMBER`/`COLLABORATOR`) names its current head — one paginated REST reviews
+is `APPROVED` **and** a counted `APPROVED` review (a `review_bots[]` login, matched
+case-insensitively, or an `OWNER`) names its current head — a paginated REST reviews
 request per such PR, stopping at the first candidate — so a stale approval that
-survived a shepherd push does not count, and no model run happens before that. A
-stale approval is held only until the head commit is older than `stuck_hours`; then
-the PR is released once so the skill escalates it
-(`action=escalate reason=review-missing-at-head`) instead of it stalling in silence. The skill never labels, clones,
+survived a shepherd push does not count, and no model run happens before that.
+`review_bots[]` must list the review bot: its own review reports
+`author_association: NONE` (the pre-check warns when it is empty). A stale approval
+is held only until the head commit is older than `stuck_hours`; then the PR is
+released once so the skill escalates it (`action=escalate reason=review-missing-at-head`)
+instead of it stalling in silence. With "dismiss stale approvals on push" a push
+dismisses the approval instead, and the PR is held as unapproved — including when
+the review never re-runs; that silence is for the shepherd's monitoring, because
+the owner's rule is no model run before approval. The skill never labels, clones,
 pushes or posts the review trigger for a PR that is not approved at its head (it
 logs `action=wait reason=fix-owned-by-shepherd`); a PR approved at its head while
 P1/P2 findings are open there is escalated once

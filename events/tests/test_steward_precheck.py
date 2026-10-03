@@ -393,16 +393,45 @@ class PrecheckTest(unittest.TestCase):
         self.assertExit(1)
 
     def test_fix_mode_never_counted_reviewers(self):
-        cases = (("claude[bot]", "NONE"), ("someone", "MEMBER"), ("someone", "OWNER"), ("someone", "COLLABORATOR"))
-        for login, association in cases:
-            with self.subTest(login=login, association=association):
+        # review_bots[] (case-insensitive) or OWNER anchor a head.
+        for bots, login, association in ((["claude[bot]"], "claude[bot]", "NONE"),
+                                         (["Claude[bot]"], "claude[bot]", "NONE"),
+                                         (["claude[bot]"], "someone", "OWNER")):
+            with self.subTest(bots=bots, login=login, association=association):
                 self.write_config(fix_mode="never")
                 cfg = json.loads(self.config.read_text())
-                cfg["review_bots"] = ["claude[bot]"]
+                cfg["review_bots"] = bots
                 self.config.write_text(json.dumps(cfg))
                 self.serve([pr(labels=(), review="APPROVED")])
                 self.serve_reviews(approved=(HEAD_A,), login=login, association=association)
                 self.assertExit(0)
+
+    def test_fix_mode_never_member_or_collaborator_approval_does_not_anchor(self):
+        # Neither association implies write access to the repo.
+        for association in ("MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE"):
+            with self.subTest(association=association):
+                self.write_config(fix_mode="never")
+                self.serve([pr(labels=(), review="APPROVED")])
+                self.serve_reviews(approved=(HEAD_A,), login="someone", association=association)
+                self.serve_commit(HEAD_A, hours_ago=1)
+                self.assertExit(1)
+
+    def test_fix_mode_never_without_review_bots_warns(self):
+        self.write_config(fix_mode="never")
+        cfg = json.loads(self.config.read_text())
+        del cfg["review_bots"]
+        self.config.write_text(json.dumps(cfg))
+        self.serve([pr(labels=(), review="REVIEW_REQUIRED")])
+        proc = self.assertExit(1)
+        self.assertIn("review_bots is empty", proc.stderr)
+
+    def test_auto_entry_without_review_bots_does_not_warn(self):
+        cfg_free = json.loads(self.config.read_text())
+        del cfg_free["review_bots"]
+        self.config.write_text(json.dumps(cfg_free))
+        self.serve([pr(labels=())])
+        proc = self.assertExit(0)
+        self.assertNotIn("review_bots", proc.stderr)
 
     def test_bot_approval_without_review_bots_config_does_not_anchor(self):
         self.write_config(fix_mode="never")
