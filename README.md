@@ -161,6 +161,41 @@ escalate-only (`never`). The effective values for a PR are
 `repo.merge_mode ?? merge_mode ?? "never"` and
 `repo.merge_method ?? merge_method ?? "merge"`. See `pr-steward.config.example.json`.
 
+**Review remediation owned elsewhere (`fix_mode`).** A `repos[]` entry (or the
+top level, as a default: `repo.fix_mode ?? fix_mode ?? "auto"`) may set
+`"fix_mode": "never"` when another actor — e.g. the DevLoop shepherd — fixes review
+findings on that entry's PRs. The steward then stays out of the remediation phase
+entirely. The pre-check makes such a PR a candidate only once its `reviewDecision`
+is `APPROVED` **and** a counted `APPROVED` review (a `review_bots[]` login, matched
+case-insensitively, or a reviewer with write access per
+`repos/<repo>/collaborators/<login>/permission`) names its current head — per such PR a paginated REST reviews request,
+a permission read per distinct non-bot approver at head and, when nothing counts, a
+head-commit read, stopping at the first candidate (a 403/404 permission read means
+that reviewer does not count) — so a stale approval that
+survived a shepherd push does not count, and no model run happens before that.
+`review_bots[]` must list the review bot: its own review reports
+`author_association: NONE` (the pre-check warns when it is empty). A stale approval
+is held only until the head commit is older than `stuck_hours`; then the PR is
+released once so the skill escalates it (`action=escalate reason=review-missing-at-head`)
+instead of it stalling in silence. With "dismiss stale approvals on push" a push
+dismisses the approval instead, and the PR is held as unapproved — including when
+the review never re-runs; that silence is for the shepherd's monitoring, because
+the owner's rule is no model run before approval. The skill never labels, clones,
+pushes or posts the review trigger for a PR that is not approved at its head (it
+logs `action=wait reason=fix-owned-by-shepherd`); a PR approved at its head while
+P1/P2 findings are open there is escalated once
+(`action=escalate reason=approved-with-findings`) rather than re-ticked forever.
+Once approved at head, the merge path — §8 merge / ready-to-merge, update-branch,
+bot-thread resolution — is unchanged. `"auto"` or no key anywhere keeps today's
+behaviour. An unrecognized or non-string value (including `false`) is treated as
+`"never"` with a warning. An in-scope PR object whose `reviewDecision` is missing
+or not a string, or a failed or unparsable reviews or head-commit read, makes that repo's query a
+failed one (exit 2 when no repo has a candidate), never "nothing to do"; an empty
+`reviewDecision` (no review required, or none yet) means "not approved". All four
+reads are readable by the App installation token (verified live): `reviewDecision`
+in `gh pr list` (unlike `statusCheckRollup`), the REST reviews list,
+`collaborators/<login>/permission` and `commits/<sha>`.
+
 **Kill switch:** the automation is inert unless `PR_STEWARD_ENABLED=true`. Set it
 to anything else (or leave it unset) and the container is a plain remote-control
 device. The skill itself re-checks the flag on every tick.

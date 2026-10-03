@@ -19,6 +19,45 @@
 # line after the PR's last entry, or an unparseable head SHA all leave the PR a
 # candidate — an unknown state is never treated as idle.
 #
+# Review remediation owned elsewhere (fix_mode): an effective fix_mode of
+# "never" (repos[] entry, else the top-level default, else "auto") says another actor (the DevLoop shepherd) owns fixing
+# review findings on its PRs, and the steward owns only the merge path once the
+# PR is approved. For such an entry a PR is a candidate only when its
+# reviewDecision is APPROVED, so no paid tick runs while the shepherd may still
+# be pushing fixes — one mutation owner per PR head during remediation. Absent
+# everywhere or "auto" keeps today's behaviour. The top-level key is a default
+# like merge_mode, so a key placed there is honoured, not silently ignored. An unrecognized value is treated as
+# "never" with a warning: the owner asked the steward not to fix, so a typo
+# must not hand fixing back to it; the merge path is unaffected. Fail-safe: a
+# PR object without a string reviewDecision is a malformed body — the repo's
+# query counts as failed (exit 2 when every repo fails), never as "nothing to
+# do". An empty reviewDecision (no review required, or none yet) is a valid
+# read meaning "not approved": the PR waits, as the steward could not merge it.
+# APPROVED is also head-anchored: without "dismiss stale approvals on push" an
+# approval survives a shepherd fix push, so an approved PR is a candidate only
+# when a counted APPROVED review names its current head. Cost per such PR,
+# only after every other filter and stopping at the first candidate: one
+# paginated reviews request, plus one permission read per distinct non-bot
+# approver at head, plus one head-commit read when no approval counts.
+# Counted = the reviewer's login is in review_bots[] (case-insensitive), or
+# the reviewer has write access (repos/<repo>/collaborators/<login>/permission
+# role_name or legacy permission is admin, maintain or write —
+# author_association is no proxy: MEMBER/COLLABORATOR do not imply write, and
+# a maintainer is never OWNER in an org repo). A 403/404 (not a rate limit) on
+# that read is a
+# definitive "does not count" for that reviewer (the PR falls to the stale
+# path below and is escalated, never silently blocked); any other failure is a
+# failed query. A
+# stale approval (APPROVED survived, no counted approval at head — only
+# possible without dismiss-stale-approvals) holds the PR, but not forever:
+# once the head commit is older than stuck_hours (default 6) the PR becomes a
+# candidate again so the skill escalates it once (reason=review-missing-at-head,
+# a terminal label) instead of the PR vanishing in silence. A dismissed
+# approval reads as not APPROVED and stays held: the owner's rule is no model
+# run before approval. A failed or
+# unparsable reviews or commit read counts as a failed query, like a failed
+# list.
+#
 # Generic: every repo and filter comes from the config file. Read-only — makes
 # no GitHub mutations. The GitHub App token is read from a file and exported
 # only for the gh calls; it is never printed.
@@ -37,6 +76,14 @@ READY_TO_MERGE="${LABEL_PREFIX}:ready-to-merge"
 # Top-level default for repos without their own merge_mode. jq's // falls
 # through only on null/false, matching the skill's `repo ?? top ?? "never"`.
 DEFAULT_MERGE_MODE="$(jq -r '.merge_mode // "never"' "$CONFIG")"
+# fix_mode resolves on key presence, not jq's //: // falls through on false,
+# so "fix_mode": false would read as "auto" and hand fixing back silently.
+# tostring turns any non-string (false, null, 0, {}) into a token the case
+# below does not recognize, which warns and fails closed to "never".
+DEFAULT_FIX_MODE="$(jq -r 'if has("fix_mode") then (.fix_mode | tostring) else "auto" end' "$CONFIG")"
+# Inputs of the fix_mode-never approval-at-head check (see the header).
+REVIEW_BOTS="$(jq -c '.review_bots // [] | if type == "array" then map(select(type == "string")) else [] end' "$CONFIG")"
+STUCK_HOURS="$(jq -r '.stuck_hours | if type == "number" and . >= 1 then floor else 6 end' "$CONFIG")"
 
 # Latest steward entry per PR, from the structured log the skill writes. Built
 # once per run; keys are "<owner/repo lowercased>#<pr>". The value says whether
@@ -86,6 +133,8 @@ while [ "$i" -lt "$repos_count" ]; do
   author="$(jq -r ".repos[$i].pr_filter.author // \"\"" "$CONFIG")"
   labels_json="$(jq -c ".repos[$i].pr_filter.labels // []" "$CONFIG")"
   merge_mode="$(jq -r --arg default_mode "$DEFAULT_MERGE_MODE" ".repos[$i].merge_mode // \$default_mode" "$CONFIG")"
+  fix_mode="$(jq -r --arg default_fix "$DEFAULT_FIX_MODE" \
+    ".repos[$i] | if has(\"fix_mode\") then (.fix_mode | tostring) else \$default_fix end" "$CONFIG")"
   i=$((i + 1))
   [ -n "$name" ] && [ "$name" != "null" ] || continue
 
@@ -94,7 +143,7 @@ while [ "$i" -lt "$repos_count" ]; do
   # only author/labels (no head_prefix) would match every open PR and fire a
   # tick needlessly. head: is a prefix match; the jq startswith below re-
   # confirms it and drops PRs already in a terminal steward state.
-  set -- pr list -R "$name" --state open --limit 200 --json number,headRefName,headRefOid,labels
+  set -- pr list -R "$name" --state open --limit 200 --json number,headRefName,headRefOid,labels,reviewDecision
   search=""
   [ -n "$prefix" ] && [ "$prefix" != "null" ] && search="head:$prefix"
   [ -n "$author" ] && [ "$author" != "null" ] && search="${search:+$search }author:$author"
@@ -131,17 +180,34 @@ EOF
                 echo "precheck: $name: unrecognized merge_mode '$merge_mode'; not skipping idle ready-to-merge PRs" >&2 ;;
   esac
 
+  # fix_mode: see the header. Unrecognized → "never" (more restrictive on
+  # fixing; the merge path still runs once the PR is approved).
+  case "$fix_mode" in
+    auto)  fix_never=false ;;
+    never) fix_never=true ;;
+    *)     fix_never=true
+           echo "precheck: $name: unrecognized fix_mode '$fix_mode'; treating as 'never' (candidate only when APPROVED)" >&2 ;;
+  esac
+  # A GitHub App review carries author_association NONE, so the review bot's
+  # approval anchors a head only through review_bots[]. Without it every PR of
+  # this entry is held, then escalated after stuck_hours — say so.
+  if [ "$fix_never" = true ] && [ "$REVIEW_BOTS" = "[]" ]; then
+    echo "precheck: $name: fix_mode=never but review_bots is empty; only write-access human approvals can anchor a head" >&2
+  fi
+
   # --limit 200 without pagination: the precheck only needs ONE non-terminal,
   # non-idle in-scope PR, so this is wrong only in the unlikely case where all
   # 200 returned PRs are terminal or idle while a candidate is paged out.
-  # Output: "<candidates> <idle>". The idle test is wrapped in try so any
+  # Output line 1: "<candidates> <idle> <held>"; held = fix_mode never and
+  # not APPROVED. Then one "<number> <head>" line per fix_mode-never PR that is
+  # APPROVED and not idle: it still needs the approval-at-head check below. The idle test is wrapped in try so any
   # surprise in its inputs counts the PR as a candidate, never as idle. A body
   # jq cannot read at all is a failed query, counted like a gh failure — not
   # an empty list.
   if ! counts="$(printf '%s' "$raw" \
           | jq -r --arg pfx "$prefix" --arg merged "$TERMINAL_MERGED" --arg esc "$TERMINAL_ESCALATED" \
                   --arg rtm "$READY_TO_MERGE" --arg repo "$name" --argjson never "$never" \
-                  --argjson state "$log_state" '
+                  --argjson fixnever "$fix_never" --argjson state "$log_state" '
               def idle:
                 $never
                 and ([.labels[].name] | index($rtm)) != null
@@ -154,14 +220,118 @@ EOF
               [ .[]
                 | select($pfx == "" or $pfx == "null" or (.headRefName | startswith($pfx)))
                 | select([.labels[].name] | (index($merged) or index($esc)) | not)
-                | (try idle catch false)
-              ] | "\(map(select(. | not)) | length) \(map(select(.)) | length)"' 2>/dev/null)"; then
+                | if $fixnever and (.reviewDecision | type) != "string"
+                  then error("reviewDecision unreadable") else . end
+                | if $fixnever and .reviewDecision != "APPROVED" then "held"
+                  elif (try idle catch false) then "idle"
+                  elif $fixnever then
+                    (if (.number | type) == "number" and (.headRefOid | type) == "string"
+                        and (.headRefOid | test("^[0-9a-fA-F]{40}$"))
+                     then "\(.number) \(.headRefOid)" else error("unreadable PR identity") end)
+                  else "candidate" end
+              ]
+              | "\(map(select(. == "candidate")) | length) \(map(select(. == "idle")) | length) \(map(select(. == "held")) | length)",
+                (.[] | select(test("^[0-9]+ ")))' 2>/dev/null)"; then
     echo "precheck: unreadable gh pr list output for $name" >&2
     errors=$((errors + 1))
     continue
   fi
-  hits="${counts%% *}"
-  idle="${counts##* }"
+  summary="$(printf '%s\n' "$counts" | head -n 1)"
+  hits="${summary%% *}"
+  rest="${summary#* }"
+  idle="${rest%% *}"
+  held="${rest##* }"
+
+  # Approval-at-head check for fix_mode-never PRs (see the header). A failed
+  # read fails the repo's query unless another PR already fires. The first
+  # candidate decides the repo, so the loop stops there.
+  verify_failed=0
+  while read -r num sha; do
+    [ -n "$num" ] || continue
+    err="$(mktemp)"
+    if ! rows="$(gh api --paginate "repos/$name/pulls/$num/reviews?per_page=100" \
+            --jq '.[] | select(.state == "APPROVED") | [.commit_id, .user.login] | @tsv' \
+            2>"$err" </dev/null)" \
+       || ! at_head="$(printf '%s\n' "$rows" | jq -R -r --arg sha "$sha" --argjson bots "$REVIEW_BOTS" '
+              select(test("\\S")) | split("\t")
+              | select((.[0] | ascii_downcase) == ($sha | ascii_downcase))
+              | if (.[1] as $login | any($bots[]; ascii_downcase == ($login | ascii_downcase)))
+                then "bot" else "user \(.[1])" end' 2>/dev/null)"; then
+      echo "precheck: reviews read failed for $name#$num: $(cat "$err")" >&2
+      rm -f "$err"
+      verify_failed=1
+      continue
+    fi
+    # Approvals at head by review_bots[] count outright; any other approver
+    # counts only with write access. A failed permission read is a failed
+    # query; a login that is not a plain user login never counts.
+    counted=""
+    perm_failed=0
+    uncounted=""
+    if printf '%s\n' "$at_head" | grep -qx bot; then
+      counted=yes
+    else
+      while IFS= read -r login; do
+        [ -n "$login" ] || continue
+        case "$login" in
+          *[!A-Za-z0-9-]*) uncounted="$uncounted $login"; continue ;;
+        esac
+        if ! perm="$(gh api "repos/$name/collaborators/$login/permission" \
+                --jq '[.role_name // "", .permission // ""] | @tsv' 2>"$err" </dev/null)"; then
+          # A 403 can also be a (secondary) rate limit: that is transient.
+          if grep -q 'HTTP 40[34]' "$err" && ! grep -qi 'rate limit' "$err"; then
+            uncounted="$uncounted $login"
+          else
+            echo "precheck: permission read failed for $login on $name: $(cat "$err")" >&2
+            perm_failed=1
+          fi
+          continue
+        fi
+        role="$(printf '%s' "$perm" | cut -f1)"
+        legacy="$(printf '%s' "$perm" | cut -f2)"
+        case "$role" in admin|maintain|write) counted=yes; break ;; esac
+        case "$legacy" in admin|maintain|write) counted=yes; break ;; esac
+        uncounted="$uncounted $login"
+      done <<LOGINS
+$(printf '%s\n' "$at_head" | sed -n 's/^user //p' | sort -u)
+LOGINS
+    fi
+    if [ -z "$counted" ] && [ "$perm_failed" -gt 0 ]; then
+      rm -f "$err"
+      verify_failed=1
+      continue
+    fi
+    if [ -z "$counted" ] && [ -n "$uncounted" ]; then
+      echo "precheck: $name#$num: approval at head by${uncounted} does not count (not in review_bots[], write access not confirmed)" >&2
+    fi
+    if [ -n "$counted" ]; then
+      rm -f "$err"
+      hits=$((hits + 1))
+      break
+    fi
+    # Stale approval: held while the head is younger than stuck_hours.
+    if ! committed="$(gh api "repos/$name/commits/$sha" --jq '.commit.committer.date' 2>"$err" </dev/null)" \
+       || ! age_hours="$(jq -n -r --arg d "$committed" '(now - ($d | fromdateiso8601)) / 3600 | floor' 2>/dev/null)" \
+       || ! [ "$age_hours" -eq "$age_hours" ] 2>/dev/null; then
+      echo "precheck: head commit read failed for $name#$num: $(cat "$err")" >&2
+      rm -f "$err"
+      verify_failed=1
+      continue
+    fi
+    rm -f "$err"
+    if [ "$age_hours" -ge "$STUCK_HOURS" ]; then
+      echo "precheck: $name#$num approved, but no counted approval at head for ${age_hours}h (>= stuck_hours=$STUCK_HOURS); candidate for escalation"
+      hits=$((hits + 1))
+      break
+    fi
+    held=$((held + 1))
+  done <<VERIFY
+$(printf '%s\n' "$counts" | tail -n +2)
+VERIFY
+  if [ "$verify_failed" -gt 0 ] && [ "${hits:-0}" -eq 0 ]; then
+    errors=$((errors + 1))
+    continue
+  fi
 
   if [ "${hits:-0}" -gt 0 ]; then
     echo "precheck: $name has $hits candidate PR(s)"
@@ -169,6 +339,9 @@ EOF
   fi
   if [ "${idle:-0}" -gt 0 ]; then
     echo "precheck: $name has $idle idle PR(s) (ready-to-merge at an unchanged head, merge_mode=never)"
+  fi
+  if [ "${held:-0}" -gt 0 ]; then
+    echo "precheck: $name has $held PR(s) awaiting approval at head (fix_mode=never: review remediation is owned elsewhere)"
   fi
 done
 
