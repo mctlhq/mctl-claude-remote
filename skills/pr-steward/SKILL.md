@@ -152,10 +152,13 @@ approval dismissed mid-tick).
 
 `approved_at_head` = `reviewDecision == "APPROVED"` **and** at least one *counted*
 review with `state == "APPROVED"` whose `commit_id` is the current `head`. Counted =
-the reviewer's login is in `review_bots[]` (compare case-insensitively), or its
-`author_association` is `OWNER`. `MEMBER`/`COLLABORATOR` do not imply write access, so
-their approval must not pair with a stale counted one; a review bot's own review
-reports `NONE`, which is why `review_bots[]` must be set:
+the reviewer's login is in `review_bots[]` (compare case-insensitively), or the
+reviewer has write access — `gh api repos/$REPO/collaborators/<login>/permission --jq
+.permission` is `admin`, `maintain` or `write`. `author_association` is no proxy (a
+maintainer reports `MEMBER`, never `OWNER`, in an org repo, and `MEMBER`/`COLLABORATOR`
+do not imply write); a review bot's own review reports `NONE`, which is why
+`review_bots[]` must be set. A failed permission read means `approved_at_head` is
+unknown:
 ```sh
 gh api --paginate "repos/$REPO/pulls/<N>/reviews?per_page=100" \
   --jq '.[] | select(.state == "APPROVED") | [.commit_id, .user.login, .author_association] | @tsv'
@@ -175,14 +178,14 @@ no one):
   steward itself created in §8.2 whose `claude-review.yml` run never happened, in a repo
   **without** "dismiss stale approvals on push" (with it, the approval is dismissed and
   the PR is simply unapproved — see below). Nobody else is watching that state (the
-  shepherd is waiting on the same review), so it stays in steward scope. First check
-  that the review is not merely in flight: if a check run of the review workflow on
-  `<head>` is `queued`/`in_progress`, `action=wait reason=review-in-flight` and stop.
-  Otherwise `action=escalate reason=review-missing-at-head`, add
+  shepherd is waiting on the same review), so it stays in steward scope:
+  `action=escalate reason=review-missing-at-head`, add
   `${LP}:escalated` (idempotent), send ONE §9 `non-review` escalation ("approved at an
   older head, no review at `<head>` for `<n>`h"). Do not post `review_trigger`, do not
-  push. The precheck releases exactly this state as a candidate once the head is that
-  old, so this is the one tick it costs; a human removes `${LP}:escalated` to re-arm.
+  push, and do not wait instead: the precheck keeps releasing this state while the head
+  only gets older, so any `wait` here would re-pay a tick every interval. Escalating is
+  the one tick it costs. A review still queued after `stuck_hours` is escalated too —
+  the ping is the point; a human removes `${LP}:escalated` to re-arm once it lands.
 - Otherwise, if not `approved_at_head` (unapproved, empty/unreadable `reviewDecision`,
   a stale approval at a head younger than `stuck_hours`, or an unreadable reviews
   list): do **not** add or

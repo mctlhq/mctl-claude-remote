@@ -167,7 +167,8 @@ top level, as a default: `repo.fix_mode ?? fix_mode ?? "auto"`) may set
 findings on that entry's PRs. The steward then stays out of the remediation phase
 entirely. The pre-check makes such a PR a candidate only once its `reviewDecision`
 is `APPROVED` **and** a counted `APPROVED` review (a `review_bots[]` login, matched
-case-insensitively, or an `OWNER`) names its current head — a paginated REST reviews
+case-insensitively, or a reviewer with write access per
+`repos/<repo>/collaborators/<login>/permission`) names its current head — a paginated REST reviews
 request per such PR, stopping at the first candidate — so a stale approval that
 survived a shepherd push does not count, and no model run happens before that.
 `review_bots[]` must list the review bot: its own review reports

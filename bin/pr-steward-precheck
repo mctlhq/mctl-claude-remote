@@ -38,8 +38,10 @@
 # when a counted APPROVED review names its current head (a paginated reviews
 # request per such PR, plus a head-commit read for a stale one, after every
 # other filter, stopping at the first candidate). Counted = the reviewer's
-# login is in review_bots[] (case-insensitive) or its association is OWNER;
-# MEMBER/COLLABORATOR do not imply write access, so they do not anchor. A
+# login is in review_bots[] (case-insensitive), or the reviewer has write
+# access (repos/<repo>/collaborators/<login>/permission is admin, maintain or
+# write — author_association is no proxy: MEMBER/COLLABORATOR do not imply
+# write, and a maintainer is never OWNER in an org repo). A
 # stale approval (APPROVED survived, no counted approval at head — only
 # possible without dismiss-stale-approvals) holds the PR, but not forever:
 # once the head commit is older than stuck_hours (default 6) the PR becomes a
@@ -184,7 +186,7 @@ EOF
   # approval anchors a head only through review_bots[]. Without it every PR of
   # this entry is held, then escalated after stuck_hours — say so.
   if [ "$fix_never" = true ] && [ "$REVIEW_BOTS" = "[]" ]; then
-    echo "precheck: $name: fix_mode=never but review_bots is empty; only OWNER approvals can anchor a head" >&2
+    echo "precheck: $name: fix_mode=never but review_bots is empty; only write-access human approvals can anchor a head" >&2
   fi
 
   # --limit 200 without pagination: the precheck only needs ONE non-terminal,
@@ -242,18 +244,49 @@ EOF
     [ -n "$num" ] || continue
     err="$(mktemp)"
     if ! rows="$(gh api --paginate "repos/$name/pulls/$num/reviews?per_page=100" \
-            --jq '.[] | select(.state == "APPROVED") | [.commit_id, .user.login, .author_association] | @tsv' \
+            --jq '.[] | select(.state == "APPROVED") | [.commit_id, .user.login] | @tsv' \
             2>"$err" </dev/null)" \
-       || ! counted="$(printf '%s\n' "$rows" | jq -R -r --arg sha "$sha" --argjson bots "$REVIEW_BOTS" '
+       || ! at_head="$(printf '%s\n' "$rows" | jq -R -r --arg sha "$sha" --argjson bots "$REVIEW_BOTS" '
               select(test("\\S")) | split("\t")
               | select((.[0] | ascii_downcase) == ($sha | ascii_downcase))
-              | select(.[1] as $login | any($bots[]; ascii_downcase == ($login | ascii_downcase))
-                       or .[2] == "OWNER")
-              | .[0]' 2>/dev/null)"; then
+              | if (.[1] as $login | any($bots[]; ascii_downcase == ($login | ascii_downcase)))
+                then "bot" else "user \(.[1])" end' 2>/dev/null)"; then
       echo "precheck: reviews read failed for $name#$num: $(cat "$err")" >&2
       rm -f "$err"
       verify_failed=1
       continue
+    fi
+    # Approvals at head by review_bots[] count outright; any other approver
+    # counts only with write access. A failed permission read is a failed
+    # query; a login that is not a plain user login never counts.
+    counted=""
+    perm_failed=0
+    uncounted=""
+    if printf '%s\n' "$at_head" | grep -qx bot; then
+      counted=yes
+    else
+      for login in $(printf '%s\n' "$at_head" | sed -n 's/^user //p' | sort -u); do
+        case "$login" in
+          *[!A-Za-z0-9-]*) uncounted="$uncounted $login"; continue ;;
+        esac
+        if ! perm="$(gh api "repos/$name/collaborators/$login/permission" --jq '.permission' 2>"$err" </dev/null)"; then
+          echo "precheck: permission read failed for $login on $name: $(cat "$err")" >&2
+          perm_failed=1
+          continue
+        fi
+        case "$perm" in
+          admin|maintain|write) counted=yes; break ;;
+          *) uncounted="$uncounted $login" ;;
+        esac
+      done
+    fi
+    if [ -z "$counted" ] && [ "$perm_failed" -gt 0 ]; then
+      rm -f "$err"
+      verify_failed=1
+      continue
+    fi
+    if [ -z "$counted" ] && [ -n "$uncounted" ]; then
+      echo "precheck: $name#$num: approval at head by${uncounted} does not count (not in review_bots[], no write access)" >&2
     fi
     if [ -n "$counted" ]; then
       rm -f "$err"

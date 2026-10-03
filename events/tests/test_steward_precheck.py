@@ -125,6 +125,10 @@ class PrecheckTest(unittest.TestCase):
                      "author_association": association} for state, sha in other]
         self.reviews_path(number, repo).write_text(json.dumps(reviews))
 
+    def serve_permission(self, login, permission, repo=REPO):
+        (self.bodies / f"api_{repo.replace('/', '_')}_collaborators_{login}_permission.json").write_text(
+            json.dumps({"permission": permission}))
+
     def reviews_path(self, number=1492, repo=REPO):
         return self.bodies / f"api_{repo.replace('/', '_')}_pulls_{number}_reviews.json"
 
@@ -389,14 +393,16 @@ class PrecheckTest(unittest.TestCase):
             {"state": "APPROVED", "commit_id": HEAD_B, "user": {"login": "drive-by"}, "author_association": "CONTRIBUTOR"},
         ]
         self.reviews_path().write_text(json.dumps(reviews))
+        self.serve_permission("drive-by", "read")
         self.serve_commit(HEAD_B, hours_ago=1)
-        self.assertExit(1)
+        proc = self.assertExit(1)
+        self.assertIn("approval at head by drive-by does not count", proc.stderr)
 
     def test_fix_mode_never_counted_reviewers(self):
-        # review_bots[] (case-insensitive) or OWNER anchor a head.
+        # review_bots[] (case-insensitive) anchors a head without any
+        # permission read.
         for bots, login, association in ((["claude[bot]"], "claude[bot]", "NONE"),
-                                         (["Claude[bot]"], "claude[bot]", "NONE"),
-                                         (["claude[bot]"], "someone", "OWNER")):
+                                         (["Claude[bot]"], "claude[bot]", "NONE")):
             with self.subTest(bots=bots, login=login, association=association):
                 self.write_config(fix_mode="never")
                 cfg = json.loads(self.config.read_text())
@@ -406,15 +412,44 @@ class PrecheckTest(unittest.TestCase):
                 self.serve_reviews(approved=(HEAD_A,), login=login, association=association)
                 self.assertExit(0)
 
-    def test_fix_mode_never_member_or_collaborator_approval_does_not_anchor(self):
-        # Neither association implies write access to the repo.
-        for association in ("MEMBER", "COLLABORATOR", "CONTRIBUTOR", "NONE"):
-            with self.subTest(association=association):
+    def test_fix_mode_never_human_approval_counts_only_with_write_access(self):
+        # author_association is no proxy: a maintainer reports MEMBER.
+        for permission, code in (("admin", 0), ("maintain", 0), ("write", 0), ("triage", 1), ("read", 1),
+                                 ("none", 1)):
+            with self.subTest(permission=permission):
                 self.write_config(fix_mode="never")
                 self.serve([pr(labels=(), review="APPROVED")])
-                self.serve_reviews(approved=(HEAD_A,), login="someone", association=association)
+                self.serve_reviews(approved=(HEAD_A,), login="someone", association="MEMBER")
+                self.serve_permission("someone", permission)
                 self.serve_commit(HEAD_A, hours_ago=1)
-                self.assertExit(1)
+                self.assertExit(code)
+
+    def test_fix_mode_never_write_approval_at_old_head_is_a_candidate_not_stale(self):
+        # A human approval naming the current head is not "review missing",
+        # however old the head is.
+        self.write_config(fix_mode="never")
+        self.serve([pr(labels=(), review="APPROVED")])
+        self.serve_reviews(approved=(HEAD_A,), login="someone", association="MEMBER")
+        self.serve_permission("someone", "write")
+        self.serve_commit(HEAD_A, hours_ago=30)
+        proc = self.assertExit(0)
+        self.assertNotIn("candidate for escalation", proc.stdout)
+
+    def test_fix_mode_never_failed_permission_read_is_a_failed_query(self):
+        self.write_config(fix_mode="never")
+        self.serve([pr(labels=(), review="APPROVED")])
+        self.serve_reviews(approved=(HEAD_A,), login="someone", association="MEMBER")
+        self.serve_commit(HEAD_A, hours_ago=1)
+        proc = self.assertExit(2)
+        self.assertIn("permission read failed", proc.stderr)
+
+    def test_fix_mode_never_odd_login_never_counts_and_is_not_queried(self):
+        self.write_config(fix_mode="never")
+        self.serve([pr(labels=(), review="APPROVED")])
+        self.serve_reviews(approved=(HEAD_A,), login="other[bot]", association="NONE")
+        self.serve_commit(HEAD_A, hours_ago=1)
+        self.assertExit(1)
+        self.assertFalse(any("permission" in c for c in self.api_calls()))
 
     def test_fix_mode_never_without_review_bots_warns(self):
         self.write_config(fix_mode="never")
