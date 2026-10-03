@@ -168,8 +168,10 @@ findings on that entry's PRs. The steward then stays out of the remediation phas
 entirely. The pre-check makes such a PR a candidate only once its `reviewDecision`
 is `APPROVED` **and** a counted `APPROVED` review (a `review_bots[]` login, matched
 case-insensitively, or a reviewer with write access per
-`repos/<repo>/collaborators/<login>/permission`) names its current head — a paginated REST reviews
-request per such PR, stopping at the first candidate — so a stale approval that
+`repos/<repo>/collaborators/<login>/permission`) names its current head — per such PR a paginated REST reviews request,
+a permission read per distinct non-bot approver at head and, when nothing counts, a
+head-commit read, stopping at the first candidate (a 403/404 permission read means
+that reviewer does not count) — so a stale approval that
 survived a shepherd push does not count, and no model run happens before that.
 `review_bots[]` must list the review bot: its own review reports
 `author_association: NONE` (the pre-check warns when it is empty). A stale approval

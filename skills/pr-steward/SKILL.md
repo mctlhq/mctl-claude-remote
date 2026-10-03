@@ -153,15 +153,17 @@ approval dismissed mid-tick).
 `approved_at_head` = `reviewDecision == "APPROVED"` **and** at least one *counted*
 review with `state == "APPROVED"` whose `commit_id` is the current `head`. Counted =
 the reviewer's login is in `review_bots[]` (compare case-insensitively), or the
-reviewer has write access — `gh api repos/$REPO/collaborators/<login>/permission --jq
-.permission` is `admin`, `maintain` or `write`. `author_association` is no proxy (a
-maintainer reports `MEMBER`, never `OWNER`, in an org repo, and `MEMBER`/`COLLABORATOR`
-do not imply write); a review bot's own review reports `NONE`, which is why
-`review_bots[]` must be set. A failed permission read means `approved_at_head` is
-unknown:
+reviewer has write access — `role_name` or the legacy `permission` (which folds
+`maintain` into `write`) is `admin`, `maintain` or `write`. `author_association` is no
+proxy (a maintainer reports `MEMBER`, never `OWNER`, in an org repo, and
+`MEMBER`/`COLLABORATOR` do not imply write); a review bot's own review reports `NONE`,
+which is why `review_bots[]` must be set. A 403/404 on the permission read means that
+reviewer does not count; any other failure means `approved_at_head` is unknown:
 ```sh
 gh api --paginate "repos/$REPO/pulls/<N>/reviews?per_page=100" \
-  --jq '.[] | select(.state == "APPROVED") | [.commit_id, .user.login, .author_association] | @tsv'
+  --jq '.[] | select(.state == "APPROVED") | [.commit_id, .user.login] | @tsv'
+# for each non-bot login approving <head>:
+gh api "repos/$REPO/collaborators/<login>/permission" --jq '[.role_name, .permission] | @tsv'
 ```
 `reviewDecision` alone is not head-anchored: without "dismiss stale approvals on push"
 an approval of an older head survives a shepherd fix push, and the steward would then

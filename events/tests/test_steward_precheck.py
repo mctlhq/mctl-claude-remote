@@ -73,7 +73,8 @@ class PrecheckTest(unittest.TestCase):
             '  done\n'
             '  key="$(printf "%s" "${path#repos/}" | tr / _)"\n'
             f'  body="{self.bodies}/api_$key.json"\n'
-            '  [ -f "$body" ] || { echo "HTTP 404: Not Found" >&2; exit 1; }\n'
+            '  [ -f "$body.err" ] && { cat "$body.err" >&2; exit 1; }\n'
+            '  [ -f "$body" ] || { echo "gh: Not Found (HTTP 404)" >&2; exit 1; }\n'
             '  jq -r "$expr" "$body" || exit 1\n'
             '  exit 0\n'
             'fi\n'
@@ -125,9 +126,15 @@ class PrecheckTest(unittest.TestCase):
                      "author_association": association} for state, sha in other]
         self.reviews_path(number, repo).write_text(json.dumps(reviews))
 
-    def serve_permission(self, login, permission, repo=REPO):
-        (self.bodies / f"api_{repo.replace('/', '_')}_collaborators_{login}_permission.json").write_text(
-            json.dumps({"permission": permission}))
+    def serve_permission(self, login, role, repo=REPO, error=None):
+        # GitHub's legacy .permission folds maintain into write and triage
+        # into read; role_name carries the real role.
+        legacy = {"maintain": "write", "triage": "read"}.get(role, role)
+        path = self.bodies / f"api_{repo.replace('/', '_')}_collaborators_{login}_permission.json"
+        if error is not None:
+            Path(str(path) + ".err").write_text(error + "\n")
+            return
+        path.write_text(json.dumps({"permission": legacy, "role_name": role}))
 
     def reviews_path(self, number=1492, repo=REPO):
         return self.bodies / f"api_{repo.replace('/', '_')}_pulls_{number}_reviews.json"
@@ -435,13 +442,31 @@ class PrecheckTest(unittest.TestCase):
         proc = self.assertExit(0)
         self.assertNotIn("candidate for escalation", proc.stdout)
 
-    def test_fix_mode_never_failed_permission_read_is_a_failed_query(self):
+    def test_fix_mode_never_transient_permission_read_failure_is_a_failed_query(self):
         self.write_config(fix_mode="never")
         self.serve([pr(labels=(), review="APPROVED")])
         self.serve_reviews(approved=(HEAD_A,), login="someone", association="MEMBER")
+        self.serve_permission("someone", None, error="gh: Server Error (HTTP 502)")
         self.serve_commit(HEAD_A, hours_ago=1)
         proc = self.assertExit(2)
         self.assertIn("permission read failed", proc.stderr)
+
+    def test_fix_mode_never_permission_denied_or_missing_does_not_count_and_is_not_silent(self):
+        # 403/404 is a definitive answer about one reviewer: the approval does
+        # not count, the PR is held, and after stuck_hours it is released for
+        # the review-missing-at-head escalation instead of exit 2 forever.
+        for error in ("gh: Resource not accessible by integration (HTTP 403)", "gh: Not Found (HTTP 404)"):
+            for hours, code in ((1, 1), (7, 0)):
+                with self.subTest(error=error, hours=hours):
+                    for f in self.bodies.glob("api_*collaborators*"):
+                        f.unlink()
+                    self.write_config(fix_mode="never")
+                    self.serve([pr(labels=(), review="APPROVED")])
+                    self.serve_reviews(approved=(HEAD_A,), login="someone", association="MEMBER")
+                    self.serve_permission("someone", None, error=error)
+                    self.serve_commit(HEAD_A, hours_ago=hours)
+                    proc = self.assertExit(code)
+                    self.assertNotIn("permission read failed", proc.stderr)
 
     def test_fix_mode_never_odd_login_never_counts_and_is_not_queried(self):
         self.write_config(fix_mode="never")

@@ -35,13 +35,18 @@
 # read meaning "not approved": the PR waits, as the steward could not merge it.
 # APPROVED is also head-anchored: without "dismiss stale approvals on push" an
 # approval survives a shepherd fix push, so an approved PR is a candidate only
-# when a counted APPROVED review names its current head (a paginated reviews
-# request per such PR, plus a head-commit read for a stale one, after every
-# other filter, stopping at the first candidate). Counted = the reviewer's
-# login is in review_bots[] (case-insensitive), or the reviewer has write
-# access (repos/<repo>/collaborators/<login>/permission is admin, maintain or
-# write — author_association is no proxy: MEMBER/COLLABORATOR do not imply
-# write, and a maintainer is never OWNER in an org repo). A
+# when a counted APPROVED review names its current head. Cost per such PR,
+# only after every other filter and stopping at the first candidate: one
+# paginated reviews request, plus one permission read per distinct non-bot
+# approver at head, plus one head-commit read when no approval counts.
+# Counted = the reviewer's login is in review_bots[] (case-insensitive), or
+# the reviewer has write access (repos/<repo>/collaborators/<login>/permission
+# role_name or legacy permission is admin, maintain or write —
+# author_association is no proxy: MEMBER/COLLABORATOR do not imply write, and
+# a maintainer is never OWNER in an org repo). A 403/404 on that read is a
+# definitive "does not count" for that reviewer (the PR falls to the stale
+# path below and is escalated, never silently blocked); any other failure is a
+# failed query. A
 # stale approval (APPROVED survived, no counted approval at head — only
 # possible without dismiss-stale-approvals) holds the PR, but not forever:
 # once the head commit is older than stuck_hours (default 6) the PR becomes a
@@ -265,20 +270,29 @@ EOF
     if printf '%s\n' "$at_head" | grep -qx bot; then
       counted=yes
     else
-      for login in $(printf '%s\n' "$at_head" | sed -n 's/^user //p' | sort -u); do
+      while IFS= read -r login; do
+        [ -n "$login" ] || continue
         case "$login" in
           *[!A-Za-z0-9-]*) uncounted="$uncounted $login"; continue ;;
         esac
-        if ! perm="$(gh api "repos/$name/collaborators/$login/permission" --jq '.permission' 2>"$err" </dev/null)"; then
-          echo "precheck: permission read failed for $login on $name: $(cat "$err")" >&2
-          perm_failed=1
+        if ! perm="$(gh api "repos/$name/collaborators/$login/permission" \
+                --jq '[.role_name // "", .permission // ""] | @tsv' 2>"$err" </dev/null)"; then
+          if grep -q 'HTTP 40[34]' "$err"; then
+            uncounted="$uncounted $login"
+          else
+            echo "precheck: permission read failed for $login on $name: $(cat "$err")" >&2
+            perm_failed=1
+          fi
           continue
         fi
-        case "$perm" in
-          admin|maintain|write) counted=yes; break ;;
-          *) uncounted="$uncounted $login" ;;
-        esac
-      done
+        role="$(printf '%s' "$perm" | cut -f1)"
+        legacy="$(printf '%s' "$perm" | cut -f2)"
+        case "$role" in admin|maintain|write) counted=yes; break ;; esac
+        case "$legacy" in admin|maintain|write) counted=yes; break ;; esac
+        uncounted="$uncounted $login"
+      done <<LOGINS
+$(printf '%s\n' "$at_head" | sed -n 's/^user //p' | sort -u)
+LOGINS
     fi
     if [ -z "$counted" ] && [ "$perm_failed" -gt 0 ]; then
       rm -f "$err"
