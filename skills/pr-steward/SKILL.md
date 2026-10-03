@@ -145,33 +145,49 @@ any PR carrying `${LP}:owned` as in scope even if the filter would otherwise mis
 Invariant: for one PR head in its review-remediation phase there is exactly **one**
 mutation owner. In a repo entry whose effective `fix_mode` is `never` (explicit, or an
 unrecognized value per §1), that owner is the DevLoop shepherd, not the steward.
-`bin/pr-steward-precheck` already holds such PRs back until `reviewDecision ==
-"APPROVED"`, so normally the model never runs for them; this section is the backstop
-for a tick that runs anyway (another PR fired it, a manual tick, an approval dismissed
-mid-tick).
+`bin/pr-steward-precheck` already holds such PRs back until they are
+`approved_at_head` (below), so normally the model never runs for them; this section is
+the backstop for a tick that runs anyway (another PR fired it, a manual tick, an
+approval dismissed mid-tick).
+
+`approved_at_head` = `reviewDecision == "APPROVED"` **and** at least one review with
+`state == "APPROVED"` whose `commit_id` is the current `head`:
+```sh
+gh api --paginate "repos/$REPO/pulls/<N>/reviews?per_page=100" \
+  --jq '.[] | select(.state == "APPROVED") | .commit_id'
+```
+`reviewDecision` alone is not head-anchored: without "dismiss stale approvals on push"
+an approval of an older head survives a shepherd fix push, and the steward would then
+treat code no reviewer saw as approved. If the reviews read fails, `approved_at_head`
+is unknown — treat it as false (never merge on it).
 
 For each such PR, after the draft check and before any mutation (the §5 `drop` row for
 a PR merged or closed externally still applies — cleaning labels off a closed PR races
 no one):
-- If `reviewDecision != "APPROVED"` (including empty/unreadable): do **not** add or
+- If not `approved_at_head` (unapproved, empty/unreadable `reviewDecision`, a stale
+  approval of an older head, or an unreadable reviews list): do **not** add or
   remove any `${LP}:*` label (not even `${LP}:owned`), do not post `review_trigger`, do
   not clone, edit, commit or push, do not run §7. Log
   `action=wait reason=fix-owned-by-shepherd head_sha=<head>` and move on to the next PR.
-  The precheck holds unapproved PRs, so this does not repeat as paid ticks.
-- If `reviewDecision == "APPROVED"` **but** the review at the current `head` (§6,
-  read-only) shows P1/P2 findings — a stale approval in a repo without "dismiss stale
-  approvals on push", or a human approval over open findings: do not fix, push or post
-  `review_trigger` either. The precheck keeps an approved PR a candidate, so a `wait`
+  The precheck holds such PRs, so this does not repeat as paid ticks.
+- If `approved_at_head` **but** the review at the current `head` (§6, read-only) shows
+  P1/P2 findings — someone approved this very head over open findings: do not fix, push
+  or post `review_trigger` either. The precheck keeps an approved PR a candidate, so a `wait`
   here would repeat a paid tick forever; terminate instead, like the max-attempt path:
   `action=escalate reason=approved-with-findings`, add `${LP}:escalated` (idempotent),
   send ONE §9 `non-review` escalation ("approved with P1/P2 at `<head>`; remediation is
-  owned by the shepherd"). A human removes `${LP}:escalated` once the head is clean.
+  owned by the shepherd"). A human removes `${LP}:escalated` to re-arm the steward.
+  A stale approval never lands here (it is not `approved_at_head`), so an ordinary
+  shepherd fix cycle is not parked by this escalation.
 - Never post `review_trigger` for such a PR, even once approved: the shepherd owns the
   review loop, and a manual trigger starts a redundant paid review. Watching the review
   read-only via codex-watch is fine. When no review result exists at the current head,
-  `approved` (head-anchored by "dismiss stale approvals on push", §5) is the verdict:
-  the review bot approves only with no P1/P2.
-- Once `APPROVED` with no P1/P2 at head, continue with §4/§5 as usual: ownership label,
+  `approved_at_head` is the verdict — an approval that names this exact head, and the
+  review bot approves only with no P1/P2. Plain `reviewDecision == "APPROVED"` is never
+  enough for such a PR.
+- Once `approved_at_head` with no P1/P2 at head, continue with §4/§5 as usual, with
+  `approved` read as `approved_at_head` everywhere for this PR (including the §8
+  re-verify right before `gh pr merge`): ownership label,
   §8 merge / ready-to-merge, §8.2 update-branch and §8.3 bot-thread resolution are
   unchanged. The P1/P2 row of §5 never leads to §7 for such a PR — it leads to the
   escalation above (approved) or the wait (not approved).
@@ -184,7 +200,7 @@ Stalled remediation of an unapproved PR (the shepherd never pushes a fix, the re
 never approves) is out of steward scope: the precheck holds the PR, so the §9
 `stuck_hours` check never runs for it, and the shepherd's own DevLoop monitoring owns
 that alert. The precheck reports held PRs in the scheduler log (`N PR(s) awaiting
-approval`).
+approval at head`).
 
 Entries whose effective `fix_mode` is `"auto"` (absent everywhere, or set to it) — e.g.
 `claude/*` and `fix/*` repos — are untouched by this section.
@@ -312,8 +328,8 @@ Per PR, per tick:
      caveat (a `- [ ]` / "View job run" body means the review is still running → treat
      as `awaiting-review`).
    - `status=timeout` → the reviewer never responded. Effective `fix_mode: never`:
-     no re-post and no `${LP}:reposted`; take `approved` as the verdict (§4.1) and
-     continue with §5 — the PR only got this far because it is `APPROVED`.
+     no re-post and no `${LP}:reposted`; take `approved_at_head` as the verdict (§4.1)
+     and continue with §5 — if it is false, wait per §4.1 (the precheck holds the PR).
      Otherwise, for a comment-driven reviewer and if `${LP}:reposted` is absent: re-post `review_trigger`, relaunch the watcher,
      add `${LP}:reposted`, `action=wait reason=review-timeout-reposted`. For an
      Action-based reviewer a repost will NOT schedule a run (only a new push does), so a

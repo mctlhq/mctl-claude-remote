@@ -165,19 +165,23 @@ escalate-only (`never`). The effective values for a PR are
 top level, as a default: `repo.fix_mode ?? fix_mode ?? "auto"`) may set
 `"fix_mode": "never"` when another actor — e.g. the DevLoop shepherd — fixes review
 findings on that entry's PRs. The steward then stays out of the remediation phase
-entirely: the pre-check makes such a PR a candidate only once its `reviewDecision`
-is `APPROVED` (so no model run happens before that), and the skill never labels,
-clones, pushes or posts the review trigger for an unapproved PR or one with P1/P2
-at head (it logs `action=wait reason=fix-owned-by-shepherd`; an approved PR with
-P1/P2 at head is escalated once with `reason=approved-with-findings` rather than
-re-ticked forever). Once approved, the
-merge path — §8 merge / ready-to-merge, update-branch, bot-thread resolution — is
-unchanged. `"auto"` or no key anywhere keeps today's behaviour. An unrecognized value is
-treated as `"never"` with a warning. An in-scope PR object whose `reviewDecision` is
-missing or not a string makes that repo's query a failed one (exit 2 when every repo fails),
-never "nothing to do"; an empty `reviewDecision` (no review required, or none yet)
-means "not approved". `reviewDecision` is readable by the App installation token
-in `gh pr list` (unlike `statusCheckRollup`).
+entirely. The pre-check makes such a PR a candidate only once its `reviewDecision`
+is `APPROVED` **and** an `APPROVED` review names its current head (one REST reviews
+call per such PR, so a stale approval that survived a shepherd push does not
+count), so no model run happens before that. The skill never labels, clones,
+pushes or posts the review trigger for a PR that is not approved at its head (it
+logs `action=wait reason=fix-owned-by-shepherd`); a PR approved at its head while
+P1/P2 findings are open there is escalated once
+(`action=escalate reason=approved-with-findings`) rather than re-ticked forever.
+Once approved at head, the merge path — §8 merge / ready-to-merge, update-branch,
+bot-thread resolution — is unchanged. `"auto"` or no key anywhere keeps today's
+behaviour. An unrecognized or non-string value (including `false`) is treated as
+`"never"` with a warning. An in-scope PR object whose `reviewDecision` is missing
+or not a string, or a failed or unparsable reviews read, makes that repo's query a
+failed one (exit 2 when no repo has a candidate), never "nothing to do"; an empty
+`reviewDecision` (no review required, or none yet) means "not approved". Both
+`reviewDecision` in `gh pr list` (unlike `statusCheckRollup`) and the REST reviews
+list are readable by the App installation token.
 
 **Kill switch:** the automation is inert unless `PR_STEWARD_ENABLED=true`. Set it
 to anything else (or leave it unset) and the container is a plain remote-control

@@ -59,9 +59,23 @@ class PrecheckTest(unittest.TestCase):
         fake = bindir / "gh"
         # Serves bodies/<owner>_<repo>.json for `gh pr list -R owner/repo ...`;
         # no body = a failed query. Records argv for the --json assertion.
+        # `gh api [--paginate] repos/<o>/<r>/pulls/<n>/reviews?... --jq EXPR`
+        # serves bodies/reviews_<o>_<r>_<n>.json through the real jq.
         fake.write_text(
             "#!/bin/sh\n"
             f'printf "%s\\n" "$*" >> "{self.root}/argv"\n'
+            'if [ "$1" = api ]; then\n'
+            '  path=""; expr="."; prev=""\n'
+            '  for a in "$@"; do\n'
+            '    case "$a" in repos/*) path="${a%%\\?*}" ;; esac\n'
+            '    [ "$prev" = "--jq" ] && expr="$a"; prev="$a"\n'
+            '  done\n'
+            '  key="$(printf "%s" "$path" | sed -e "s#^repos/##" -e "s#/pulls/#_#" -e "s#/reviews\\$##" | tr / _)"\n'
+            f'  body="{self.bodies}/reviews_$key.json"\n'
+            '  [ -f "$body" ] || { echo "HTTP 404: Not Found" >&2; exit 1; }\n'
+            '  jq -r "$expr" "$body" || exit 1\n'
+            '  exit 0\n'
+            'fi\n'
             'repo=""; prev=""\n'
             'for a in "$@"; do [ "$prev" = "-R" ] && repo="$a"; prev="$a"; done\n'
             f'body="{self.bodies}/$(printf "%s" "$repo" | tr / _).json"\n'
@@ -101,6 +115,15 @@ class PrecheckTest(unittest.TestCase):
 
     def serve(self, prs, repo=REPO):
         (self.bodies / (repo.replace("/", "_") + ".json")).write_text(json.dumps(prs))
+
+    def serve_reviews(self, number=1492, approved=(HEAD_A,), other=(), repo=REPO):
+        reviews = [{"state": "APPROVED", "commit_id": sha} for sha in approved]
+        reviews += [{"state": state, "commit_id": sha} for state, sha in other]
+        (self.bodies / f"reviews_{repo.replace('/', '_')}_{number}.json").write_text(json.dumps(reviews))
+
+    def api_calls(self):
+        argv = self.root / "argv"
+        return [c for c in argv.read_text().splitlines() if c.startswith("api ")] if argv.exists() else []
 
     def write_log(self, *lines):
         self.log.write_text("".join(line + "\n" for line in lines))
@@ -299,12 +322,58 @@ class PrecheckTest(unittest.TestCase):
     def test_fix_mode_never_approved_pr_is_a_candidate(self):
         self.write_config(fix_mode="never")
         self.serve([pr(labels=(), review="APPROVED")])
+        self.serve_reviews(approved=(HEAD_A,))
         self.write_log()
         self.assertExit(0)
+        self.assertEqual(len(self.api_calls()), 1)
+
+    def test_fix_mode_never_stale_approval_is_held(self):
+        # Without dismiss-stale-approvals an approval of an older head
+        # survives a shepherd push: reviewDecision says APPROVED, but no
+        # reviewer saw the current head.
+        self.write_config(fix_mode="never")
+        self.serve([pr(labels=(), review="APPROVED", head=HEAD_B)])
+        self.serve_reviews(approved=(HEAD_A,), other=(("COMMENTED", HEAD_B),))
+        self.write_log()
+        proc = self.assertExit(1)
+        self.assertIn("1 PR(s) awaiting approval at head", proc.stdout)
+
+    def test_fix_mode_never_failed_reviews_read_is_a_failed_query(self):
+        self.write_config(fix_mode="never")
+        self.serve([pr(labels=(), review="APPROVED")])
+        self.write_log()
+        proc = self.assertExit(2)
+        self.assertIn("gh api reviews failed", proc.stderr)
+
+    def test_fix_mode_never_unparsable_reviews_body_is_a_failed_query(self):
+        self.write_config(fix_mode="never")
+        self.serve([pr(labels=(), review="APPROVED")])
+        (self.bodies / f"reviews_{REPO.replace('/', '_')}_1492.json").write_text("<html>oops</html>")
+        self.write_log()
+        self.assertExit(2)
+
+    def test_fix_mode_never_failed_reviews_read_does_not_mask_another_candidate(self):
+        self.write_config(fix_mode="never")
+        self.serve([pr(number=1, labels=(), review="APPROVED"), pr(number=2, labels=(), review="APPROVED")])
+        self.serve_reviews(number=2, approved=(HEAD_A,))
+        self.assertExit(0)
+
+    def test_fix_mode_auto_never_reads_reviews(self):
+        self.serve([pr(labels=(), review="APPROVED")])
+        self.assertExit(0)
+        self.assertEqual(self.api_calls(), [])
+
+    def test_fix_mode_never_idle_pr_needs_no_reviews_read(self):
+        self.write_config(fix_mode="never")
+        self.serve([pr(review="APPROVED")])
+        self.write_log(entry())
+        self.assertExit(1)
+        self.assertEqual(self.api_calls(), [])
 
     def test_fix_mode_never_one_approved_pr_among_held_ones_fires(self):
         self.write_config(fix_mode="never")
         self.serve([pr(number=1, labels=(), review="REVIEW_REQUIRED"), pr(number=2, labels=(), review="APPROVED")])
+        self.serve_reviews(number=2, approved=(HEAD_A,))
         proc = self.assertExit(0)
         self.assertIn("1 candidate PR(s)", proc.stdout)
 
@@ -343,6 +412,7 @@ class PrecheckTest(unittest.TestCase):
         proc = self.assertExit(1)
         self.assertIn("unrecognized fix_mode 'sometimes'", proc.stderr)
         self.serve([pr(labels=(), review="APPROVED")])
+        self.serve_reviews(approved=(HEAD_A,))
         self.assertExit(0)
 
     def test_fix_mode_never_unreadable_review_decision_is_a_failed_query(self):
@@ -376,6 +446,19 @@ class PrecheckTest(unittest.TestCase):
         proc = self.assertExit(1)
         self.assertIn("unrecognized fix_mode 'sometimes'", proc.stderr)
 
+    def test_non_string_fix_mode_fails_closed(self):
+        # jq's // would read false as absent ("auto"): fixing handed back.
+        for where in ("top", "repo"):
+            for value in (False, None, 0):
+                with self.subTest(where=where, value=value):
+                    self.write_config()
+                    cfg = json.loads(self.config.read_text())
+                    (cfg if where == "top" else cfg["repos"][0])["fix_mode"] = value
+                    self.config.write_text(json.dumps(cfg))
+                    self.serve([pr(labels=(), review="REVIEW_REQUIRED")])
+                    proc = self.assertExit(1)
+                    self.assertIn("unrecognized fix_mode", proc.stderr)
+
     def test_out_of_scope_pr_with_unreadable_review_decision_does_not_fail_the_repo(self):
         self.write_config(fix_mode="never")
         stray = pr(number=5, labels=(), branch="dependabot/x")
@@ -383,6 +466,7 @@ class PrecheckTest(unittest.TestCase):
         terminal = pr(number=6, labels=("steward:merged",))
         del terminal["reviewDecision"]
         self.serve([stray, terminal, pr(number=7, labels=(), review="APPROVED")])
+        self.serve_reviews(number=7, approved=(HEAD_A,))
         self.assertExit(0)
 
     def test_fix_mode_never_failed_query_is_broken_not_idle(self):
@@ -412,6 +496,7 @@ class PrecheckTest(unittest.TestCase):
         # it supersedes an earlier ready-to-merge decision, never creates one.
         self.write_config(fix_mode="never")
         self.serve([pr(review="APPROVED")])
+        self.serve_reviews(approved=(HEAD_A,))
         self.write_log(entry(), entry(action="wait", result="", reason="fix-owned-by-shepherd"))
         self.assertExit(0)
 
