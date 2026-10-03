@@ -36,10 +36,11 @@ def pr(number=1492, head=HEAD_A, labels=("steward:owned", "steward:ready-to-merg
     }
 
 
-def entry(pr_number=1492, head=HEAD_A, action="ready-to-merge", result="escalated", repo=REPO, **extra):
+def entry(pr_number=1492, head=HEAD_A, action="ready-to-merge", result="labeled", reason="clean-green",
+          repo=REPO, **extra):
     return json.dumps({
         "ts": "2026-10-02T21:29:32Z", "tick_id": "20261002T212932Z", "repo": repo, "pr": pr_number,
-        "head_sha": head, "action": action, "result": result, "reason": "merge_mode=never", **extra,
+        "head_sha": head, "action": action, "result": result, "reason": reason, **extra,
     })
 
 
@@ -120,15 +121,34 @@ class PrecheckTest(unittest.TestCase):
         proc = self.assertExit(1)
         self.assertIn("1 idle PR(s)", proc.stdout)
 
-    def test_already_labeled_wait_entry_counts_as_the_decision(self):
-        # The shape production ticks wrote on the no-op re-evaluation.
+    def test_already_labeled_re_evaluation_keeps_the_pr_idle(self):
         self.serve([pr()])
-        self.write_log(entry(), entry(action="wait", result="ready-to-merge-already-labeled"))
+        self.write_log(entry(), entry(result="already-labeled"))
         self.assertExit(1)
 
-    def test_short_logged_sha_matches_the_full_head(self):
+    def test_behind_or_blocked_never_path_keeps_ticking(self):
+        # Skill §5: behind/blocked in a never repo also labels ready-to-merge,
+        # but BEHIND -> DIRTY or a check going red happens at an unchanged
+        # head, so its escalate entry must not idle the PR.
+        for reason in ("behind", "blocked"):
+            with self.subTest(reason=reason):
+                self.serve([pr()])
+                self.write_log(entry(action="escalate", result="escalated", reason=reason))
+                self.assertExit(0)
+
+    def test_ready_to_merge_entry_without_clean_green_reason_keeps_ticking(self):
+        # Pre-contract production shapes, e.g. mctl-gitops#1492's ticks: the
+        # entry cannot be told apart from the behind/blocked path.
+        for kwargs in ({"result": "escalated", "reason": "merge_mode=never"},
+                       {"action": "wait", "result": "ready-to-merge-already-labeled", "reason": ""}):
+            with self.subTest(**kwargs):
+                self.serve([pr()])
+                self.write_log(entry(**kwargs))
+                self.assertExit(0)
+
+    def test_twelve_char_logged_sha_matches_the_full_head(self):
         self.serve([pr()])
-        self.write_log(entry(head=HEAD_A[:7]))
+        self.write_log(entry(head=HEAD_A[:12]))
         self.assertExit(1)
 
     def test_new_head_makes_the_pr_eligible_again(self):
@@ -203,7 +223,8 @@ class PrecheckTest(unittest.TestCase):
         self.write_config(top_mode="never", repo_mode="sometimes")
         self.serve([pr()])
         self.write_log(entry())
-        self.assertExit(0)
+        proc = self.assertExit(0)
+        self.assertIn("unrecognized merge_mode 'sometimes'", proc.stderr)
 
     # --- fail-safe: unknown is never idle ------------------------------------
 
@@ -242,7 +263,7 @@ class PrecheckTest(unittest.TestCase):
         self.assertExit(0)
 
     def test_missing_or_garbled_logged_sha_is_a_candidate(self):
-        for head in ("", "not-a-sha", "abc", None):
+        for head in ("", "not-a-sha", "abc", HEAD_A[:7], HEAD_A[:11], None):
             with self.subTest(head=head):
                 self.serve([pr()])
                 self.write_log(entry(head=head))

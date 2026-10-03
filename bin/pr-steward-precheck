@@ -40,7 +40,11 @@ DEFAULT_MERGE_MODE="$(jq -r '.merge_mode // "never"' "$CONFIG")"
 
 # Latest steward entry per PR, from the structured log the skill writes. Built
 # once per run; keys are "<owner/repo lowercased>#<pr>". The value says whether
-# that latest entry recorded the ready-to-merge decision and at which head. A
+# that latest entry recorded the clean+green ready-to-merge decision (skill §8:
+# action=ready-to-merge reason=clean-green) and at which head. Only that exact
+# shape counts: the skill's behind/blocked never-path also labels
+# ready-to-merge but logs action=escalate, because its mergeability can change
+# (BEHIND -> DIRTY, a check going red) without the head moving. A
 # line that is not a JSON object cannot be attributed to a PR, so it resets
 # every PR seen before it to "unknown": a corrupt write after a PR's
 # ready-to-merge entry must not let that older entry stand as the latest.
@@ -61,8 +65,7 @@ if [ -n "$STEWARD_LOG" ] && [ -r "$STEWARD_LOG" ]; then
             elif ($e.repo | type) == "string"
                  and (($e.pr | tostring) | test("^[0-9]+$")) then
               .[($e.repo | ascii_downcase) + "#" + ($e.pr | tostring)] = {
-                rtm: ($e.action == "ready-to-merge"
-                      or $e.result == "ready-to-merge-already-labeled"),
+                rtm: ($e.action == "ready-to-merge" and $e.reason == "clean-green"),
                 sha: (if ($e.head_sha | type) == "string" then $e.head_sha else "" end)
               }
             else . end)' 2>/dev/null)" || log_state='{}'
@@ -119,7 +122,14 @@ EOF
   # "when-green" PRs also get ready-to-merge while awaiting approval, and an
   # approval does not move the head, so they must keep ticking. An
   # unrecognized value is treated as unknown: the PR stays a candidate.
-  if [ "$merge_mode" = "never" ]; then never=true; else never=false; fi
+  # The skill would run an unrecognized value as "never" (with a warning); say
+  # so here too, since such a repo keeps paying for no-op ticks until fixed.
+  case "$merge_mode" in
+    never)      never=true ;;
+    when-green) never=false ;;
+    *)          never=false
+                echo "precheck: $name: unrecognized merge_mode '$merge_mode'; not skipping idle ready-to-merge PRs" >&2 ;;
+  esac
 
   # --limit 200 without pagination: the precheck only needs ONE non-terminal,
   # non-idle in-scope PR, so this is wrong only in the unlikely case where all
@@ -137,7 +147,7 @@ EOF
                 and ([.labels[].name] | index($rtm)) != null
                 and ($state[($repo | ascii_downcase) + "#" + (.number | tostring)] as $s
                      | $s != null and $s.rtm == true
-                       and ($s.sha | ascii_downcase | test("^[0-9a-f]{7,40}$"))
+                       and ($s.sha | ascii_downcase | test("^[0-9a-f]{12,40}$"))
                        and (.headRefOid | type) == "string"
                        and (.headRefOid | ascii_downcase | test("^[0-9a-f]{40}$"))
                        and (.headRefOid | ascii_downcase | startswith($s.sha | ascii_downcase)));

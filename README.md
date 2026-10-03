@@ -130,7 +130,8 @@ already-minted App token, and the model run is spawned **only** when an in-scope
 PR is not yet in a terminal `<label_prefix>:merged` / `<label_prefix>:escalated`
 state. In a repo whose effective `merge_mode` is `never`, a PR already labelled
 `<label_prefix>:ready-to-merge` is also skipped while its head is the one the
-steward's own log (`logging.file`) last recorded that decision at; a new push,
+steward's own log (`logging.file`) last recorded the clean+green
+ready-to-merge decision (`action=ready-to-merge reason=clean-green`) at; a new push,
 the label's removal or any later steward entry for the PR makes it a candidate
 again, and a missing or unreadable log keeps it a candidate.
 Idle cadences therefore cost a single GitHub API call, not Claude usage.
