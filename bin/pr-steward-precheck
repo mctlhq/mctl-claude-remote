@@ -85,7 +85,7 @@ while [ "$i" -lt "$repos_count" ]; do
   prefix="$(jq -r ".repos[$i].pr_filter.head_prefix // \"\"" "$CONFIG")"
   author="$(jq -r ".repos[$i].pr_filter.author // \"\"" "$CONFIG")"
   labels_json="$(jq -c ".repos[$i].pr_filter.labels // []" "$CONFIG")"
-  merge_mode="$(jq -r --arg def "$DEFAULT_MERGE_MODE" ".repos[$i].merge_mode // \$def" "$CONFIG")"
+  merge_mode="$(jq -r --arg default_mode "$DEFAULT_MERGE_MODE" ".repos[$i].merge_mode // \$default_mode" "$CONFIG")"
   i=$((i + 1))
   [ -n "$name" ] && [ "$name" != "null" ] || continue
 
