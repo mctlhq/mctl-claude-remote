@@ -211,7 +211,7 @@ JSON
 # so the launch below also passes it as an explicit --model.
 CLAUDE_REMOTE_MODEL="${CLAUDE_REMOTE_MODEL:-haiku}"
 case "$CLAUDE_REMOTE_MODEL" in
-  *[!A-Za-z0-9._-]*|"")
+  *[!A-Za-z0-9._-]*|-*|"")
     echo "[entrypoint] WARN CLAUDE_REMOTE_MODEL='$CLAUDE_REMOTE_MODEL' is not a model alias/ID; using haiku" >&2
     CLAUDE_REMOTE_MODEL=haiku ;;
 esac
