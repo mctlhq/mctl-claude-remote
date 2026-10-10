@@ -205,9 +205,13 @@ JSON
 # The value is interpolated into a jq program and a JSON seed, so it is
 # restricted to the characters a model alias or ID can contain; anything else
 # falls back to the default rather than producing a broken settings.json.
+# settings.json alone only reaches fresh sessions: a session started with
+# --resume keeps the model it was last running (2.1.296 on 2026-10-10 kept
+# answering on claude-sonnet-5 after the setting moved to claude-haiku-5-5),
+# so the launch below also passes it as an explicit --model.
 CLAUDE_REMOTE_MODEL="${CLAUDE_REMOTE_MODEL:-haiku}"
 case "$CLAUDE_REMOTE_MODEL" in
-  *[!A-Za-z0-9._-]*|"")
+  *[!A-Za-z0-9._-]*|-*|"")
     echo "[entrypoint] WARN CLAUDE_REMOTE_MODEL='$CLAUDE_REMOTE_MODEL' is not a model alias/ID; using haiku" >&2
     CLAUDE_REMOTE_MODEL=haiku ;;
 esac
@@ -1275,11 +1279,12 @@ while true; do
   if [ -n "$MCTL_EVENTS_MCP_CONFIG" ]; then
     # shellcheck disable=SC2086 # RESUME_FLAG is intentionally word-split (flag + uuid)
     claude-pty-launch -- claude --remote-control "${DEVICE_NAME}" ${RESUME_FLAG} \
+      --model "$CLAUDE_REMOTE_MODEL" \
       --mcp-config "$MCTL_EVENTS_MCP_CONFIG" \
       --dangerously-load-development-channels server:mctl-events \
       --dangerously-skip-permissions 2>&1 &
   else
-    script -qfc "claude --remote-control ${DEVICE_NAME} ${RESUME_FLAG} --dangerously-skip-permissions 2>&1" /dev/stdout &
+    script -qfc "claude --remote-control ${DEVICE_NAME} ${RESUME_FLAG} --model ${CLAUDE_REMOTE_MODEL} --dangerously-skip-permissions 2>&1" /dev/stdout &
   fi
   CLAUDE_CHILD=$!
   # Per-launch startup-wedge backstop: detects a relay that never comes up (e.g.
