@@ -9,7 +9,10 @@ FROM node:22-slim
 # the pod from an OAuth session that expired and could not be refreshed on
 # 2.1.273 (mctl-claude-remote#64); the Channels round trip must be re-proven
 # on this pin after rollout.
-ARG CLAUDE_CODE_NPM_VERSION=2.1.280
+# 2.1.296: npm latest on 2026-10-10. Needed for Claude Haiku 5.5: 2.1.280
+# does not know claude-haiku-5-5 and resolves the `haiku` alias to 4.5.
+# The Channels round trip must be re-proven on this pin after rollout.
+ARG CLAUDE_CODE_NPM_VERSION=2.1.296
 
 # Matches the k3s-preview cluster's server version (kube.tf install_k3s_version
 # = v1.33.13+k3s1). kubectl tolerates +/-1 minor version skew from the server,
