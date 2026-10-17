@@ -1238,8 +1238,11 @@ if [ "$MCTL_EVENTS_ENABLED" = "true" ]; then
   MCTL_EVENTS_TELEGRAM_SERVER=""
   # Optional hydration server: the mctl-telegram MCP that owns the messages the
   # events point at, authenticated with a read-only worker token. The header
-  # references ${MCTL_TELEGRAM_MCP_TOKEN}, which Claude Code expands from the
-  # environment, so the token stays out of the config file too.
+  # comes from a headersHelper that Claude Code runs on every connect, so the
+  # token stays out of the config file and out of the environment, and a
+  # renewed token is used on the next connection without a pod restart
+  # (mctlhq/mctl-claude-remote#82). The seed file is the operator's (Vault);
+  # renewals this device makes live in the state file, and the newer chain wins.
   if [ -n "${MCTL_EVENTS_TELEGRAM_MCP_URL:-}" ]; then
     case "$MCTL_EVENTS_TELEGRAM_MCP_URL" in
       https://*) ;;
@@ -1253,9 +1256,46 @@ if [ "$MCTL_EVENTS_ENABLED" = "true" ]; then
       echo "[entrypoint] ERROR MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE is not readable" >&2
       exit 2
     fi
-    MCTL_TELEGRAM_MCP_TOKEN="$(tr -d '\r\n' < "$MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE")"
-    export MCTL_TELEGRAM_MCP_TOKEN
-    MCTL_EVENTS_TELEGRAM_SERVER=$(printf ',\n  "mctl-telegram": {"type": "http", "url": "%s",\n    "headers": {"Authorization": "Bearer ${MCTL_TELEGRAM_MCP_TOKEN}"}}' "$MCTL_EVENTS_TELEGRAM_MCP_URL")
+    TG_TOKEN_STATE="${MCTL_EVENTS_TELEGRAM_TOKEN_STATE:-/workspace/.claude/mctl-events/telegram-worker-token}"
+    TG_TOKEN_SERVED="/tmp/mctl-events-telegram-served-exp"
+    # The paths go into a JSON string and a helper command line verbatim.
+    for _tg_path in "$MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE" "$TG_TOKEN_STATE"; do
+      case "$_tg_path" in
+        /*) ;;
+        *) echo "[entrypoint] ERROR telegram token paths must be absolute: $_tg_path" >&2; exit 2 ;;
+      esac
+      case "$_tg_path" in
+        *[!A-Za-z0-9/._-]*) echo "[entrypoint] ERROR telegram token path may contain only letters, digits, '/', '.', '_' and '-': $_tg_path" >&2; exit 2 ;;
+      esac
+    done
+    case "${MCTL_EVENTS_PUSHGATEWAY_URL:-}" in
+      ""|http://*|https://*) ;;
+      *) echo "[entrypoint] ERROR MCTL_EVENTS_PUSHGATEWAY_URL must start with http:// or https://" >&2; exit 2 ;;
+    esac
+    TG_TOKEN_TOOL="/opt/mctl-events/mctl_events/telegram_token.py"
+    TG_TOKEN_ARGS="--seed $MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE --state $TG_TOKEN_STATE --served $TG_TOKEN_SERVED"
+    MCTL_EVENTS_TELEGRAM_SERVER=$(printf ',\n  "mctl-telegram": {"type": "http", "url": "%s",\n    "headersHelper": "python3 %s header %s"}' "$MCTL_EVENTS_TELEGRAM_MCP_URL" "$TG_TOKEN_TOOL" "$TG_TOKEN_ARGS")
+    # Renewal loop: hourly, renews in the last third of the token's life, and
+    # relaunches the session in-pod (as the wedge watchdog does) when the
+    # token it connected with is about to lapse while a newer one exists.
+    # Failures keep the current token and surface through the Pushgateway.
+    if [ "${MCTL_EVENTS_TELEGRAM_TOKEN_RENEW:-true}" = "true" ]; then
+      MCTL_EVENTS_TELEGRAM_TOKEN_CHECK_SECONDS="${MCTL_EVENTS_TELEGRAM_TOKEN_CHECK_SECONDS:-3600}"
+      norm_posint MCTL_EVENTS_TELEGRAM_TOKEN_CHECK_SECONDS 3600
+      (
+        while true; do
+          _tg_rc=0
+          # shellcheck disable=SC2086 # TG_TOKEN_ARGS is validated above and word-split on purpose
+          python3 "$TG_TOKEN_TOOL" renew $TG_TOKEN_ARGS --mcp-url "$MCTL_EVENTS_TELEGRAM_MCP_URL" \
+            --pushgateway "${MCTL_EVENTS_PUSHGATEWAY_URL:-}" --instance "${DEVICE_NAME:-claude-remote}" || _tg_rc=$?
+          if [ "$_tg_rc" -eq 10 ]; then
+            kill_claude_leaf "telegram token: the session holds a token about to expire and a newer one exists"
+          fi
+          sleep "$MCTL_EVENTS_TELEGRAM_TOKEN_CHECK_SECONDS"
+        done
+      ) &
+      echo "[entrypoint] telegram token renewal pid=$! interval=${MCTL_EVENTS_TELEGRAM_TOKEN_CHECK_SECONDS}s"
+    fi
   fi
   {
     printf '{"mcpServers": {"mctl-events": {"command": "python3", "args": ["-m", "mctl_events.channel"],\n'

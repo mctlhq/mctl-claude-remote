@@ -77,7 +77,8 @@ RUN chmod +x /entrypoint.sh /opt/steward/bin/*
 COPY events/mctl_events/ /opt/mctl-events/mctl_events/
 COPY bin/claude-pty-launch /usr/local/bin/claude-pty-launch
 RUN chmod +x /usr/local/bin/claude-pty-launch \
-    && python3 -c "import sys; sys.path.insert(0, '/opt/mctl-events'); import mctl_events.channel"
+    && python3 -c "import sys; sys.path.insert(0, '/opt/mctl-events'); import mctl_events.channel" \
+    && python3 /opt/mctl-events/mctl_events/telegram_token.py --help >/dev/null
 
 ENV HOME=/workspace
 
