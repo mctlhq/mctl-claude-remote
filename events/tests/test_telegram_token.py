@@ -307,6 +307,11 @@ class HeaderTest(Base):
         self.assertEqual(tt.FAILED, proc.returncode)
         self.assertEqual("", proc.stdout)
 
+    def test_an_unexpected_error_fails_the_check_instead_of_crashing(self) -> None:
+        self.seed.write_text(jwt(NOW + 25 * DAY, iat=NOW - 5 * DAY))
+        self.served.write_text(f"{-10 ** 30}\n")  # out of range for gmtime
+        self.assertEqual(tt.FAILED, tt.main(["renew", *self.args(), "--mcp-url", "https://x/mcp"]))
+
     def test_cli_refuses_a_plain_http_mcp_url(self) -> None:
         self.assertEqual(tt.FAILED, tt.main(["renew", *self.args(), "--mcp-url", "http://x/mcp"]))
 
@@ -373,7 +378,10 @@ class EntrypointConfigTest(Base):
         bin_dir.mkdir()
         argv_file, killed = self.dir / "argv", self.dir / "killed"
         shim = bin_dir / "python3"
-        shim.write_text(f'#!/bin/sh\nprintf "%s\\n" "$@" > {argv_file}\nexit 10\n')
+        # Asks for one relaunch only, and publishes argv atomically, so nothing
+        # rewrites the files while the assertions read them.
+        shim.write_text(f'#!/bin/sh\n[ -f {argv_file} ] && exit 0\n'
+                        f'printf "%s\\n" "$@" > {argv_file}.part && mv {argv_file}.part {argv_file}\nexit 10\n')
         shim.chmod(0o755)
         script = ('norm_posint() { :; }\n'
                   f'kill_claude_leaf() {{ echo "$1" > {killed}; }}\n'
@@ -399,9 +407,11 @@ class EntrypointConfigTest(Base):
         self.assertEqual(0, rc, out.read_text())
         self.assertIn("telegram token renewal pid=", out.read_text())
         deadline = time.monotonic() + 10
-        while not killed.exists() and time.monotonic() < deadline:
+        def reason() -> str:
+            return killed.read_text() if killed.exists() else ""
+        while "telegram token" not in reason() and time.monotonic() < deadline:
             time.sleep(0.05)
-        self.assertIn("telegram token", killed.read_text())
+        self.assertIn("telegram token", reason())
         argv = argv_file.read_text().split("\n")
         self.assertEqual(["/opt/mctl-events/mctl_events/telegram_token.py", "renew"], argv[:2])
         for flag, value in (("--seed", str(self.seed)), ("--state", str(self.state)),

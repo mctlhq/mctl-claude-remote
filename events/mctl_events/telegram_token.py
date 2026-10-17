@@ -313,7 +313,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.cmd == "renew" and not args.mcp_url.startswith("https://"):
         log("ERROR --mcp-url must be https")
         return FAILED
-    return header(args) if args.cmd == "header" else renew(args)
+    if args.cmd == "header":
+        return header(args)
+    try:
+        return renew(args)
+    except Exception as e:  # noqa: BLE001 - the loop must never lose a tick to a traceback
+        log(f"ERROR renewal check failed: {e!r}")
+        return FAILED
 
 
 if __name__ == "__main__":
