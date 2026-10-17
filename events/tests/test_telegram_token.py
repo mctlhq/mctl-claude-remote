@@ -153,6 +153,12 @@ class CurrentTest(Base):
         self.state.write_text(jwt(NOW + DAY, iat=NOW, jti="state"))
         self.assertEqual("state", tt.current(self.seed, self.state).jti)
 
+    def test_a_seed_that_is_not_utf8_is_ignored_not_fatal(self) -> None:
+        self.seed.write_bytes(b"\xff\xfe\x00garbage")
+        self.state.parent.mkdir()
+        self.state.write_text(jwt(NOW + DAY, iat=NOW, jti="state"))
+        self.assertEqual("state", tt.current(self.seed, self.state).jti)
+
     def test_no_token_at_all(self) -> None:
         self.assertIsNone(tt.current(self.seed, self.state))
 
@@ -255,6 +261,20 @@ class RecycleTest(Base):
     def test_session_on_a_token_with_time_left_is_left_alone(self) -> None:
         self.served.write_text(f"{NOW + 3 * DAY}\n")
         self.assertEqual(tt.OK, self.renew())
+
+    def test_a_failed_renewal_still_relaunches_onto_the_newer_token(self) -> None:
+        # The state holds a token from an earlier renewal; this check's
+        # renewal fails, but the session must still move onto it.
+        self.state.write_text(jwt(NOW + 9 * DAY, iat=NOW - 21 * DAY, orig_iat=NOW - 40 * DAY))
+        self.served.write_text(f"{NOW + DAY}\n")
+        self.server.status = 503
+        self.assertEqual(tt.RECYCLE, self.renew())
+        self.assertEqual(0, self.server.metrics()["renew_ok"])
+
+    def test_never_relaunches_onto_an_expired_token(self) -> None:
+        self.state.write_text(jwt(NOW - 1, iat=NOW - 30 * DAY, orig_iat=NOW - 40 * DAY))
+        self.served.write_text(f"{NOW - 100}\n")
+        self.assertEqual(tt.FAILED, self.renew())
 
     def test_no_newer_token_means_no_relaunch(self) -> None:
         # The session already holds the newest token, and renewing it fails:

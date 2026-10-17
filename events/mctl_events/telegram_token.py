@@ -111,6 +111,11 @@ def read_token(path: Path | None) -> Token | None:
     except OSError as e:
         log(f"WARN cannot read {path}: {e}")
         return None
+    except ValueError:
+        # Not UTF-8, so not a JWT: treat it like any other unparseable file,
+        # so the other source can still win.
+        log(f"WARN {path} is not UTF-8 text; ignoring it")
+        return None
     tok = parse(text)
     if tok is None and text.strip():
         log(f"WARN {path} does not hold a JWT with an exp claim; ignoring it")
@@ -238,10 +243,14 @@ def renew(args: argparse.Namespace, now: int | None = None) -> int:
             else:
                 log(f"renewed jti={new.jti or '-'} expires={iso(new.exp)} chain_ends={iso(new.chain_deadline)}")
                 tok, renew_ok = new, 1
+    # Independent of this check's renewal: a newer token already on disk is
+    # worth reconnecting to even when renewing it just failed. Never onto an
+    # expired one.
     served = read_served(args.served)
-    if rc == OK and tok is not None and served is not None:
+    if tok is not None and served is not None and now < tok.exp:
         if tok.exp > served and served - now < args.recycle_before:
-            rc = recycle_once(args.served, served, tok)
+            if recycle_once(args.served, served, tok) == RECYCLE:
+                rc = RECYCLE
     if args.pushgateway:
         push_metrics(args.pushgateway, args.instance, tok, renew_ok, served, now)
     return rc
