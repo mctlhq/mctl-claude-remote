@@ -387,7 +387,8 @@ it in-pod (`--resume`), the same path the wedge watchdog uses, at most once per
 served token, so a session that does not pick up the new one is not relaunched
 every hour. A failed renewal
 keeps the current token and is reported through the gauges
-`mctl_claude_remote_telegram_token_{expires_in_seconds,chain_expires_in_seconds,renew_ok,last_check_timestamp_seconds}`.
+`mctl_claude_remote_telegram_token_{expires_in_seconds,chain_expires_in_seconds,served_expires_in_seconds,renew_ok,last_check_timestamp_seconds}`
+(`served_` is the token the session is connected with).
 Once a year, or after an expiry, an administrator mints a new token with
 `mint_worker_token` and writes it to the seed.
 

@@ -217,6 +217,13 @@ class RenewTest(Base):
         self.assertEqual(0, m["renew_ok"])
         self.assertEqual(DAY, m["expires_in_seconds"])
 
+    def test_an_unreadable_error_body_is_a_failed_renewal(self) -> None:
+        self.seed.write_text(jwt(NOW + DAY, iat=NOW - 29 * DAY))
+        err = tt.urllib.error.HTTPError("u", 502, "bad gateway", {}, None)
+        with mock.patch.object(err, "read", side_effect=IncompleteRead(b"")), \
+                mock.patch.object(tt.urllib.request, "urlopen", side_effect=err):
+            self.assertEqual(tt.FAILED, self.renew(pushgateway=""))
+
     def test_a_truncated_response_is_a_failed_renewal(self) -> None:
         self.seed.write_text(jwt(NOW + DAY, iat=NOW - 29 * DAY))
         with mock.patch.object(tt.urllib.request, "urlopen", side_effect=IncompleteRead(b"")):
@@ -258,6 +265,14 @@ class RecycleTest(Base):
 
     def test_nothing_served_yet_means_no_relaunch(self) -> None:
         self.assertEqual(tt.OK, self.renew())
+
+    def test_reports_the_expiry_of_the_token_the_session_holds(self) -> None:
+        self.served.write_text(f"{NOW + DAY}\n")
+        self.renew()
+        self.assertEqual(DAY, self.server.metrics()["served_expires_in_seconds"])
+        # After the one relaunch the guard stays quiet, but the gauge does not.
+        self.assertEqual(tt.OK, self.renew(now=NOW + 3600))
+        self.assertEqual(DAY - 3600, self.server.metrics()["served_expires_in_seconds"])
 
     def test_relaunches_once_per_served_token(self) -> None:
         # The relaunched session did not rewrite the served file: a second
@@ -375,11 +390,14 @@ class EntrypointConfigTest(Base):
         # keep a pipe open for as long as it runs.
         out = self.dir / "out"
         with out.open("w") as fh:
-            rc = subprocess.run(["/bin/sh", "-e", "-c", script], stdout=fh, stderr=subprocess.STDOUT,
-                                timeout=30, env=env).returncode
+            # Own process group, killed whatever happens below: the loop and
+            # its sleep would otherwise outlive a failing test.
+            sh = subprocess.Popen(["/bin/sh", "-e", "-c", script], stdout=fh, stderr=subprocess.STDOUT,
+                                  env=env, start_new_session=True)
+            self.addCleanup(self._kill_group, sh.pid)
+            rc = sh.wait(timeout=30)
         self.assertEqual(0, rc, out.read_text())
-        pid = int(out.read_text().split("telegram token renewal pid=")[1].split()[0])
-        self.addCleanup(self._kill, pid)
+        self.assertIn("telegram token renewal pid=", out.read_text())
         deadline = time.monotonic() + 10
         while not killed.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -392,9 +410,9 @@ class EntrypointConfigTest(Base):
             self.assertEqual(value, argv[argv.index(flag) + 1], flag)
 
     @staticmethod
-    def _kill(pid: int) -> None:
+    def _kill_group(pgid: int) -> None:
         try:
-            os.kill(pid, 9)
+            os.killpg(pgid, 9)
         except ProcessLookupError:
             pass
 

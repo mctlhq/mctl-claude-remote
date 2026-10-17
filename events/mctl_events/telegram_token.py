@@ -153,7 +153,11 @@ def call_renew(url: str, token: Token, timeout: float = 30.0) -> Token:
             body = json.loads(resp.read(65536))
     except urllib.error.HTTPError as e:
         # The error body is a short JSON message from the server, never a token.
-        detail = e.read(512).decode("utf-8", "replace").strip()
+        # Read it under its own guard: a sibling except does not cover this.
+        try:
+            detail = e.read(512).decode("utf-8", "replace").strip()
+        except (OSError, ValueError, http.client.HTTPException):
+            detail = "<error body unreadable>"
         raise RuntimeError(f"HTTP {e.code}: {detail}") from None
     except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
         raise RuntimeError(f"request failed: {e}") from None
@@ -165,7 +169,8 @@ def call_renew(url: str, token: Token, timeout: float = 30.0) -> Token:
     return new
 
 
-def push_metrics(url: str, instance: str, token: Token | None, renew_ok: int | None, now: int) -> None:
+def push_metrics(url: str, instance: str, token: Token | None, renew_ok: int | None,
+                 served: int | None, now: int) -> None:
     """PUT the gauges for this device's group to the Pushgateway, replacing its
     previous push. A gauge is omitted, not zeroed, when it cannot be computed:
     a 0 would read as "already expired". Never raises: a broken push must not
@@ -176,6 +181,11 @@ def push_metrics(url: str, instance: str, token: Token | None, renew_ok: int | N
                   f"mctl_claude_remote_telegram_token_expires_in_seconds {token.exp - now}",
                   "# TYPE mctl_claude_remote_telegram_token_chain_expires_in_seconds gauge",
                   f"mctl_claude_remote_telegram_token_chain_expires_in_seconds {token.chain_deadline - now}"]
+    if served is not None:
+        # The token the session actually connected with, which can lag the
+        # newest one on disk until the session reconnects.
+        lines += ["# TYPE mctl_claude_remote_telegram_token_served_expires_in_seconds gauge",
+                  f"mctl_claude_remote_telegram_token_served_expires_in_seconds {served - now}"]
     if renew_ok is not None:
         lines += ["# TYPE mctl_claude_remote_telegram_token_renew_ok gauge",
                   f"mctl_claude_remote_telegram_token_renew_ok {renew_ok}"]
@@ -228,12 +238,12 @@ def renew(args: argparse.Namespace, now: int | None = None) -> int:
             else:
                 log(f"renewed jti={new.jti or '-'} expires={iso(new.exp)} chain_ends={iso(new.chain_deadline)}")
                 tok, renew_ok = new, 1
-    if rc == OK and tok is not None:
-        served = read_served(args.served)
-        if served is not None and tok.exp > served and served - now < args.recycle_before:
+    served = read_served(args.served)
+    if rc == OK and tok is not None and served is not None:
+        if tok.exp > served and served - now < args.recycle_before:
             rc = recycle_once(args.served, served, tok)
     if args.pushgateway:
-        push_metrics(args.pushgateway, args.instance, tok, renew_ok, now)
+        push_metrics(args.pushgateway, args.instance, tok, renew_ok, served, now)
     return rc
 
 
@@ -241,7 +251,8 @@ def recycle_once(served_path: Path, served: int, tok: Token) -> int:
     """RECYCLE at most once per served token. A relaunched session rewrites the
     served file on connect; if it stays the same, either the session did not
     reconnect or the header could not record it, and relaunching again every
-    hour would only throw away in-flight work."""
+    hour would only throw away in-flight work. The served_expires_in_seconds
+    gauge keeps the first case visible."""
     marker = served_path.with_name(served_path.name + ".recycled")
     if read_served(marker) == served:
         log(f"WARN session still reports a token expiring {iso(served)} after a relaunch; "
