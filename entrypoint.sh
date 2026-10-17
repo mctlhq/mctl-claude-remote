@@ -1268,6 +1268,10 @@ if [ "$MCTL_EVENTS_ENABLED" = "true" ]; then
         *[!A-Za-z0-9/._-]*) echo "[entrypoint] ERROR telegram token path may contain only letters, digits, '/', '.', '_' and '-': $_tg_path" >&2; exit 2 ;;
       esac
     done
+    case "${MCTL_EVENTS_PUSHGATEWAY_URL:-}" in
+      ""|http://*|https://*) ;;
+      *) echo "[entrypoint] ERROR MCTL_EVENTS_PUSHGATEWAY_URL must start with http:// or https://" >&2; exit 2 ;;
+    esac
     TG_TOKEN_TOOL="/opt/mctl-events/mctl_events/telegram_token.py"
     TG_TOKEN_ARGS="--seed $MCTL_EVENTS_TELEGRAM_MCP_TOKEN_FILE --state $TG_TOKEN_STATE --served $TG_TOKEN_SERVED"
     MCTL_EVENTS_TELEGRAM_SERVER=$(printf ',\n  "mctl-telegram": {"type": "http", "url": "%s",\n    "headersHelper": "python3 %s header %s"}' "$MCTL_EVENTS_TELEGRAM_MCP_URL" "$TG_TOKEN_TOOL" "$TG_TOKEN_ARGS")
@@ -1283,7 +1287,7 @@ if [ "$MCTL_EVENTS_ENABLED" = "true" ]; then
           _tg_rc=0
           # shellcheck disable=SC2086 # TG_TOKEN_ARGS is validated above and word-split on purpose
           python3 "$TG_TOKEN_TOOL" renew $TG_TOKEN_ARGS --mcp-url "$MCTL_EVENTS_TELEGRAM_MCP_URL" \
-            --pushgateway "${MCTL_EVENTS_PUSHGATEWAY_URL:-}" || _tg_rc=$?
+            --pushgateway "${MCTL_EVENTS_PUSHGATEWAY_URL:-}" --instance "${DEVICE_NAME:-claude-remote}" || _tg_rc=$?
           if [ "$_tg_rc" -eq 10 ]; then
             kill_claude_leaf "telegram token: the session holds a token about to expire and a newer one exists"
           fi

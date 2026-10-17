@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import base64
 import binascii
+import http.client
 import json
 import os
 import sys
@@ -154,7 +155,7 @@ def call_renew(url: str, token: Token, timeout: float = 30.0) -> Token:
         # The error body is a short JSON message from the server, never a token.
         detail = e.read(512).decode("utf-8", "replace").strip()
         raise RuntimeError(f"HTTP {e.code}: {detail}") from None
-    except (urllib.error.URLError, OSError, ValueError) as e:
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
         raise RuntimeError(f"request failed: {e}") from None
     new = parse(body.get("worker_token", "")) if isinstance(body, dict) else None
     if new is None:
@@ -164,10 +165,11 @@ def call_renew(url: str, token: Token, timeout: float = 30.0) -> Token:
     return new
 
 
-def push_metrics(url: str, token: Token | None, renew_ok: int | None, now: int) -> None:
-    """PUT the gauges for this job to the Pushgateway, replacing the previous
-    push. A gauge is omitted, not zeroed, when it cannot be computed: a 0 would
-    read as "already expired"."""
+def push_metrics(url: str, instance: str, token: Token | None, renew_ok: int | None, now: int) -> None:
+    """PUT the gauges for this device's group to the Pushgateway, replacing its
+    previous push. A gauge is omitted, not zeroed, when it cannot be computed:
+    a 0 would read as "already expired". Never raises: a broken push must not
+    swallow the exit code that tells the entrypoint to relaunch the session."""
     lines = []
     if token is not None:
         lines += ["# TYPE mctl_claude_remote_telegram_token_expires_in_seconds gauge",
@@ -179,13 +181,16 @@ def push_metrics(url: str, token: Token | None, renew_ok: int | None, now: int) 
                   f"mctl_claude_remote_telegram_token_renew_ok {renew_ok}"]
     lines += ["# TYPE mctl_claude_remote_telegram_token_last_check_timestamp_seconds gauge",
               f"mctl_claude_remote_telegram_token_last_check_timestamp_seconds {now}"]
-    req = urllib.request.Request(url.rstrip("/") + "/metrics/job/claude-remote-telegram-token",
-                                 data=("\n".join(lines) + "\n").encode(), method="PUT",
-                                 headers={"Content-Type": "text/plain; version=0.0.4"})
+    # One group per device, so two devices on one Pushgateway cannot overwrite
+    # each other's gauges.
+    path = "/metrics/job/claude-remote-telegram-token/instance/" + urllib.parse.quote(instance, safe="")
     try:
+        req = urllib.request.Request(url.rstrip("/") + path,
+                                     data=("\n".join(lines) + "\n").encode(), method="PUT",
+                                     headers={"Content-Type": "text/plain; version=0.0.4"})
         with urllib.request.urlopen(req, timeout=10):  # noqa: S310 - in-cluster URL from config
             pass
-    except (urllib.error.URLError, OSError) as e:
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as e:
         log(f"WARN metrics push failed: {e}")
 
 
@@ -212,18 +217,44 @@ def renew(args: argparse.Namespace, now: int | None = None) -> int:
             log(f"WARN renewal failed, keeping the current token (expires {iso(tok.exp)}): {e}")
             renew_ok, rc = 0, FAILED
         else:
-            write_atomic(args.state, new.raw + "\n")
-            log(f"renewed jti={new.jti or '-'} expires={iso(new.exp)} chain_ends={iso(new.chain_deadline)}")
-            tok, renew_ok = new, 1
+            try:
+                write_atomic(args.state, new.raw + "\n")
+            except OSError as e:
+                # The server has issued the token, but without the state file
+                # nothing would use it; the current one is still valid.
+                log(f"ERROR renewed jti={new.jti or '-'} but cannot keep it, keeping the current "
+                    f"token (expires {iso(tok.exp)}): {e}")
+                renew_ok, rc = 0, FAILED
+            else:
+                log(f"renewed jti={new.jti or '-'} expires={iso(new.exp)} chain_ends={iso(new.chain_deadline)}")
+                tok, renew_ok = new, 1
     if rc == OK and tok is not None:
         served = read_served(args.served)
         if served is not None and tok.exp > served and served - now < args.recycle_before:
-            log(f"session connected with a token expiring {iso(served)}; a newer one expires "
-                f"{iso(tok.exp)}: relaunch the session to reconnect")
-            rc = RECYCLE
+            rc = recycle_once(args.served, served, tok)
     if args.pushgateway:
-        push_metrics(args.pushgateway, tok, renew_ok, now)
+        push_metrics(args.pushgateway, args.instance, tok, renew_ok, now)
     return rc
+
+
+def recycle_once(served_path: Path, served: int, tok: Token) -> int:
+    """RECYCLE at most once per served token. A relaunched session rewrites the
+    served file on connect; if it stays the same, either the session did not
+    reconnect or the header could not record it, and relaunching again every
+    hour would only throw away in-flight work."""
+    marker = served_path.with_name(served_path.name + ".recycled")
+    if read_served(marker) == served:
+        log(f"WARN session still reports a token expiring {iso(served)} after a relaunch; "
+            "not relaunching again")
+        return OK
+    try:
+        write_atomic(marker, f"{served}\n")
+    except OSError as e:
+        log(f"WARN cannot record the relaunch, so not relaunching: {e}")
+        return OK
+    log(f"session connected with a token expiring {iso(served)}; a newer one expires "
+        f"{iso(tok.exp)}: relaunch the session to reconnect")
+    return RECYCLE
 
 
 def read_served(path: Path | None) -> int | None:
@@ -264,6 +295,7 @@ def main(argv: list[str] | None = None) -> int:
     r = sub.choices["renew"]
     r.add_argument("--mcp-url", required=True)
     r.add_argument("--pushgateway", default="")
+    r.add_argument("--instance", default="claude-remote", help="Pushgateway instance label (the device name)")
     r.add_argument("--recycle-before", type=int, default=2 * 24 * 3600,
                    help="relaunch the session when its token has less than this many seconds left")
     args = ap.parse_args(argv)

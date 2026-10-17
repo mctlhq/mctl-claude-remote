@@ -371,7 +371,7 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
 | `MCTL_EVENTS_TELEGRAM_TOKEN_STATE` | where the device keeps the tokens it renewed itself (default `/workspace/.claude/mctl-events/telegram-worker-token`, mode 0600, persisted to R2 with the rest of `.claude`). Of the seed and this file, the token from the newer chain wins, so a fresh mint written to the seed takes over at once |
 | `MCTL_EVENTS_TELEGRAM_TOKEN_RENEW` | `true` (default) runs the renewal loop; anything else turns it off |
 | `MCTL_EVENTS_TELEGRAM_TOKEN_CHECK_SECONDS` | renewal check interval (default `3600`) |
-| `MCTL_EVENTS_PUSHGATEWAY_URL` | optional Pushgateway base URL for the token gauges (job `claude-remote-telegram-token`) |
+| `MCTL_EVENTS_PUSHGATEWAY_URL` | optional Pushgateway base URL for the token gauges (job `claude-remote-telegram-token`, instance = the device name); must be `http://` or `https://` |
 | `MCTL_EVENTS_POLICY` | **path** to a JSON routing policy file, not inline JSON (the format is defined by the loader in `events/mctl_events/policy.py`) |
 | `CLAUDE_PTY_ANSWER_WINDOW_SECONDS` | seconds after launch during which the PTY launcher answers the startup dialogs (default `120`); later output is never answered, even if it repeats a dialog's words |
 
@@ -383,7 +383,9 @@ the presented token and caps the chain at a year from the human mint, so the
 device can extend its own credential and nothing more. A renewed token is used
 on the next MCP connection; if the session is still connected with a token
 that has less than two days left while a newer one exists, the loop relaunches
-it in-pod (`--resume`), the same path the wedge watchdog uses. A failed renewal
+it in-pod (`--resume`), the same path the wedge watchdog uses, at most once per
+served token, so a session that does not pick up the new one is not relaunched
+every hour. A failed renewal
 keeps the current token and is reported through the gauges
 `mctl_claude_remote_telegram_token_{expires_in_seconds,chain_expires_in_seconds,renew_ok,last_check_timestamp_seconds}`.
 Once a year, or after an expiry, an administrator mints a new token with
