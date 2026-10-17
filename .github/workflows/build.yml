@@ -53,9 +53,23 @@ jobs:
             exit 1
           fi
 
+      # A short-lived token from the internal mctl-agents App, as the other
+      # repos' release workflows mint it, instead of the GITOPS_TOKEN PAT
+      # (dead since 0.14.0: 401). Scoped to dispatching workflows in
+      # mctl-gitops; gitops-bump.yaml pushes with its own deploy key.
+      - name: Generate Platform App token
+        id: app
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.AGENTS_APP_ID }}
+          private-key: ${{ secrets.AGENTS_APP_PRIVATE_KEY }}
+          owner: mctlhq
+          repositories: mctl-gitops
+          permission-actions: write
+
       - name: Dispatch gitops image bump
         env:
-          GH_TOKEN: ${{ secrets.GITOPS_TOKEN }}
+          GH_TOKEN: ${{ steps.app.outputs.token }}
           TAG: ${{ github.ref_name }}
         run: |
           gh workflow run gitops-bump.yaml \
