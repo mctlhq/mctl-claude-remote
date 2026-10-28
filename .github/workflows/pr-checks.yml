@@ -32,7 +32,7 @@ jobs:
         run: python3 -m unittest discover -s events/tests -p 'test_*.py' -v
 
       - name: Docker build
-        uses: docker/build-push-action@v5
+        uses: docker/build-push-action@v6
         with:
           context: .
           push: false
