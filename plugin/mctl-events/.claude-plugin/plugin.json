@@ -1,0 +1,12 @@
+{
+  "name": "mctl-events",
+  "version": "0.1.0",
+  "description": "Channel adapter that pushes MCTL events from Valkey Streams into a running Claude Code session, plus the mctl-telegram worker-token helper.",
+  "author": {
+    "name": "MCTL",
+    "url": "https://github.com/mctlhq"
+  },
+  "homepage": "https://github.com/mctlhq/mctl-claude-remote/tree/main/plugin/mctl-events",
+  "repository": "https://github.com/mctlhq/mctl-claude-remote",
+  "license": "MIT"
+}

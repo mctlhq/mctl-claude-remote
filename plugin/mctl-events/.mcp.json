@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "mctl-events": {
+      "command": "bun",
+      "args": [
+        "run",
+        "--silent",
+        "--no-env-file",
+        "--config=${CLAUDE_PLUGIN_ROOT}/bunfig.toml",
+        "${CLAUDE_PLUGIN_ROOT}/src/channel.ts"
+      ]
+    }
+  }
+}

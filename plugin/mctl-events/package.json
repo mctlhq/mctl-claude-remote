@@ -1,0 +1,19 @@
+{
+  "name": "mctl-events",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "mctl.events/v1 Channel adapter for Claude Code. Runs on Bun with no runtime dependencies.",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "6.0.3"
+  }
+}
