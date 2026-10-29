@@ -1,0 +1,17 @@
+{
+  "name": "mctlhq",
+  "owner": {
+    "name": "MCTL",
+    "url": "https://github.com/mctlhq"
+  },
+  "metadata": {
+    "description": "Claude Code plugins from mctlhq/mctl-claude-remote."
+  },
+  "plugins": [
+    {
+      "name": "mctl-events",
+      "source": "./plugin/mctl-events",
+      "description": "Channel adapter that pushes MCTL events from Valkey Streams into a running Claude Code session."
+    }
+  ]
+}

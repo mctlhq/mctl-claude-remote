@@ -31,6 +31,30 @@ jobs:
       - name: Inbound events adapter and PTY launcher tests
         run: python3 -m unittest discover -s events/tests -p 'test_*.py' -v
 
+      # The TypeScript port of the same adapter, shipped as a Claude Code
+      # plugin. It runs the same integration tests against the same server.
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      - name: Install plugin dev dependencies
+        working-directory: plugin
+        run: npm ci
+
+      - name: Plugin typecheck
+        working-directory: plugin
+        run: npm run typecheck
+
+      # dist/ is committed because Claude Code runs the plugin straight from
+      # the marketplace clone, with no build step of its own.
+      - name: Plugin dist matches a fresh build
+        working-directory: plugin
+        run: npm run check-dist
+
+      - name: Plugin tests
+        working-directory: plugin
+        run: npm test
+
       - name: Docker build
         uses: docker/build-push-action@v6
         with:

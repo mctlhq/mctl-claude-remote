@@ -1,0 +1,19 @@
+{
+  "name": "mctl-claude-remote-plugins",
+  "private": true,
+  "description": "Build and test tooling for the Claude Code plugins in this repository. Nothing here is installed with a plugin.",
+  "type": "module",
+  "engines": {
+    "node": ">=22.18"
+  },
+  "scripts": {
+    "build": "node mctl-events/scripts/build.mjs",
+    "typecheck": "tsc -p mctl-events/tsconfig.json --noEmit && tsc -p mctl-events/tsconfig.test.json",
+    "test": "node --test --test-concurrency=1 'mctl-events/test/**/*.test.ts'",
+    "check-dist": "node mctl-events/scripts/build.mjs --check"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "typescript": "6.0.3"
+  }
+}
