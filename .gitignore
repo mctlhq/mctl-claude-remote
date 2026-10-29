@@ -13,8 +13,6 @@
 # Local artifacts
 *.log
 dist/
-# The plugin ships its compiled JS; CI checks it matches a fresh build.
-!plugin/mctl-events/dist/
 node_modules/
 tmp/
 __pycache__/

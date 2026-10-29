@@ -13,8 +13,8 @@ import { Connection, endpointFromUrl } from "../src/valkey.ts";
 import type { Reply } from "../src/valkey.ts";
 
 export const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-export const CHANNEL_JS = path.join(PLUGIN, "dist", "channel.js");
-export const TELEGRAM_TOKEN_JS = path.join(PLUGIN, "dist", "telegram-token.js");
+export const CHANNEL_TS = path.join(PLUGIN, "src", "channel.ts");
+export const TELEGRAM_TOKEN_TS = path.join(PLUGIN, "src", "telegram_token.ts");
 
 function which(name: string): string | null {
   try {
@@ -25,8 +25,8 @@ function which(name: string): string | null {
 }
 
 export const VALKEY_SERVER = which("valkey-server") ?? which("redis-server");
-/** `node:test`'s `skip` option: a reason when there is no server to test against. */
-export const requiresValkey = VALKEY_SERVER ? false : "valkey-server not installed";
+/** True when there is no server to test against: `describe.skipIf(requiresValkey)`. */
+export const requiresValkey = VALKEY_SERVER === null;
 
 export const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -156,7 +156,7 @@ export class FakeClaude {
   constructor(url: string, policy: Record<string, unknown>, env: Record<string, string> = {}) {
     const policyPath = path.join(this.dir, "policy.json");
     fs.writeFileSync(policyPath, JSON.stringify(policy));
-    this.proc = spawn(process.execPath, [CHANNEL_JS], {
+    this.proc = spawn(process.execPath, [CHANNEL_TS], {
       cwd: this.dir,
       env: { ...process.env, MCTL_EVENTS_VALKEY_URL: url, MCTL_EVENTS_POLICY: policyPath, ...env },
       stdio: ["pipe", "pipe", "pipe"],

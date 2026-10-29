@@ -93,8 +93,8 @@ export class Wire {
   private pending: Buffer[] = [];
   private waiter: (() => void) | null = null;
   private failure: Error | null = null;
-  /** Called after every fill with the buffered byte count (tests). */
-  onFill: ((buffered: number) => void) | null = null;
+  /** Called after every fill with the buffered byte count and the chunk just read (tests). */
+  onFill: ((buffered: number, chunk: number) => void) | null = null;
 
   private readonly socket: net.Socket;
 
@@ -131,7 +131,7 @@ export class Wire {
     const chunk = this.pending.shift()!;
     this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
     if (!this.pending.length && !this.socket.destroyed) this.socket.resume();
-    this.onFill?.(this.buf.length);
+    this.onFill?.(this.buf.length, chunk.length);
   }
 
   private async readLine(): Promise<Buffer> {

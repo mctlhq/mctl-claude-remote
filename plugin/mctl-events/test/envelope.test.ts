@@ -5,7 +5,7 @@ import fs from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { describe, test } from "node:test";
+import { describe, test } from "bun:test";
 
 import * as channel from "../src/channel.ts";
 import { Adapter, readPassword, StdioServer } from "../src/channel.ts";
@@ -277,7 +277,9 @@ describe("poison entries", () => {
 
 describe("oversized bulk", () => {
   test("an oversized envelope is skipped unbuffered and rejected", async () => {
-    const big = Buffer.alloc(valkey.MAX_BULK_BYTES * 4, "x");
+    // Large enough that buffering it whole cannot hide inside one socket read
+    // (Node reads 64 KiB at a time, Bun up to 512 KiB).
+    const big = Buffer.alloc(valkey.MAX_BULK_BYTES * 64, "x");
     const reply = Buffer.concat([
       Buffer.from("*1\r\n*2\r\n$20\r\nmctl:events:telegram\r\n*1\r\n*2\r\n$4\r\n11-0\r\n"),
       Buffer.from(`*2\r\n$8\r\nenvelope\r\n$${big.length}\r\n`),
@@ -291,10 +293,16 @@ describe("oversized bulk", () => {
     try {
       const wire = new valkey.Wire(sock);
       let peak = 0;
-      wire.onFill = (buffered) => (peak = Math.max(peak, buffered));
+      let largestChunk = 0;
+      wire.onFill = (buffered, chunk) => {
+        peak = Math.max(peak, buffered);
+        largestChunk = Math.max(largestChunk, chunk);
+      };
       const got = (await wire.readReply()) as Reply[];
       assert.equal(await wire.readReply(), "OK"); // the stream stays in sync
-      assert.ok(peak < valkey.MAX_BULK_BYTES * 2, `peak ${peak}`);
+      // Never more than the socket read in hand plus a bounded remainder.
+      assert.ok(peak < largestChunk + valkey.MAX_BULK_BYTES * 2, `peak ${peak}, largest read ${largestChunk}`);
+      assert.ok(peak < big.length / 4, `peak ${peak}`);
       const fields = (((got[0] as Reply[])[1] as Reply[])[0] as Reply[])[1] as Reply[];
       assert.ok(fields[1] instanceof valkey.Oversized);
       assert.equal((fields[1] as valkey.Oversized).size, big.length);

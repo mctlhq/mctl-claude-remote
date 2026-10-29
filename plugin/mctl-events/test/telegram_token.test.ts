@@ -9,10 +9,10 @@ import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, test } from "node:test";
+import { afterEach, beforeEach, describe, test } from "bun:test";
 
-import * as tt from "../src/telegram-token.ts";
-import { TELEGRAM_TOKEN_JS } from "./support.ts";
+import * as tt from "../src/telegram_token.ts";
+import { TELEGRAM_TOKEN_TS } from "./support.ts";
 
 const DAY = 24 * 3600;
 const NOW = 1_800_000_000;
@@ -381,7 +381,7 @@ describe("recycle", () => {
 describe("header and command line", () => {
   // As headersHelper runs it: by path, from an unrelated directory.
   const runHeader = () =>
-    spawnSync(process.execPath, [TELEGRAM_TOKEN_JS, "header", ...cliArgs()], { cwd: dir, encoding: "utf8", timeout: 30_000 });
+    spawnSync(process.execPath, [TELEGRAM_TOKEN_TS, "header", ...cliArgs()], { cwd: dir, encoding: "utf8", timeout: 30_000 });
 
   test("prints the current token and records its expiry", () => {
     const tok = jwt(NOW + 30 * DAY, NOW);
@@ -409,7 +409,7 @@ describe("header and command line", () => {
   });
 
   test("argparse's flags, forms and exit codes", async () => {
-    const run = (...argv: string[]) => spawnSync(process.execPath, [TELEGRAM_TOKEN_JS, ...argv], { cwd: dir, encoding: "utf8" });
+    const run = (...argv: string[]) => spawnSync(process.execPath, [TELEGRAM_TOKEN_TS, ...argv], { cwd: dir, encoding: "utf8" });
     assert.equal(run().status, tt.USAGE);
     assert.equal(run("nope").status, tt.USAGE);
     assert.equal(run("header", "--seed", seed).status, tt.USAGE); // --state is required

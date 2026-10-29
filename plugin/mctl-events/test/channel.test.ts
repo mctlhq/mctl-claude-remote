@@ -2,7 +2,7 @@
 // installed. Ported from events/tests/test_channel.py.
 
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, describe, test } from "node:test";
+import { afterEach, beforeEach, describe, test } from "bun:test";
 
 import { Adapter, AUDIT_STREAM, PENDING_BATCH } from "../src/channel.ts";
 import type { Message as ChannelMessage } from "../src/channel.ts";
@@ -26,7 +26,7 @@ async function pendingCount(db: Connection): Promise<number> {
   return ((await db.execute(["XPENDING", STREAM, "claude-remote"])) as Reply[])[0] as number;
 }
 
-describe("walking skeleton", { skip: requiresValkey }, () => {
+describe.skipIf(requiresValkey)("walking skeleton", () => {
   let valkey: ValkeyServer;
   let db: Connection;
   let claude: FakeClaude;
@@ -336,7 +336,7 @@ class FailFirstXack {
   }
 }
 
-describe("in-process adapter", { skip: requiresValkey }, () => {
+describe.skipIf(requiresValkey)("in-process adapter", () => {
   let valkey: ValkeyServer;
   let db: Connection;
   let basePolicy: policyMod.Policy;

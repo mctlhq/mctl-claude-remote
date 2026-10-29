@@ -12,15 +12,15 @@ environment variables. A session can switch between the two implementations by
 changing only the command that starts the MCP server. The Python adapter stays
 in place and is still what runs in production until someone switches.
 
-It has no runtime dependencies. The compiled JavaScript is committed in
-`dist/`, so Claude Code runs it straight from the plugin directory with no build
-or `npm install` step. CI fails when `dist/` does not match a fresh build of
-`src/`.
+It runs its TypeScript source directly on [Bun](https://bun.sh), as Claude
+Code's official channel plugins do, and has no runtime dependencies: only Bun's
+built-in `node:` modules. There is no build step and no `bun install` when the
+plugin starts; the dev dependencies in `package.json` are only for type checking.
 
 ## Requirements
 
-- Node.js 22.18 or newer on `PATH` as `node` (the plugin's `.mcp.json` runs
-  `node`).
+- Bun 1.3 or newer, on the `PATH` of the `claude` process as `bun` (the plugin's
+  `.mcp.json` runs `bun`). Tested with 1.3.14.
 - Claude Code with Channels support (research preview). A plugin channel that is
   not on the approved allowlist needs the development-channels flag below.
 - A Valkey or Redis 7+ server holding the event streams.
@@ -52,10 +52,24 @@ Start the session with the channel enabled:
 claude --dangerously-load-development-channels plugin:mctl-events@mctlhq
 ```
 
-To try a local checkout without installing it, load it with
-`claude --plugin-dir plugin/mctl-events`. The MCP server and its tools load that
-way (verified); the channel id a `--plugin-dir` plugin answers to under
-`--dangerously-load-development-channels` has not been verified.
+To try a local checkout without installing it:
+
+```
+claude --plugin-dir plugin/mctl-events \
+  --dangerously-load-development-channels plugin:mctl-events@inline
+```
+
+A `--plugin-dir` plugin belongs to the `inline` marketplace. Verified with Claude
+Code 2.1.312 and Bun 1.3.14: an event added to the stream was delivered, and the
+session acknowledged it through
+`mcp__plugin_mctl-events_mctl-events__ack_event`.
+
+The server is started as `bun run --silent ${CLAUDE_PLUGIN_ROOT}/src/channel.ts`.
+Unlike the official plugins, which use `bun run --cwd ${CLAUDE_PLUGIN_ROOT} start`
+so their start script can `bun install` dependencies first, it neither changes
+directory nor installs anything. That keeps the working directory the Python
+adapter had, so a relative `MCTL_EVENTS_POLICY` still resolves against the
+session's directory.
 
 ### Tool names under a plugin
 
@@ -72,10 +86,10 @@ names the tools must use the plugin form.
 
 Verified with Claude Code 2.1.312: with `--strict-mcp-config` the plugin's MCP
 server is not started at all and its tools do not exist; without the flag it
-starts and both tools are listed. A session that has to keep
-`--strict-mcp-config` (to keep user-scope MCP servers out) cannot use the
-plugin's server; it uses the compiled adapter through `--mcp-config` instead,
-as described under [Running without the plugin](#running-without-the-plugin).
+starts and both tools are listed, but so are all the user-scope MCP servers from
+`~/.claude.json`. A session that has to keep `--strict-mcp-config` cannot use the
+plugin's server; it runs the same source through `--mcp-config` instead, as
+described under [Running without the plugin](#running-without-the-plugin).
 
 ## Environment
 
@@ -98,13 +112,13 @@ none of it changes with the port.
 
 ## The Telegram worker token tool
 
-`dist/telegram-token.js` is the port of `events/mctl_events/telegram_token.py`,
+`src/telegram_token.ts` is the port of `events/mctl_events/telegram_token.py`,
 with the same subcommands, flags and exit codes (0 ok, 1 failed, 2 usage,
 10 relaunch the session):
 
 ```
-node dist/telegram-token.js header --seed SEED --state STATE [--served SERVED]
-node dist/telegram-token.js renew  --seed SEED --state STATE [--served SERVED] --mcp-url https://... \
+bun run src/telegram_token.ts header --seed SEED --state STATE [--served SERVED]
+bun run src/telegram_token.ts renew  --seed SEED --state STATE [--served SERVED] --mcp-url https://... \
     [--pushgateway URL] [--instance NAME] [--recycle-before SECONDS]
 ```
 
@@ -114,14 +128,14 @@ loop that keeps the worker token fresh.
 ## Running without the plugin
 
 The adapter does not need the plugin machinery. Point an `--mcp-config` server
-entry at the compiled file:
+entry at the source:
 
 ```json
 {
   "mcpServers": {
     "mctl-events": {
-      "command": "node",
-      "args": ["/path/to/mctl-claude-remote/plugin/mctl-events/dist/channel.js"]
+      "command": "/Users/me/.bun/bin/bun",
+      "args": ["run", "--silent", "/path/to/mctl-claude-remote/plugin/mctl-events/src/channel.ts"]
     }
   }
 }
@@ -130,7 +144,8 @@ entry at the compiled file:
 This keeps the server name `mctl-events`, so the tools stay
 `mcp__mctl-events__ack_event` / `mcp__mctl-events__event_status`, the channel
 flag stays `--dangerously-load-development-channels server:mctl-events`, and it
-works with `--strict-mcp-config`.
+works with `--strict-mcp-config`. Verified the same way as the plugin route,
+under `--strict-mcp-config`: delivered, then acknowledged by the session.
 
 ## Migrating the Mac mini channel host
 
@@ -138,38 +153,46 @@ Not performed; this is the procedure for whoever switches the host. The current
 launcher is `~/mctl-events/run-session.sh`, which runs the Python adapter with
 uv's Python 3.12.
 
-1. **Node.** `~/.local/bin/node` is currently a dangling symlink into a removed
-   runner `externals/` directory, so `node` is not usable there today. Install
-   a standalone Node 24 (for example the official tarball under
-   `~/.local/node24`) and point `~/.local/bin/node` at it, or set `NODE=` to an
-   absolute path in `run-session.sh`. Do not link into the Actions runner's
-   `externals.*` directory: runner upgrades replace it.
+1. **Bun.** Node is not usable on the host today (`~/.local/bin/node` is a
+   dangling symlink into a removed Actions runner directory), so a runtime has to
+   be installed either way. Install Bun for the session user with the official
+   script, pinned to the tested version; it installs into `~/.bun` and needs no
+   root. The host is Intel with AVX2, so the default `darwin-x64` build applies:
+
+   ```
+   curl -fsSL https://bun.sh/install | bash -s "bun-v1.3.14"
+   ~/.bun/bin/bun --version
+   ```
+
+   The installer also edits the shell profile; `run-session.sh` should not rely on
+   that and should use `BUN=$HOME/.bun/bin/bun` explicitly.
 2. **Code.** Either clone the repository to a fixed path, or install the plugin
    (`claude plugin marketplace add mctlhq/mctl-claude-remote` and
    `claude plugin install mctl-events@mctlhq`), which places a clone under
    `~/.claude/plugins/marketplaces/mctlhq/` and a versioned copy under
    `~/.claude/plugins/cache/mctlhq/mctl-events/<version>/`. Pin the path the
-   launcher uses to one of these; prefer the clone, whose path does not change
-   with the version.
+   launcher uses to one of these as `PLUGIN=.../plugin/mctl-events`; prefer the
+   clone, whose path does not change with the version.
 3. **Server entry (recommended: keep `--strict-mcp-config`).** In the generated
    `mcp.json`, change only the `mctl-events` command:
 
    ```
-   "mctl-events": {"command": "$NODE", "args": ["$PLUGIN/dist/channel.js"]}
+   "mctl-events": {"command": "$BUN", "args": ["run", "--silent", "$PLUGIN/src/channel.ts"]}
    ```
 
    The environment (`MCTL_EVENTS_VALKEY_URL`, `MCTL_EVENTS_VALKEY_PASSWORD_FILE`,
    `MCTL_EVENTS_POLICY`) stays exactly as it is. `--strict-mcp-config`,
    `--dangerously-load-development-channels server:mctl-events` and the
    `--allowedTools "mcp__mctl-events__ack_event"` entry stay unchanged.
-4. **Token tool.** Replace `$PY $TG_TOOL` with `$NODE $PLUGIN/dist/telegram-token.js`
-   in both the `headersHelper` and the hourly `renew` loop; the arguments are
-   unchanged and exit code 10 still means "relaunch the session".
+4. **Token tool.** Replace `$PY $TG_TOOL` with
+   `$BUN run --silent $PLUGIN/src/telegram_token.ts` in both the `headersHelper`
+   and the hourly `renew` loop; the arguments are unchanged and exit code 10 still
+   means "relaunch the session".
 5. **Alternative: use the plugin's own server.** Drop the `mctl-events` entry
    from `mcp.json`, drop `--strict-mcp-config` (otherwise the plugin's server
-   does not start), and use
-   `--dangerously-load-development-channels plugin:mctl-events@mctlhq` and
-   `--allowedTools "mcp__plugin_mctl-events_mctl-events__ack_event"`. Without
+   does not start), put `~/.bun/bin` on the `PATH` the session is launched with,
+   and use `--dangerously-load-development-channels plugin:mctl-events@mctlhq`
+   and `--allowedTools "mcp__plugin_mctl-events_mctl-events__ack_event"`. Without
    `--strict-mcp-config` the session also loads user-scope MCP servers from
    `~/.claude.json`, and any session instructions that name
    `mcp__mctl-events__ack_event` must be updated.
@@ -180,7 +203,8 @@ uv's Python 3.12.
    shared between the two implementations, so the switch loses and duplicates
    nothing beyond what an ordinary restart does.
 7. **Rollback.** Put the `$PY -m mctl_events.channel` command (and `$PY $TG_TOOL`)
-   back and relaunch. No state migration is involved in either direction.
+   back and relaunch. No state migration is involved in either direction, and
+   Bun can stay installed.
 
 ## Differences from the Python adapter
 
@@ -195,11 +219,11 @@ None of these change what is delivered, acknowledged or audited for valid input.
 - `tools/call` reports any unexpected error as an `isError` result; the Python
   server would crash. A failure to write a reply to stdout is logged rather than
   raised.
-- The `delivery_failed` audit reason carries Node's error code (`EPIPE`,
-  `ERR_STREAM_DESTROYED`) where Python wrote an exception class name.
+- The `delivery_failed` audit reason carries the runtime's error code (for
+  example `EPIPE`) where Python wrote an exception class name.
 - A Valkey error nested inside an array reply becomes a string element.
-- The token tool's HTTP client does not follow redirects (Python's urllib did)
-  and ignores `HTTP(S)_PROXY`; it uses Node's CA store. A non-string
+- The token tool's HTTP client does not follow redirects (Python's urllib did),
+  and uses Bun's CA store. Going through an `HTTP(S)_PROXY` is not tested. A non-string
   `worker_token` in the renewal reply is a clean renewal failure with metrics
   still pushed (Python failed with `AttributeError` and pushed none).
 - The token tool's argument parser does not accept abbreviated flags
@@ -210,23 +234,19 @@ None of these change what is delivered, acknowledged or audited for valid input.
   stream as U+FFFD; the Python adapter failed the audit write.
 - Floats in log lines print without a trailing `.0` (`"backoff": 1`).
 - An unexpected error in the consumer loop is logged as
-  `consumer stopped on an unexpected error` before the server exits.
+  `consumer stopped on an unexpected error`. As when the Python consumer thread
+  dies, the server keeps running and answering tools but consumes nothing more,
+  until the session restarts it.
 
 ## Development
 
-The build and test tooling lives one directory up, in `plugin/package.json`, so
-that nothing in it is installed with the plugin. Its only dependencies are
-`typescript` and `@types/node`, both dev-only.
-
 ```
-cd plugin
-npm ci
-npm run typecheck
-npm test            # unit tests, plus integration tests against valkey-server
-npm run build       # regenerate dist/ from src/
-npm run check-dist  # fail when dist/ does not match a fresh build
+cd plugin/mctl-events
+bun install          # dev dependencies only: typescript, @types/bun
+bunx tsc --noEmit    # typecheck
+bun test             # unit tests, plus integration tests against valkey-server
 ```
 
 The integration tests start a throwaway `valkey-server` (or `redis-server`)
-from `PATH` and are skipped when neither is installed. Tests run the compiled
-`dist/` files, so run `npm run build` after changing `src/`.
+from `PATH` and are skipped when neither is installed. They run the adapter and
+the token tool as subprocesses of the same `bun` that runs the tests.

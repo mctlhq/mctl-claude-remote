@@ -125,6 +125,11 @@ export function compareCodePoints(a: string, b: string): number {
   }
 }
 
+// A broken stderr pipe is reported as an 'error' event, not thrown from
+// write(); without a listener it would crash the process before the audit
+// queue is flushed.
+process.stderr.on("error", () => undefined);
+
 /** A structured log line on stderr, as `channel._log` writes it. */
 export function log(message: string, fields: Record<string, unknown> = {}): void {
   const now = new Date();
