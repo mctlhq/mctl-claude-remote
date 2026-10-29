@@ -64,12 +64,32 @@ Code 2.1.312 and Bun 1.3.14: an event added to the stream was delivered, and the
 session acknowledged it through
 `mcp__plugin_mctl-events_mctl-events__ack_event`.
 
-The server is started as `bun run --silent ${CLAUDE_PLUGIN_ROOT}/src/channel.ts`.
+The server is started as
+
+```
+bun run --silent --no-env-file --config=${CLAUDE_PLUGIN_ROOT}/bunfig.toml ${CLAUDE_PLUGIN_ROOT}/src/channel.ts
+```
+
 Unlike the official plugins, which use `bun run --cwd ${CLAUDE_PLUGIN_ROOT} start`
 so their start script can `bun install` dependencies first, it neither changes
 directory nor installs anything. That keeps the working directory the Python
 adapter had, so a relative `MCTL_EVENTS_POLICY` still resolves against the
 session's directory.
+
+That directory belongs to whatever session Claude Code was started in, not to
+the plugin, so neither of Bun's per-directory configuration files is read from
+it:
+
+- `--no-env-file`: by default `bun run` loads `.env`, `.env.local` and
+  `.env.<NODE_ENV>` from the working directory into unset variables, which could
+  supply `MCTL_EVENTS_*`, `HTTPS_PROXY` or `NODE_TLS_REJECT_UNAUTHORIZED`.
+- `--config=.../bunfig.toml`: by default Bun reads `bunfig.toml` from the working
+  directory, and its `preload` runs arbitrary code before the adapter. The
+  plugin's own `bunfig.toml` is intentionally empty and is read instead.
+
+Every command in this README that runs the plugin's code passes both flags, and
+the tests take the server's arguments from `.mcp.json` itself and check that a
+hostile `.env` and `bunfig.toml` in the working directory have no effect.
 
 ### Tool names under a plugin
 
@@ -117,10 +137,15 @@ with the same subcommands, flags and exit codes (0 ok, 1 failed, 2 usage,
 10 relaunch the session):
 
 ```
-bun run src/telegram_token.ts header --seed SEED --state STATE [--served SERVED]
-bun run src/telegram_token.ts renew  --seed SEED --state STATE [--served SERVED] --mcp-url https://... \
+BUN_RUN="bun run --silent --no-env-file --config=$PLUGIN/bunfig.toml"
+$BUN_RUN $PLUGIN/src/telegram_token.ts header --seed SEED --state STATE [--served SERVED]
+$BUN_RUN $PLUGIN/src/telegram_token.ts renew  --seed SEED --state STATE [--served SERVED] --mcp-url https://... \
     [--pushgateway URL] [--instance NAME] [--recycle-before SECONDS]
 ```
+
+where `PLUGIN` is the `plugin/mctl-events` directory. The flags matter here too:
+`headersHelper` runs in the session's directory, and `renew` sends the worker
+token over HTTPS.
 
 `header` is meant for an MCP server's `headersHelper`; `renew` for the hourly
 loop that keeps the worker token fresh.
@@ -135,7 +160,11 @@ entry at the source:
   "mcpServers": {
     "mctl-events": {
       "command": "/Users/me/.bun/bin/bun",
-      "args": ["run", "--silent", "/path/to/mctl-claude-remote/plugin/mctl-events/src/channel.ts"]
+      "args": [
+        "run", "--silent", "--no-env-file",
+        "--config=/path/to/mctl-claude-remote/plugin/mctl-events/bunfig.toml",
+        "/path/to/mctl-claude-remote/plugin/mctl-events/src/channel.ts"
+      ]
     }
   }
 }
@@ -177,7 +206,8 @@ uv's Python 3.12.
    `mcp.json`, change only the `mctl-events` command:
 
    ```
-   "mctl-events": {"command": "$BUN", "args": ["run", "--silent", "$PLUGIN/src/channel.ts"]}
+   "mctl-events": {"command": "$BUN", "args": ["run", "--silent", "--no-env-file",
+     "--config=$PLUGIN/bunfig.toml", "$PLUGIN/src/channel.ts"]}
    ```
 
    The environment (`MCTL_EVENTS_VALKEY_URL`, `MCTL_EVENTS_VALKEY_PASSWORD_FILE`,
@@ -185,7 +215,8 @@ uv's Python 3.12.
    `--dangerously-load-development-channels server:mctl-events` and the
    `--allowedTools "mcp__mctl-events__ack_event"` entry stay unchanged.
 4. **Token tool.** Replace `$PY $TG_TOOL` with
-   `$BUN run --silent $PLUGIN/src/telegram_token.ts` in both the `headersHelper`
+   `$BUN run --silent --no-env-file --config=$PLUGIN/bunfig.toml $PLUGIN/src/telegram_token.ts`
+   in both the `headersHelper`
    and the hourly `renew` loop; the arguments are unchanged and exit code 10 still
    means "relaunch the session".
 5. **Alternative: use the plugin's own server.** Drop the `mctl-events` entry

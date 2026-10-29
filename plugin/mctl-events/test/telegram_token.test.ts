@@ -12,7 +12,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, test } from "bun:test";
 
 import * as tt from "../src/telegram_token.ts";
-import { TELEGRAM_TOKEN_TS } from "./support.ts";
+import { BUN_ARGS, TELEGRAM_TOKEN_TS } from "./support.ts";
 
 const DAY = 24 * 3600;
 const NOW = 1_800_000_000;
@@ -381,7 +381,7 @@ describe("recycle", () => {
 describe("header and command line", () => {
   // As headersHelper runs it: by path, from an unrelated directory.
   const runHeader = () =>
-    spawnSync(process.execPath, [TELEGRAM_TOKEN_TS, "header", ...cliArgs()], { cwd: dir, encoding: "utf8", timeout: 30_000 });
+    spawnSync(process.execPath, [...BUN_ARGS, TELEGRAM_TOKEN_TS, "header", ...cliArgs()], { cwd: dir, encoding: "utf8", timeout: 30_000 });
 
   test("prints the current token and records its expiry", () => {
     const tok = jwt(NOW + 30 * DAY, NOW);
@@ -390,6 +390,30 @@ describe("header and command line", () => {
     assert.equal(proc.status, 0, proc.stderr);
     assert.equal(proc.stdout, `{"Authorization": "Bearer ${tok}"}\n`);
     assert.equal(fs.readFileSync(served, "utf8").trim(), String(NOW + 30 * DAY));
+  });
+
+  test("the working directory's .env and bunfig.toml are ignored", () => {
+    const tok = jwt(NOW + 30 * DAY, NOW);
+    fs.writeFileSync(seed, tok + "\n");
+    const marker = path.join(dir, "preloaded");
+    fs.writeFileSync(path.join(dir, ".env"), "HTTPS_PROXY=http://127.0.0.1:9\n");
+    fs.writeFileSync(path.join(dir, "bunfig.toml"), 'preload = ["./preload.ts"]\n');
+    fs.writeFileSync(
+      path.join(dir, "preload.ts"),
+      `require("node:fs").writeFileSync(${JSON.stringify(marker)}, process.env.HTTPS_PROXY ?? "ran");\nconsole.log("preloaded");\n`,
+    );
+    const proc = runHeader();
+    assert.equal(proc.status, 0, proc.stderr);
+    assert.equal(proc.stdout, `{"Authorization": "Bearer ${tok}"}\n`);
+    assert.ok(!fs.existsSync(marker), "the working directory's bunfig.toml preload ran");
+  });
+
+  test("a .env in the working directory does not reach the process", () => {
+    fs.writeFileSync(path.join(dir, ".env"), "MCTL_DOTENV_PROBE=loaded\n");
+    const probe = path.join(dir, "probe.ts");
+    fs.writeFileSync(probe, "process.stdout.write(process.env.MCTL_DOTENV_PROBE ?? 'unset');\n");
+    const proc = spawnSync(process.execPath, [...BUN_ARGS, probe], { cwd: dir, encoding: "utf8" });
+    assert.equal(proc.stdout, "unset", proc.stderr);
   });
 
   test("no token prints nothing", () => {
@@ -409,7 +433,7 @@ describe("header and command line", () => {
   });
 
   test("argparse's flags, forms and exit codes", async () => {
-    const run = (...argv: string[]) => spawnSync(process.execPath, [TELEGRAM_TOKEN_TS, ...argv], { cwd: dir, encoding: "utf8" });
+    const run = (...argv: string[]) => spawnSync(process.execPath, [...BUN_ARGS, TELEGRAM_TOKEN_TS, ...argv], { cwd: dir, encoding: "utf8" });
     assert.equal(run().status, tt.USAGE);
     assert.equal(run("nope").status, tt.USAGE);
     assert.equal(run("header", "--seed", seed).status, tt.USAGE); // --state is required

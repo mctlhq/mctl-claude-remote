@@ -16,6 +16,20 @@ export const PLUGIN = path.resolve(path.dirname(fileURLToPath(import.meta.url)),
 export const CHANNEL_TS = path.join(PLUGIN, "src", "channel.ts");
 export const TELEGRAM_TOKEN_TS = path.join(PLUGIN, "src", "telegram_token.ts");
 
+/**
+ * The bun arguments ahead of the script, exactly as the shipped `.mcp.json`
+ * starts the server, so the tests exercise the command Claude Code runs. The
+ * token tool is documented to run with the same ones.
+ */
+export const BUN_ARGS: readonly string[] = (() => {
+  const config = JSON.parse(fs.readFileSync(path.join(PLUGIN, ".mcp.json"), "utf8"));
+  const args = (config.mcpServers["mctl-events"].args as string[]).map((arg) =>
+    arg.replaceAll("${CLAUDE_PLUGIN_ROOT}", PLUGIN),
+  );
+  if (args.at(-1) !== CHANNEL_TS) throw new Error(`.mcp.json does not end with ${CHANNEL_TS}: ${args.join(" ")}`);
+  return args.slice(0, -1);
+})();
+
 function which(name: string): string | null {
   try {
     return execFileSync("/bin/sh", ["-c", `command -v ${name}`], { encoding: "utf8" }).trim() || null;
@@ -153,10 +167,17 @@ export class FakeClaude {
   private id = 0;
   readonly exited: Promise<number | null>;
 
-  constructor(url: string, policy: Record<string, unknown>, env: Record<string, string> = {}) {
+  /** `cwdFiles` are written into the process's working directory before it starts. */
+  constructor(
+    url: string,
+    policy: Record<string, unknown>,
+    env: Record<string, string> = {},
+    cwdFiles: Record<string, string> = {},
+  ) {
     const policyPath = path.join(this.dir, "policy.json");
     fs.writeFileSync(policyPath, JSON.stringify(policy));
-    this.proc = spawn(process.execPath, [CHANNEL_TS], {
+    for (const [name, text] of Object.entries(cwdFiles)) fs.writeFileSync(path.join(this.dir, name), text);
+    this.proc = spawn(process.execPath, [...BUN_ARGS, CHANNEL_TS], {
       cwd: this.dir,
       env: { ...process.env, MCTL_EVENTS_VALKEY_URL: url, MCTL_EVENTS_POLICY: policyPath, ...env },
       stdio: ["pipe", "pipe", "pipe"],

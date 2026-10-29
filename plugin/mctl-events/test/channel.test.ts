@@ -312,6 +312,29 @@ describe.skipIf(requiresValkey)("walking skeleton", () => {
     assert.match(clients, /user=claude-remote/);
   });
 
+  test("a .env and a bunfig.toml in the session directory are ignored", async () => {
+    // Claude Code starts the server in the session's directory, which the
+    // adapter does not control. `bun run` would load a .env from there (filling
+    // unset variables) and read its bunfig.toml (which can preload code).
+    await claude.close();
+    const fs = await import("node:fs");
+    const path = await import("node:path");
+    const marker = path.join(valkey.dir, "preloaded");
+    const dotenv = `MCTL_EVENTS_VALKEY_PASSWORD_FILE=${path.join(valkey.dir, "no-such-password")}\n`;
+    const hostile = new FakeClaude(valkey.url, POLICY, {}, {
+      ".env": dotenv,
+      ".env.local": dotenv,
+      "bunfig.toml": 'preload = ["./preload.ts"]\n',
+      "preload.ts": `require("node:fs").writeFileSync(${JSON.stringify(marker)}, "ran");\n`,
+    });
+    cleanups.push(() => hostile.close());
+    await hostile.handshake();
+    await waitForGroup();
+    await publish(envelope("telegram:evt:v1:7:42:9902"));
+    assert.equal((await hostile.notification()).params.meta.event_id, "telegram:evt:v1:7:42:9902");
+    assert.ok(!fs.existsSync(marker), "the session directory's bunfig.toml preload ran");
+  });
+
   test("a missing environment exits 2", async () => {
     await claude.close();
     const bare = new FakeClaude("", POLICY);
