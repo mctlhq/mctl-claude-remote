@@ -226,6 +226,7 @@ active slots, the Codex app server and the waker.
 | `wake:<wake_id>` | hash `{question_id, thread_id, state, turn_id}` | wake intent and outcome |
 | `dedup:<idempotency_key>` | string → `msg_id` | deduplication |
 | `late:<task_id>` | stream | evidence that arrived after the sender lost the right to change state |
+| `audit:<id>` | stream (capped at about 200) | one message's own trail, read by `mctl-bridge status` |
 | `audit` | stream | every state transition |
 
 Every transition is **one Lua/FCALL call** that updates `msg:<id>`, `open`, the queues,
@@ -244,11 +245,22 @@ arrive with slice 3.
 
 Tasks (orchestrator → slot):
 `queued → emit_intent → emitted → acked → completed | failed`, plus `expired`,
-`cancelled` (before `emit_intent` only) and `delivery_unknown`.
+`cancelled` and `delivery_unknown`. The state machine cancels a task by itself only
+before `emit_intent` (its addressee changed); an operator may cancel at any
+non-terminal state through `resolve`.
 
 Questions (slot → orchestrator):
 `asked → reply_committed → reply_emit_intent → reply_emitted → reply_acknowledged`,
-plus `expired` and `delivery_unknown`.
+plus `closed` and `delivery_unknown`.
+
+- A question past its `expires_at` gets a **system reply** (`reply_by: system`, fixed
+  text) instead of silence: the asking task ended its turn and waits, and an expired
+  question would otherwise wedge the slot, because its task still holds `inflight`.
+  The feed carries `question_expired`.
+- When a task ends (`report_result`, or `resolve` to a terminal state) its open question
+  is `closed` and its claim dropped; no reply can reach it any more.
+- An epoch change or a lost heartbeat moves the slot's open questions (`asked`,
+  `reply_committed`) to `delivery_unknown` together with its tasks.
 
 Wakes: `intent → started → completed`, plus `wake_unknown`.
 
@@ -289,7 +301,9 @@ it is appended to `late:<task_id>` and `audit` with
 `{task_id, attempt_id, epoch, conn_id, reason}`. `mctl-bridge errors` shows these next
 to `delivery_unknown`, so an operator sees that a first attempt already acted before
 deciding to rerun. `mctl-bridge resolve <id> --as completed|failed|requeue --reason`
-is the manual transition and records its author.
+is the manual transition and records its author. `requeue` is refused while late
+evidence exists unless `--force` is given, so a rerun is a decision taken after reading
+what the earlier attempt did.
 
 ### Questions and replies
 
@@ -348,8 +362,10 @@ Fixes P1-c.
   through recovery.
 - `dedup:<key>` lives while its message is in `open`, plus a replay window (7 days)
   after the terminal state, never a fixed TTL from creation.
-- `msg:<id>` lives until its terminal state plus 7 days. Streams are trimmed by MINID
-  only below the oldest entry still pending. `audit` keeps about 30 days.
+- `msg:<id>`, its own trail `audit:<id>` and its late evidence `late:<id>` live until
+  the terminal state plus 7 days, and never expire while the message is open. The
+  global `audit` stream is capped (about 100 000 entries); `mctl-bridge status` reads
+  the per-message trail, never the global stream.
 - Expiry is an explicit transition driven by `expires_at`.
 - Durability: Valkey runs with `appendonly yes` and `appendfsync always` for the bridge
   (the recovery test below depends on it). The cluster Valkey's persistence settings

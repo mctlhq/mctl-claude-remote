@@ -48,6 +48,7 @@ export const key = {
   claim: (id: string) => `${PREFIX}claim:${id}`,
   dedup: (k: string) => `${PREFIX}dedup:${k}`,
   late: (id: string) => `${PREFIX}late:${id}`,
+  msgAudit: (id: string) => `${PREFIX}audit:${id}`,
 };
 
 export function newId(kind: "t" | "q" | "r" | "a" | "c" | "k"): string {
@@ -188,8 +189,9 @@ export class Bridge {
     return this.call("bridge_reply", key.orch, [questionId, token, replyId, payload]);
   }
 
-  resolve(id: string, as: string, reason: string, author: string) {
-    return this.call("bridge_resolve", key.orch, [id, as, reason, author]);
+  /** `force` requeues even though late evidence shows an earlier attempt acted. */
+  resolve(id: string, as: string, reason: string, author: string, force = false) {
+    return this.call("bridge_resolve", key.orch, [id, as, reason, author, force ? "1" : "0"]);
   }
 
   expire(id: string) {
@@ -234,6 +236,12 @@ export class Bridge {
       out.push({ id, claimed: claimed ? "1" : "0", ...(await this.message(id)) });
     }
     return out;
+  }
+
+  /** One message's own bounded trail; never scans the global audit stream. */
+  async auditTrail(id: string): Promise<Array<Record<string, string>>> {
+    const reply = await this.exec.execute(["XRANGE", key.msgAudit(id), "-", "+"]);
+    return Array.isArray(reply) ? reply.map((e) => ({ entry: text((e as Reply[])[0]!), ...pairs((e as Reply[])[1]!) })) : [];
   }
 
   async late(taskId: string): Promise<Array<Record<string, string>>> {

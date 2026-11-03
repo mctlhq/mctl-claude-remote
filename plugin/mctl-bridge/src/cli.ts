@@ -23,7 +23,7 @@ const USAGE = `usage: mctl-bridge <command> [options]
   claim QID [--lease MS]                 take the right to reply
   renew QID --token T [--lease MS]
   reply QID --token T (--text T | --text -)
-  resolve ID --as completed|failed|cancelled|closed|requeue --reason R [--author A]
+  resolve ID --as completed|failed|cancelled|closed|requeue --reason R [--author A] [--force]
   sessions                               registered slots
   tasks                                  every open message
   status ID                              one message with its audit trail and late evidence
@@ -55,7 +55,7 @@ function positional(args: string[], name: string): string {
 function num(value: string | undefined, fallback: number, name: string): number {
   if (value === undefined) return fallback;
   const n = Number(value);
-  if (!Number.isFinite(n) || n < 0) throw new Usage(`${name} must be a non-negative number`);
+  if (!Number.isInteger(n) || n < 0) throw new Usage(`${name} must be a non-negative integer`);
   return n;
 }
 
@@ -68,14 +68,14 @@ function entries(reply: Reply): Array<Record<string, string>> {
 }
 
 async function lateKeys(b: Bridge): Promise<string[]> {
-  const out: string[] = [];
+  const out = new Set<string>(); // SCAN may return a key more than once
   let cursor = "0";
   do {
     const [next, batch] = (await b.exec.execute(["SCAN", cursor, "MATCH", `${key.late("")}*`, "COUNT", 500])) as Reply[];
     cursor = text(next!);
-    for (const k of batch as Reply[]) out.push(text(k));
+    for (const k of batch as Reply[]) out.add(text(k));
   } while (cursor !== "0");
-  return out.sort();
+  return [...out].sort();
 }
 
 export async function run(argv: string[], b: Bridge): Promise<{ code: number; out: unknown }> {
@@ -96,6 +96,7 @@ export async function run(argv: string[], b: Bridge): Promise<{ code: number; ou
       reason: { type: "string" },
       author: { type: "string" },
       "stale-ms": { type: "string" },
+      force: { type: "boolean" },
     },
   });
   const result = (r: Result) => ({ code: r.ok ? 0 : 1, out: r });
@@ -143,8 +144,9 @@ export async function run(argv: string[], b: Bridge): Promise<{ code: number; ou
       return result(await b.reply(positional(positionals, "QID"), values.token, readText(values.text)));
     case "resolve": {
       if (!values.as || !values.reason) throw new Usage("--as and --reason are required");
-      const author = values.author ?? process.env.USER ?? "";
-      return result(await b.resolve(positional(positionals, "ID"), values.as, values.reason, author));
+      const author = values.author || process.env.USER || "";
+      if (!author) throw new Usage("--author is required when USER is not set");
+      return result(await b.resolve(positional(positionals, "ID"), values.as, values.reason, author, values.force === true));
     }
     case "sessions": {
       const now = Date.now();
@@ -161,8 +163,7 @@ export async function run(argv: string[], b: Bridge): Promise<{ code: number; ou
       const id = positional(positionals, "ID");
       const message = await b.message(id);
       if (!message.state) return { code: 1, out: { ok: false, code: "unknown" } };
-      const audit = entries(await b.exec.execute(["XRANGE", key.audit, "-", "+"])).filter((e) => e.id === id);
-      return { code: 0, out: { ok: true, id, message, audit, late: await b.late(id) } };
+      return { code: 0, out: { ok: true, id, message, audit: await b.auditTrail(id), late: await b.late(id) } };
     }
     case "errors": {
       const open = await b.openMessages();

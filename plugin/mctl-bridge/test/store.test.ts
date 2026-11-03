@@ -305,6 +305,102 @@ describe.skipIf(requiresValkey)("bridge state machine", () => {
     expect((await auditFor(id)).map((e) => e.to)).toEqual(["queued", "emit_intent", "emitted", "acked", "completed"]);
   });
 
+  test("an expired question gets a system reply, so the waiting task can go on", async () => {
+    const a = await register("a");
+    const { admission } = await admitted(a);
+    const other = must(await b.send({ slot: "a", payload: "unrelated" }));
+    const q = must(await b.ask("a", admission, "?", { ttl_ms: 20 }));
+    await sleep(40);
+    const swept = await b.sweep(60_000);
+    expect(swept.expired).toEqual([q.question_id]);
+    expect((await b.askedQuestions()).map((x) => x.id)).not.toContain(q.question_id);
+    expect(await b.claim(q.question_id)).toMatchObject({ ok: false, code: "not_asked" });
+    const got = must(await b.next(a));
+    expect(got).toMatchObject({ kind: "reply", id: q.question_id, attempt_id: admission.attempt_id });
+    expect((await b.message(q.question_id)).reply_by).toBe("system");
+    must(await b.emitted(a, q.question_id));
+    must(await b.ackReply(a, q.question_id, got.reply_id));
+    must(await b.result("a", admission, "failed", "no answer"));
+    expect(must(await b.next(a)).id).toBe(other.id);
+    const feed = (await b.exec.execute(["XRANGE", key.feed, "-", "+"])) as any[];
+    expect(feed.map((e) => pairs(e[1])).some((e) => e.id === q.question_id && e.event === "question_expired")).toBe(true);
+  });
+
+  test("a stale slot takes its open questions to delivery_unknown", async () => {
+    const a = await register("a");
+    const { admission } = await admitted(a);
+    const asked = must(await b.ask("a", admission, "first?"));
+    must(await b.claim(asked.question_id));
+    await sleep(30);
+    expect((await b.sweep(10)).stale).toEqual(["a"]);
+    expect(await b.message(asked.question_id)).toMatchObject({ state: "delivery_unknown", reason: "asker_heartbeat_lost" });
+    expect(await b.askedQuestions()).toEqual([]);
+    expect(await b.exec.execute(["EXISTS", key.claim(asked.question_id)])).toBe(0);
+    expect(await b.exec.execute(["ZRANGE", key.ready("a"), 0, -1])).toEqual([]);
+  });
+
+  test("a stale slot takes a committed, undelivered reply to delivery_unknown", async () => {
+    const a = await register("a");
+    const { admission } = await admitted(a);
+    const q = must(await b.ask("a", admission, "?"));
+    const c = must(await b.claim(q.question_id));
+    must(await b.reply(q.question_id, c.claim_token, "yes"));
+    await sleep(30);
+    await b.sweep(10);
+    expect(await state(q.question_id)).toBe("delivery_unknown");
+    const ready = await b.exec.execute(["ZRANGE", key.ready("a"), 0, -1]);
+    expect(ready).toEqual([]);
+  });
+
+  test("a task that finishes or is resolved closes its open question", async () => {
+    const a = await register("a");
+    const first = await admitted(a);
+    const q1 = must(await b.ask("a", first.admission, "?"));
+    must(await b.result("a", first.admission, "completed", "figured it out"));
+    expect(await b.message(q1.question_id)).toMatchObject({ state: "closed", reason: "task_finished" });
+    expect(await b.claim(q1.question_id)).toMatchObject({ ok: false, code: "not_asked" });
+
+    const second = await admitted(a);
+    const q2 = must(await b.ask("a", second.admission, "?"));
+    const c = must(await b.claim(q2.question_id));
+    must(await b.resolve(second.id, "cancelled", "operator stopped it", "op"));
+    expect(await b.message(q2.question_id)).toMatchObject({ state: "closed", reason: "task_resolved" });
+    expect(await b.reply(q2.question_id, c.claim_token, "too late")).toMatchObject({ ok: false });
+    expect((await b.slotInfo("a")).inflight).toBe("");
+  });
+
+  test("requeue is refused while late evidence exists, unless forced", async () => {
+    const a1 = await register("a");
+    const { admission } = await admitted(a1);
+    await register("a");
+    await b.result("a", admission, "completed", "already pushed");
+    expect(await b.resolve(admission.task_id, "requeue", "retry", "op")).toMatchObject({ ok: false, code: "late_evidence", late_count: 1 });
+    must(await b.resolve(admission.task_id, "requeue", "retry after reading late evidence", "op", true));
+    expect(await state(admission.task_id)).toBe("queued");
+  });
+
+  test("audit and late trails expire with their message, not before", async () => {
+    const a1 = await register("a");
+    const { admission } = await admitted(a1);
+    await register("a");
+    await b.result("a", admission, "completed", "late");
+    const id = admission.task_id;
+    expect(await b.exec.execute(["PTTL", key.late(id)])).toBe(-1);
+    expect(await b.exec.execute(["PTTL", key.msgAudit(id)])).toBe(-1);
+    must(await b.resolve(id, "failed", "ran twice", "op"));
+    for (const k of [key.late(id), key.msgAudit(id), key.msg(id)]) {
+      expect((await b.exec.execute(["PTTL", k])) as number).toBeGreaterThan(6 * 24 * 3600 * 1000);
+    }
+    expect((await b.auditTrail(id)).map((e) => e.to)).toEqual(["queued", "emit_intent", "emitted", "acked", "delivery_unknown", "delivery_unknown", "failed"]);
+  });
+
+  test("a malformed ttl is a bad request, not a script error", async () => {
+    const a = await register("a");
+    const { admission } = await admitted(a);
+    const r = JSON.parse(text(await b.exec.execute(["FCALL", "bridge_ask", 1, key.slot("a"), "a", admission.task_id, admission.attempt_id, admission.uuid, admission.epoch, admission.conn_id, "q-x", "?", "soon"])));
+    expect(r).toMatchObject({ ok: false, code: "bad_request" });
+  });
+
   test("functions reject a first key that is not the caller's role key", async () => {
     const a = await register("a");
     const r = JSON.parse(text(await b.exec.execute(["FCALL", "bridge_heartbeat", 1, key.slot("b"), "a", a.conn_id, a.epoch, "0"])));

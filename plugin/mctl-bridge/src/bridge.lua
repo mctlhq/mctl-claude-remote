@@ -23,6 +23,8 @@ local RETAIN_MS = 7 * 24 * 3600 * 1000
 local AUDIT_MAXLEN = 100000
 local FEED_MAXLEN = 10000
 local LATE_MAXLEN = 100
+local MSG_AUDIT_MAXLEN = 200
+local EXPIRED_REPLY = '[mctl-bridge] No reply arrived before the question expired.'
 
 -- Terminal states leave every open index and start the retention clock.
 local TERMINAL = {
@@ -78,9 +80,13 @@ local AUDIT = P .. 'audit'
 local FEED = P .. 'outbox'
 local SEQ = P .. 'seq'
 
+-- Global trail plus a bounded per-message trail, so reading one message's history
+-- never scans the whole audit stream.
 local function audit(id, from, to, actor, reason, now)
   redis.call('XADD', AUDIT, 'MAXLEN', '~', AUDIT_MAXLEN, '*',
     'id', id, 'from', from or '', 'to', to, 'actor', actor or '', 'reason', reason or '', 't', now)
+  redis.call('XADD', P .. 'audit:' .. id, 'MAXLEN', '~', MSG_AUDIT_MAXLEN, '*',
+    'from', from or '', 'to', to, 'actor', actor or '', 'reason', reason or '', 't', now)
 end
 
 local function feed(id, event, now)
@@ -110,6 +116,8 @@ local function transition(id, m, to, actor, reason, now, fields)
     redis.call('SREM', OPEN, id)
     redis.call('SREM', slot_open_key(m.slot), id)
     redis.call('PEXPIRE', mkey(id), RETAIN_MS)
+    redis.call('PEXPIRE', P .. 'audit:' .. id, RETAIN_MS)
+    redis.call('PEXPIRE', P .. 'late:' .. id, RETAIN_MS)
     if m.idem and m.idem ~= '' then
       redis.call('PEXPIRE', P .. 'dedup:' .. m.idem, RETAIN_MS)
     end
@@ -122,6 +130,17 @@ local function clear_inflight(slot, task_id)
   local s = skey(slot)
   if redis.call('HGET', s, 'inflight') == task_id then
     redis.call('HSET', s, 'inflight', '', 'inflight_attempt', '')
+  end
+end
+
+-- A task that ends takes its open question with it: no reply can reach it any more.
+local function close_question(task_m, actor, reason, now)
+  local qid = task_m.open_question
+  if not qid or qid == '' then return end
+  local q = hgetall(mkey(qid))
+  if q.state and not TERMINAL[q.state] then
+    transition(qid, q, 'closed', actor, reason, now)
+    redis.call('DEL', P .. 'claim:' .. qid)
   end
 end
 
@@ -152,6 +171,12 @@ local function record_late(slot, task_id, m, a, code, kind, payload, now)
   redis.call('XADD', P .. 'late:' .. task_id, 'MAXLEN', '~', LATE_MAXLEN, '*',
     'kind', kind, 'slot', slot, 'attempt_id', a[3] or '', 'uuid', a[4] or '', 'epoch', a[5] or '',
     'conn_id', a[6] or '', 'reason', code, 'payload', payload or '', 't', now)
+  -- Evidence lives as long as its message: open, or terminal plus retention.
+  if m and m.state and not TERMINAL[m.state] then
+    redis.call('PERSIST', P .. 'late:' .. task_id)
+  else
+    redis.call('PEXPIRE', P .. 'late:' .. task_id, RETAIN_MS)
+  end
   if m and m.state then
     redis.call('HINCRBY', mkey(task_id), 'late_count', 1)
     audit(task_id, m.state, m.state, 'slot:' .. slot, 'late_' .. kind .. ':' .. code, now)
@@ -192,6 +217,7 @@ local function register(keys, a)
       transition(id, m, 'delivery_unknown', actor, 'epoch_changed', now)
     elseif st == 'asked' or st == 'reply_committed' then
       transition(id, m, 'delivery_unknown', actor, 'asker_context_reset', now)
+      redis.call('DEL', P .. 'claim:' .. id)
     end
   end
   redis.call('HSET', skey(slot), 'slot', slot, 'uuid', uuid, 'conn_id', conn, 'epoch', epoch,
@@ -346,6 +372,7 @@ local function report_result(keys, a)
     return no(code)
   end
   transition(a[2], m, status, 'slot:' .. slot, '', now, { result = payload })
+  close_question(m, 'slot:' .. slot, 'task_finished', now)
   clear_inflight(slot, a[2])
   feed(a[2], 'result', now)
   return ok()
@@ -357,7 +384,8 @@ end
 -- arrives later as an event. The task stays in flight.
 local function ask(keys, a)
   local slot, qid, payload, ttl = a[1], a[7], a[8], tonumber(a[9] or '0')
-  if not valid_slot(slot) or keys[1] ~= skey(slot) or not valid_id(qid) or not valid_payload(payload) then
+  if not valid_slot(slot) or keys[1] ~= skey(slot) or not valid_id(qid) or not valid_payload(payload)
+      or ttl == nil or ttl < 0 then
     return no('bad_request')
   end
   local now = now_ms()
@@ -457,7 +485,7 @@ local function reply(keys, a)
   if m.state ~= 'asked' then return no('not_asked', { state = m.state or '' }) end
   local now = now_ms()
   transition(qid, m, 'reply_committed', 'orch', '', now,
-    { reply_id = reply_id, reply = payload, replied_ms = now })
+    { reply_id = reply_id, reply = payload, replied_ms = now, reply_by = 'orch' })
   redis.call('ZREM', ASKED, qid)
   redis.call('ZADD', ready_key(m.slot), redis.call('INCR', SEQ), qid)
   redis.call('DEL', P .. 'claim:' .. qid)
@@ -469,7 +497,7 @@ end
 -- The manual way out of delivery_unknown (and of anything not yet terminal).
 -- requeue readdresses a task to the slot's current registration as a new attempt.
 local function resolve(keys, a)
-  local id, as, reason, author = a[1], a[2], a[3] or '', a[4] or ''
+  local id, as, reason, author, force = a[1], a[2], a[3] or '', a[4] or '', a[5] == '1'
   if keys[1] ~= ORCH or not valid_id(id) or reason == '' or author == '' then return no('bad_request') end
   local m = hgetall(mkey(id))
   if m.state == nil then return no('unknown') end
@@ -479,10 +507,16 @@ local function resolve(keys, a)
     if m.state ~= 'delivery_unknown' and m.state ~= 'cancelled' then
       return no('wrong_state', { state = m.state })
     end
+    -- Evidence that an earlier attempt already acted must be looked at first.
+    if tonumber(m.late_count or '0') > 0 and not force then
+      return no('late_evidence', { late_count = tonumber(m.late_count) })
+    end
     local s = hgetall(skey(m.slot))
     if s.conn_id == nil or s.conn_id == '' then return no('slot_not_registered') end
     if m.kind == 'task' then
       redis.call('PERSIST', mkey(id))
+      redis.call('PERSIST', P .. 'audit:' .. id)
+      redis.call('PERSIST', P .. 'late:' .. id)
       if m.idem and m.idem ~= '' then redis.call('PERSIST', P .. 'dedup:' .. m.idem) end
       redis.call('HDEL', mkey(id), 'attempt_id', 'emit_epoch', 'emit_conn', 'open_question')
       transition(id, m, 'queued', actor, reason, now, { uuid = s.uuid, epoch = s.epoch })
@@ -515,7 +549,11 @@ local function resolve(keys, a)
     return no('bad_request')
   end
   transition(id, m, target, actor, reason, now)
-  if m.kind == 'task' then clear_inflight(m.slot, id) end
+  if m.kind == 'task' then
+    close_question(m, actor, 'task_resolved', now)
+    clear_inflight(m.slot, id)
+  end
+  if m.kind == 'question' then redis.call('DEL', P .. 'claim:' .. id) end
   return ok({ id = id, state = target })
 end
 
@@ -532,8 +570,21 @@ local function expire(keys, a)
   if m.state == nil then return no('unknown') end
   local exp = tonumber(m.expires_ms or '0')
   local now = now_ms()
-  if exp > 0 and now >= exp and (m.state == 'queued' or m.state == 'asked') then
+  if exp <= 0 or now < exp then return ok({ expired = false }) end
+  if m.kind == 'task' and m.state == 'queued' then
     transition(id, m, 'expired', 'sweeper', 'expires_at', now)
+    return ok({ expired = true })
+  end
+  -- The asking task is waiting with its turn ended; silence would wedge the slot.
+  -- It gets a system reply instead, delivered like any reply, so it can go on.
+  if m.kind == 'question' and m.state == 'asked' then
+    transition(id, m, 'reply_committed', 'sweeper', 'expires_at', now,
+      { reply_id = 'r-expired-' .. id, reply = EXPIRED_REPLY, replied_ms = now, reply_by = 'system' })
+    redis.call('ZREM', ASKED, id)
+    redis.call('DEL', P .. 'claim:' .. id)
+    redis.call('ZADD', ready_key(m.slot), redis.call('INCR', SEQ), id)
+    ring(m.slot, id, now)
+    feed(id, 'question_expired', now)
     return ok({ expired = true })
   end
   return ok({ expired = false })
@@ -556,6 +607,9 @@ local function slot_stale(keys, a)
     if st == 'emit_intent' or st == 'emitted' or st == 'acked'
         or st == 'reply_emit_intent' or st == 'reply_emitted' then
       transition(id, m, 'delivery_unknown', 'sweeper', 'heartbeat_lost', now)
+    elseif st == 'asked' or st == 'reply_committed' then
+      transition(id, m, 'delivery_unknown', 'sweeper', 'asker_heartbeat_lost', now)
+      redis.call('DEL', P .. 'claim:' .. id)
     end
   end
   feed(slot, 'stale', now)
