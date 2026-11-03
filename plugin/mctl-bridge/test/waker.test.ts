@@ -266,18 +266,30 @@ describe.skipIf(requiresValkey)("waker", () => {
     expect(await b.wake(id)).toMatchObject({ state: "wake_unknown", reason: "turn_timeout" });
   });
 
-  test("a pass that failed on Valkey is recovered by the next one", async () => {
-    await question();
-    const flaky = new FailOnce(server.client());
-    const w = waker({ perQuestion: 1 }, flaky);
-    flaky.armed = "bridge_wake_finish";
-    await expect(w.step()).rejects.toThrow("connection reset");
-    const left = await onlyWake();
-    expect(left.state).toBe("started"); // the turn ended, but its end was never recorded
-    expect(await w.step()).toBeNull(); // recovery runs again before the next wake
-    expect(await b.wake(left.id!)).toMatchObject({ state: "completed", reason: "completed" });
-    expect(app.starts).toHaveLength(1);
-  });
+  for (const [fn, leftIn] of [["bridge_wake_started", "intent"], ["bridge_wake_finish", "started"]] as const) {
+    test(`a Valkey failure in ${fn} is recovered by the next pass, with one turn/start, and the question still gets its answer`, async () => {
+      const qid = await question();
+      await server.client().execute(["HSET", key.msg(qid), "updated_ms", "0"]);
+      const flaky = new FailOnce(server.client());
+      // per-question 2 and a quiet period: a second wake would be allowed by the limit,
+      // so only the recovery and the quiet period keep it from starting another turn.
+      const w = waker({ perQuestion: 2, quietMs: 60_000 }, flaky);
+      flaky.armed = fn;
+      await expect(w.step()).rejects.toThrow("connection reset");
+      const left = await onlyWake();
+      expect(left.state).toBe(leftIn);
+      expect(await w.step()).toBeNull(); // recovery runs again; no process restart
+      expect(await b.wake(left.id!)).toMatchObject({ state: "completed", reason: "completed" });
+      expect(await b.openWakes()).toEqual([]);
+      expect(await server.client().execute(["EXISTS", key.wakelock(app.threadId)])).toBe(0);
+      expect(await w.step()).toBeNull(); // and no second wake within the quiet period
+      expect(app.starts).toHaveLength(1);
+      // The woken orchestrator answers: claim and reply go through as usual.
+      const claim = must(await b.claim(qid));
+      must(await b.reply(qid, claim.claim_token, "yes"));
+      expect((await b.message(qid)).state).toBe("reply_committed");
+    });
+  }
 
   test("the quiet period also runs from the last wake", async () => {
     const qid = await question();
