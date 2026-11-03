@@ -1,8 +1,8 @@
 # ChatGPT app orchestrator for Claude Code slots on the Mac mini
 
-Status: design for an MVP. No bridge code exists yet; implementation starts only
-after the two gates below pass. This file is the canonical plan; change the design
-by editing it.
+Status: design for an MVP. Both gates passed on 2026-11-03 (see
+[Gate results](#gate-results-2026-11-03)); the bridge itself is not written yet.
+This file is the canonical plan; change the design by editing it.
 
 ## Goal
 
@@ -56,6 +56,77 @@ A one-line stdio MCP server and two test slots started with
 - an event sent to slot A never appears in slot B;
 - delivery order and latency while the slot is idle, busy, waiting on a permission
   prompt, and running a subagent.
+
+## Gate results (2026-11-03)
+
+Measured on the Mac mini with Codex CLI 0.163.0 and Claude Code 2.1.317. The spike
+scripts are in [`docs/orchestrator-bridge-spike/`](orchestrator-bridge-spike/).
+
+### Gate 1: passed
+
+- Setup that worked:
+  - Codex installed with the official `install.sh`. A bare release binary is not
+    enough: `codex app-server daemon bootstrap` needs the packaged install.
+  - `codex app-server daemon bootstrap` starts a managed daemon (`backend: pid`, not
+    launchd). launchd agent `com.mctl.codex-daemon` runs the idempotent
+    `codex app-server daemon start` at load and every 300 s. Verified: daemon
+    stopped, agent kicked, daemon back with remote control.
+- The ChatGPT desktop app's SSH connection runs `codex app-server proxy`, which
+  attaches to that daemon. The app does not start its own app server.
+- Remote control is enabled on the daemon itself
+  (`codex app-server daemon enable-remote-control`), so the phone reaches the
+  Mac mini without the laptop. Enrollment returned
+  `403 "Multi-factor authentication required"` until MFA was enabled on the account
+  and Codex on the Mac mini signed in again.
+- Re-login on the headless Mac mini, with device-code sign-in left disabled in the
+  account settings: run `ssh -L 1455:localhost:1455 <mini> codex login` and open the
+  printed URL in the laptop's browser. `codex login status` printed "Logged in" while
+  the refresh token had expired; only the daemon log showed the 401s.
+- Control protocol: WebSocket on the Unix socket
+  `~/.codex/app-server-control/app-server-control.sock`, path `/rpc`, JSON-RPC text
+  frames without a `jsonrpc` field. Sequence: `initialize`, then the `initialized`
+  notification, then `thread/list {cwd}`, `thread/resume {threadId}`,
+  `turn/start {threadId, input: [{type: "text", text}]}`, then wait for
+  `turn/completed`. `codex app-server proxy` only pipes bytes to that socket.
+- **Wake-up:** with every client closed (no `app-server proxy` process on the Mac
+  mini), `wake.py turn <thread> <text>` ran a turn in the orchestrator thread. The
+  injected message, the command it ran and the answer were all visible on the phone
+  afterwards.
+- The phone app does not list a project created in the desktop app; the thread is
+  found through search.
+
+### Gate 2: passed, with one design change
+
+Two test slots (Haiku) with a probe channel (`probe.py`) and hooks (`hook.py`):
+
+| Check | Result |
+|---|---|
+| Addressing | Events emitted by slot A's channel never reached slot B. |
+| Identity in the channel process | `CLAUDE_CODE_SESSION_ID` is set and equals the hook's `session_id`. `CLAUDE_PID` is not set there, but the channel's parent pid is the claude pid. |
+| `/clear` | Same claude pid, new `session_id` (hook `source: clear`). The channel process is **not** restarted and keeps the old id in its environment; events keep reaching the new context. |
+| Idle | emit → ack 1.2–3.8 s, but only when the event text itself asks for the ack tool call. The server `instructions` alone were not enough. |
+| Permission prompt open | The event waits; after approval it is handled in the same turn and acknowledged. |
+| Subagent running | The main session handles the event and acknowledges it in 2.3 s. |
+| **Foreground tool running** | The event surfaced **inside that tool's result**. The model treated it as prompt injection and refused to ack. |
+| Unsent draft in the input box | The event is handled, the draft is kept. |
+| Hooks | `UserPromptSubmit` fires for channel events as well as typed prompts; `Stop` fires at the end of a turn. |
+
+A warning `server:<name> · no MCP server configured with that name` appears when the
+channel server comes from `--mcp-config`; delivery works regardless.
+
+### Design changes from the gates
+
+1. **Emit only into an idle slot.** The adapter keeps a busy flag driven by hooks
+   (`UserPromptSubmit` sets busy, `Stop` sets idle) and holds tasks in `queued` while
+   the slot is busy. A task emitted into a busy slot can land inside a tool result
+   and be rejected as injection.
+2. **The ack request travels with the task.** The adapter appends an explicit
+   instruction to call `ack_task` with the task id to every event.
+3. **Identity follows the hook, not the environment.** The adapter takes the claude
+   pid from `getppid()` and the current session id from the pid file written by the
+   SessionStart hook; `CLAUDE_CODE_SESSION_ID` is only the initial value.
+4. A missing ack after emit already maps to `delivery_unknown` without a resend;
+   gate 2 shows that this path really happens.
 
 ## Target layout (after the gates)
 
