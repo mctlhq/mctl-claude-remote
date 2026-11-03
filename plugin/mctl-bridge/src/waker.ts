@@ -62,6 +62,11 @@ export function turnsWithMarker(thread: any, wakeId: string): any[] {
   );
 }
 
+/** Only a status the server actually reports, other than inProgress, ends a turn. */
+export function turnEnded(turn: any): boolean {
+  return typeof turn?.status === "string" && turn.status !== "" && turn.status !== "inProgress";
+}
+
 const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
 export class Waker {
@@ -223,13 +228,15 @@ export class Waker {
       log("wake no longer ours", { wake_id: wakeId, code: st.code });
       return;
     }
-    if (turn.status && turn.status !== "inProgress") await this.finish(wakeId, "completed", String(turn.status));
+    if (turnEnded(turn)) await this.finish(wakeId, "completed", String(turn.status));
     else await this.follow(wakeId, String(turn.id), deadline);
   }
 
   /** Follow a started turn through the history when its notifications are out of reach. */
   async follow(wakeId: string, turnId: string, deadline: number): Promise<void> {
-    while (Date.now() < deadline && !this.stopped) {
+    // Always look at least once: a waker restarted after the deadline must still
+    // see a turn that finished meanwhile, not call it unknown unread.
+    for (;;) {
       try {
         const thread = await this.readThread();
         const turn = (thread.turns as any[]).find((t) => t?.id === turnId);
@@ -237,16 +244,18 @@ export class Waker {
           await this.finish(wakeId, "wake_unknown", "turn_missing");
           return;
         }
-        if (turn.status !== "inProgress") {
+        if (turnEnded(turn)) {
           await this.finish(wakeId, "completed", String(turn.status));
           return;
         }
       } catch (err) {
         log("thread/read failed while following a turn", { wake_id: wakeId, error: String(err) });
       }
+      if (this.stopped) return;
+      if (Date.now() >= deadline) break;
       await sleep(this.cfg.pollMs);
     }
-    if (!this.stopped) await this.finish(wakeId, "wake_unknown", "turn_timeout");
+    await this.finish(wakeId, "wake_unknown", "turn_timeout");
   }
 
   /** On start: settle what a previous waker left in intent or started. */
@@ -256,6 +265,26 @@ export class Waker {
       const deadline = Number(w.created_ms ?? 0) + this.cfg.turnTimeoutMs;
       if (w.state === "intent") await this.settleFromHistory(w.id!, deadline);
       else if (w.state === "started") await this.follow(w.id!, w.turn_id!, deadline);
+    }
+  }
+
+  private recovered = false;
+
+  /**
+   * One pass of the wake loop. Recovery runs first, and again after any pass that
+   * failed: a transport error can leave a wake in intent or started, and only
+   * recovery moves it on (wake_begin refuses its question as `woken` until then).
+   */
+  async step(): Promise<string | null> {
+    try {
+      if (!this.recovered) {
+        await this.recover();
+        this.recovered = true;
+      }
+      return await this.tick();
+    } catch (err) {
+      this.recovered = false;
+      throw err;
     }
   }
 
@@ -322,16 +351,9 @@ export async function main(): Promise<number> {
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
   log("started", { thread_id: threadId, socket: cfg.socketPath, per_hour: cfg.perHour });
-  let recovered = false;
   await Promise.all([
     loop("sweep", sweepMs, () => stopped, () => waker.sweep()),
-    loop("wake", cfg.pollMs, () => stopped, async () => {
-      if (!recovered) {
-        await waker.recover();
-        recovered = true;
-      }
-      await waker.tick();
-    }),
+    loop("wake", cfg.pollMs, () => stopped, () => waker.step()),
   ]);
   return 0;
 }

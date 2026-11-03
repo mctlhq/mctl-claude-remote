@@ -19,6 +19,7 @@ export class FakeApp {
   readonly threadId: string;
   turns: any[] = [];
   starts: any[] = [];
+  reads = 0;
   mode: StartMode = "ok";
   /** Complete every started turn after this many ms; null leaves it to the test. */
   completeAfterMs: number | null = 30;
@@ -61,7 +62,7 @@ export class FakeApp {
   }
 
   /** A turn the operator started by hand from the ChatGPT app. */
-  manualTurn(text: string, status = "completed"): void {
+  manualTurn(text: string, status: string | null = "completed"): void {
     this.turns.push({ id: `turn-manual-${this.turns.length}`, status, items: [{ type: "userMessage", id: "u", content: [{ type: "text", text }] }] });
   }
 
@@ -86,6 +87,7 @@ export class FakeApp {
       case "thread/resume":
         return reply({ thread: { id: this.threadId, turns: [] } });
       case "thread/read":
+        this.reads++;
         return reply(this.brokenRead ? { thread: { id: this.threadId } } : { thread: { id: this.threadId, turns: this.turns } });
       case "turn/start": {
         this.starts.push(m.params);

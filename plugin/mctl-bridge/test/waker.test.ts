@@ -2,12 +2,34 @@
 
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test } from "bun:test";
 
+import net from "node:net";
+import path from "node:path";
+
+import { AppClient } from "../src/appserver.ts";
 import { Bridge, key, newId } from "../src/store.ts";
 import type { Result, SlotConn } from "../src/store.ts";
 import { Waker, marker } from "../src/waker.ts";
 import type { WakerConfig } from "../src/waker.ts";
 import { FakeApp } from "./fakeapp.ts";
+import { ValkeyConnectionError } from "../src/valkey.ts";
+import type { Arg, ExecuteOptions, Executor, Reply } from "../src/valkey.ts";
 import { ValkeyServer, requiresValkey, sleep } from "./support.ts";
+
+/** Fails one named FCALL before it reaches the server, as a dropped connection would. */
+class FailOnce implements Executor {
+  armed: string | null = null;
+  private readonly inner: Executor;
+  constructor(inner: Executor) {
+    this.inner = inner;
+  }
+  async execute(args: readonly Arg[], options?: ExecuteOptions): Promise<Reply> {
+    if (this.armed !== null && args[0] === "FCALL" && args[1] === this.armed) {
+      this.armed = null;
+      throw new ValkeyConnectionError("connection reset");
+    }
+    return this.inner.execute(args, options);
+  }
+}
 
 let server: ValkeyServer;
 let b: Bridge;
@@ -31,8 +53,8 @@ async function question(slot = "a", text = "rename or alias?"): Promise<string> 
   return must(await b.ask(slot, ack.admission, text)).question_id;
 }
 
-function waker(o: Partial<WakerConfig> = {}): Waker {
-  return new Waker(new Bridge(server.client()), {
+function waker(o: Partial<WakerConfig> = {}, exec: Executor = server.client()): Waker {
+  return new Waker(new Bridge(exec), {
     threadId: app.threadId, socketPath: app.path, quietMs: 0, perHour: 10, perQuestion: 2,
     turnTimeoutMs: 3000, rpcTimeoutMs: 1000, pollMs: 20, staleMs: 30_000, ...o,
   });
@@ -211,6 +233,71 @@ describe.skipIf(requiresValkey)("waker", () => {
     expect(await b.wake(found)).toMatchObject({ state: "completed", turn_id: "turn-manual-0" });
     expect(await b.wake(lost)).toMatchObject({ state: "wake_unknown", reason: "history_matches_0" });
     expect(app.starts).toHaveLength(0); // recovery never starts a turn
+  });
+
+  test("recovery after the turn timeout still reads the thread once", async () => {
+    const q1 = await question("a");
+    const q2 = await question("b");
+    const done = newId("w");
+    const running = newId("w");
+    const base = { thread_id: app.threadId, lock_ms: 60_000, per_hour: 10, quiet_ms: 0 };
+    must(await b.wakeBegin({ ...base, question_id: q1, wake_id: done }));
+    app.manualTurn(`${marker(done)} first`, "completed");
+    must(await b.wakeStarted(done, "turn-manual-0"));
+    await server.client().execute(["DEL", key.wakelock(app.threadId)]);
+    must(await b.wakeBegin({ ...base, question_id: q2, wake_id: running }));
+    app.manualTurn(`${marker(running)} second`, "inProgress");
+    must(await b.wakeStarted(running, "turn-manual-1"));
+    // The waker was down for longer than the turn timeout.
+    for (const id of [done, running]) await server.client().execute(["HSET", key.wake(id), "created_ms", "0"]);
+    await waker().recover();
+    expect(await b.wake(done)).toMatchObject({ state: "completed", reason: "completed" });
+    expect(await b.wake(running)).toMatchObject({ state: "wake_unknown", reason: "turn_timeout" });
+    expect(app.reads).toBe(2);
+  });
+
+  test("a turn without a status is not taken as finished", async () => {
+    const qid = await question();
+    const id = newId("w");
+    must(await b.wakeBegin({ question_id: qid, thread_id: app.threadId, wake_id: id, lock_ms: 60_000, per_hour: 10, quiet_ms: 0 }));
+    app.manualTurn(`${marker(id)} odd shape`, null);
+    await server.client().execute(["HSET", key.wake(id), "created_ms", "0"]);
+    await waker().recover(); // intent: one match, then followed
+    expect(await b.wake(id)).toMatchObject({ state: "wake_unknown", reason: "turn_timeout" });
+  });
+
+  test("a pass that failed on Valkey is recovered by the next one", async () => {
+    await question();
+    const flaky = new FailOnce(server.client());
+    const w = waker({ perQuestion: 1 }, flaky);
+    flaky.armed = "bridge_wake_finish";
+    await expect(w.step()).rejects.toThrow("connection reset");
+    const left = await onlyWake();
+    expect(left.state).toBe("started"); // the turn ended, but its end was never recorded
+    expect(await w.step()).toBeNull(); // recovery runs again before the next wake
+    expect(await b.wake(left.id!)).toMatchObject({ state: "completed", reason: "completed" });
+    expect(app.starts).toHaveLength(1);
+  });
+
+  test("the quiet period also runs from the last wake", async () => {
+    const qid = await question();
+    await server.client().execute(["HSET", key.msg(qid), "updated_ms", "0"]);
+    const base = { question_id: qid, thread_id: app.threadId, lock_ms: 60_000, per_hour: 10, quiet_ms: 60_000 };
+    const first = must(await b.wakeBegin(base)).wake_id;
+    must(await b.wakeStarted(first, "turn-x"));
+    must(await b.wakeFinish(first, "completed", "completed"));
+    expect(await b.wakeBegin(base)).toMatchObject({ ok: false, code: "too_early" });
+    expect(await b.wakeBegin({ ...base, quiet_ms: 0 })).toMatchObject({ ok: true });
+  });
+
+  test("a socket closed during the handshake fails at once", async () => {
+    const sock = path.join(app.dir, "closing.sock");
+    const srv = net.createServer((c) => c.end()).listen(sock);
+    await new Promise((r) => srv.once("listening", r));
+    const t0 = Date.now();
+    await expect(AppClient.connect(sock, 5000)).rejects.toThrow();
+    expect(Date.now() - t0).toBeLessThan(1000);
+    srv.close();
   });
 
   test("resolve closes a wake_unknown and frees the thread", async () => {

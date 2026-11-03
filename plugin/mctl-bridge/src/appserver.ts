@@ -50,6 +50,8 @@ export class AppClient {
         reject(new ConnectionLost(err.message));
       };
       sock.once("error", fail);
+      const closed = (): void => fail(new Error("socket closed during the handshake"));
+      sock.once("close", closed);
       sock.once("connect", () => {
         sock.write(
           "GET /rpc HTTP/1.1\r\nHost: localhost\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n" +
@@ -62,6 +64,7 @@ export class AppClient {
         if (end < 0) return;
         sock.off("data", onData);
         sock.off("error", fail);
+        sock.off("close", closed);
         clearTimeout(timer);
         const status = head.subarray(0, head.indexOf("\r\n")).toString();
         if (!/ 101 /.test(status)) {

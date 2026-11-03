@@ -746,11 +746,15 @@ local function wake_begin(keys, a)
   if q.kind ~= 'question' or q.state ~= 'asked' then return no('not_asked', { state = q.state }) end
   if redis.call('EXISTS', P .. 'claim:' .. qid) == 1 then return no('claimed') end
   local now = now_ms()
-  if now - tonumber(q.updated_ms or q.created_ms or '0') < quiet_ms then return no('too_early') end
+  -- The quiet period runs from the later of the question and its last wake, so a
+  -- second wake waits as long after the first turn ended as the first did.
+  local since = tonumber(q.updated_ms or q.created_ms or '0')
   if q.wake_id and q.wake_id ~= '' then
-    local prev = redis.call('HGET', wkey(q.wake_id), 'state')
-    if prev and WAKE_OPEN[prev] then return no('woken', { wake_id = q.wake_id, state = prev }) end
+    local prev = redis.call('HMGET', wkey(q.wake_id), 'state', 'updated_ms')
+    if prev[1] and WAKE_OPEN[prev[1]] then return no('woken', { wake_id = q.wake_id, state = prev[1] }) end
+    since = math.max(since, tonumber(prev[2] or '0') or 0)
   end
+  if now - since < quiet_ms then return no('too_early') end
   if tonumber(q.wakes or '0') >= per_q then return no('question_wake_limit') end
   if redis.call('EXISTS', wkey(id)) == 1 then return no('duplicate_id') end
   local holder = redis.call('GET', lock_key(thread))
