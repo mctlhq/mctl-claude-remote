@@ -6,7 +6,7 @@ profile) and runs `bun test`; every mutation must make at least one test fail.
 Run from plugin/mctl-bridge:  python3 test/mutate.py [name ...]
 """
 import subprocess, sys, shutil
-LUA='src/bridge.lua'; SUP='test/support.ts'
+LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'
 M=[
  ("fencing off", LUA, "local function fenced(s, conn, epoch)\n  return", "local function fenced(s, conn, epoch)\n  do return false end\n  return", 1),
  ("busy gate off", LUA, "if s.busy ~= '0' then return no('busy') end", "", 1),
@@ -43,6 +43,10 @@ M=[
  ("unregister fencing off", LUA, "  -- Fencing first: an old adapter must never touch a newer registration.\n  if fenced(s, conn, epoch) then return no('fenced') end\n", "", 1),
  ("unregister keeps emits", LUA, "  abandon(slot, 'slot:' .. slot, 'unregistered', now)\n", "  redis.call('HSET', skey(slot), 'conn_id', '')\n", 1),
  ("register stale_ms guard off", LUA, "      or stale_ms == nil or stale_ms <= 0 then", "      then", 1),
+ ("adapter emit hold off", CH, "if (this.emittedAt > 0 && reportedMs <= this.emittedAt && now - this.emittedAt < this.cfg.emitHoldMs) return true;", "", 1),
+ ("adapter ignores /clear", CH, "if (this.conn === null || this.conn.uuid !== sessionId) await this.register(sessionId);", "if (this.conn === null) await this.register(sessionId);", 1),
+ ("adapter no unregister", CH, "        await this.bridge.unregister(this.conn);\n", "", 1),
+ ("adapter no ack instruction", CH, "        `First call ack_task with task_id=\"${m.id}\" and attempt_id=\"${m.attempt_id}\". Do no work on this task before it succeeds.`,\n", "", 1),
  ("no fsync", SUP, '"--appendfsync", "always"', '"--appendfsync", "no"', 1),
  ("no aof", SUP, '["--save", "", "--appendonly", "yes", "--appendfsync", "always"]', '["--save", "", "--appendonly", "no"]', 1),
 ]

@@ -118,3 +118,149 @@ export class ValkeyServer {
     fs.rmSync(this.dir, { recursive: true, force: true });
   }
 }
+
+// ---- a fake Claude Code client for the slot adapter --------------------------
+
+import { spawn as spawnChild } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+export type Message = Record<string, any>;
+export const CHANNEL_TS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src", "channel.ts");
+export const BUNFIG = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bunfig.toml");
+
+/** Speaks the client half of MCP stdio to a spawned adapter, and plays the hooks. */
+export class FakeClaude {
+  readonly stateDir: string;
+  readonly pid: number;
+  readonly proc: ChildProcess;
+  readonly stderr: string[] = [];
+  readonly exited: Promise<number | null>;
+  private readonly messages: Message[] = [];
+  private readonly listeners = new Set<() => void>();
+  private id = 0;
+
+  constructor(url: string, slot: string, o: { stateDir: string; pid?: number; env?: Record<string, string> }) {
+    this.stateDir = o.stateDir;
+    // The "claude" process the adapter believes it serves: this test process.
+    this.pid = o.pid ?? process.pid;
+    this.proc = spawnChild(process.execPath, ["run", "--silent", "--no-env-file", `--config=${BUNFIG}`, CHANNEL_TS], {
+      env: {
+        ...process.env,
+        MCTL_BRIDGE_SLOT: slot,
+        MCTL_BRIDGE_VALKEY_URL: url,
+        MCTL_BRIDGE_STATE_DIR: this.stateDir,
+        MCTL_BRIDGE_CLAUDE_PID: String(this.pid),
+        MCTL_BRIDGE_POLL_MS: "30",
+        MCTL_BRIDGE_HEARTBEAT_MS: "1000",
+        MCTL_BRIDGE_STARTUP_GRACE_MS: "50",
+        MCTL_BRIDGE_EMIT_HOLD_MS: "5000",
+        CLAUDE_CODE_SESSION_ID: "",
+        ...o.env,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    this.exited = new Promise((resolve) => this.proc.once("exit", (code) => resolve(code)));
+    let out = "";
+    this.proc.stdout!.setEncoding("utf8").on("data", (chunk: string) => {
+      out += chunk;
+      let at: number;
+      while ((at = out.indexOf("\n")) >= 0) {
+        const line = out.slice(0, at);
+        out = out.slice(at + 1);
+        if (line.trim()) this.messages.push(JSON.parse(line));
+      }
+      for (const wake of this.listeners) wake();
+    });
+    this.proc.stderr!.setEncoding("utf8").on("data", (chunk: string) => this.stderr.push(chunk));
+    this.proc.stdin!.on("error", () => undefined);
+  }
+
+  /** What the hooks would write: SessionStart/Stop = idle, UserPromptSubmit = busy. */
+  hook(state: "busy" | "idle", sessionId: string): void {
+    fs.mkdirSync(this.stateDir, { recursive: true });
+    const file = path.join(this.stateDir, `${this.pid}.json`);
+    const tmp = `${file}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ session_id: sessionId, state, t: Date.now() / 1000 }));
+    fs.renameSync(tmp, file);
+  }
+
+  send(message: Message): void {
+    this.proc.stdin!.write(JSON.stringify(message) + "\n");
+  }
+
+  async request(method: string, params: Message): Promise<Message> {
+    const id = ++this.id;
+    this.send({ jsonrpc: "2.0", id, method, params });
+    return this.wait((m) => m.id === id);
+  }
+
+  async wait(predicate: (m: Message) => boolean, timeout = 10.0): Promise<Message> {
+    const deadline = Date.now() + timeout * 1000;
+    for (;;) {
+      const index = this.messages.findIndex(predicate);
+      if (index >= 0) return this.messages.splice(index, 1)[0]!;
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) throw new Error(`timed out; stderr=${this.stderr.join("").slice(-2000)}`);
+      await new Promise<void>((resolve) => {
+        const wake = (): void => {
+          clearTimeout(timer);
+          this.listeners.delete(wake);
+          resolve();
+        };
+        const timer = setTimeout(wake, remaining);
+        this.listeners.add(wake);
+      });
+    }
+  }
+
+  notification(timeout = 10.0): Promise<Message> {
+    return this.wait((m) => m.method === "notifications/claude/channel", timeout);
+  }
+
+  async noNotification(seconds: number): Promise<void> {
+    let message: Message;
+    try {
+      message = await this.notification(seconds);
+    } catch {
+      return;
+    }
+    throw new Error(`unexpected notification: ${JSON.stringify(message)}`);
+  }
+
+  async handshake(): Promise<Message> {
+    const init = await this.request("initialize", {
+      protocolVersion: "2025-06-18",
+      capabilities: {},
+      clientInfo: { name: "fake-claude", version: "0" },
+    });
+    this.send({ jsonrpc: "2.0", method: "notifications/initialized" });
+    return init;
+  }
+
+  async call(name: string, args: Message = {}): Promise<{ isError: boolean; body: any }> {
+    const reply = await this.request("tools/call", { name, arguments: args });
+    const text = reply.result.content[0].text;
+    let body: any = text;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      // a plain error message
+    }
+    return { isError: reply.result.isError ?? false, body };
+  }
+
+  async kill(): Promise<void> {
+    if (this.proc.exitCode === null && this.proc.signalCode === null) this.proc.kill("SIGKILL");
+    await this.exited;
+  }
+
+  /** Close stdin, as Claude Code does on exit, and wait for a clean stop. */
+  async close(): Promise<void> {
+    if (this.proc.exitCode === null && this.proc.signalCode === null) {
+      this.proc.stdin!.end();
+      const timer = setTimeout(() => this.proc.kill("SIGKILL"), 10_000);
+      await this.exited;
+      clearTimeout(timer);
+    }
+  }
+}

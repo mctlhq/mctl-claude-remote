@@ -464,6 +464,20 @@ slice 2; until then there is nothing for Claude Code to load.
 - Instructions: orchestrator tasks never widen permissions; merge, deploy and
   lifecycle follow `AGENTS.md`.
 - `hooks/state.py`: stdlib only, writes the local state file atomically.
+- After an emit the slot counts as busy until the hooks report a newer state (at most
+  `MCTL_BRIDGE_EMIT_HOLD_MS`, default 2 minutes), so a second message cannot follow
+  before Claude Code has even started the turn. The server's `busy` check stays
+  authoritative; the adapter's own check only saves a round trip.
+- Configuration reaches the adapter process only: the slot launcher puts
+  `MCTL_BRIDGE_SLOT`, `MCTL_BRIDGE_VALKEY_URL` and the password file path into the `env`
+  of the slot's `--mcp-config` entry, so they never enter the session's environment.
+  For that reason the plugin ships no `.mcp.json` and is not in the marketplace: a
+  plugin-wide server would read its credentials from the session's environment.
+- The model passes only ids; the adapter keeps the admission returned by `ack_task`
+  and sends it with `ask_orchestrator` and `report_result`. A stale admission is still
+  sent, so the server records it as late evidence.
+- `unregister` (on stdin close) checks `conn_id` first, then moves what the adapter held
+  to `delivery_unknown` and frees `inflight`, as `slot_stale` does.
 - Tests with the fake Claude Code client and a fake state file: nothing is emitted into
   a busy slot; after `/clear` the old message becomes `delivery_unknown` and is not
   resent; a restart takes `epoch + 1`; `/clear` after admission while an external tool
