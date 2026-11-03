@@ -3,8 +3,8 @@
 The queue and state machine between a ChatGPT-app orchestrator on the Mac mini and
 Claude Code slots. Design: [`docs/chatgpt-orchestrator-bridge.md`](../../docs/chatgpt-orchestrator-bridge.md).
 
-Slices 1 and 2: the server-side function library, the orchestrator's CLI, and the slot
-adapter. The waker (slice 3) and the Mac mini launcher (slice 4) are not here yet.
+Slices 1 to 3: the server-side function library, the orchestrator's CLI, the slot
+adapter, and the waker with the sweeper. The Mac mini launcher (slice 4) is not here yet.
 
 ## Layout
 
@@ -17,6 +17,10 @@ adapter. The waker (slice 3) and the Mac mini launcher (slice 4) are not here ye
   Tools: `ack_task`, `ack_reply`, `ask_orchestrator`, `report_result`, `bridge_status`.
 - `hooks/state.py`: SessionStart / UserPromptSubmit / Stop hook writing the session's
   busy/idle state to `~/.mctl-bridge/state/<claude pid>.json`. Holds no credentials.
+- `src/waker.ts`: the waker. It starts a turn in the orchestrator's Codex thread when a
+  question has waited unclaimed, and it runs the sweeper. It never answers a question.
+- `src/appserver.ts`: a minimal client for the Codex app-server control socket
+  (WebSocket over a Unix socket, JSON-RPC).
 - `src/valkey.ts`: a byte-identical copy of the `mctl-events` client (a test enforces it).
 
 ## Running a slot
@@ -49,6 +53,22 @@ claude --mcp-config slot-a.json --strict-mcp-config --settings hooks.json \
 where `hooks.json` wires `hooks/state.py` to `SessionStart`, `UserPromptSubmit` and
 `Stop`.
 
+## Running the waker
+
+```sh
+MCTL_BRIDGE_VALKEY_URL=redis://bridge_orch@127.0.0.1:6390/0 \
+MCTL_BRIDGE_VALKEY_PASSWORD_FILE=/path/to/password \
+MCTL_BRIDGE_THREAD_ID=<orchestrator thread id> \
+  bun run --silent --no-env-file src/waker.ts
+```
+
+Optional settings: `MCTL_BRIDGE_CODEX_SOCKET` (default
+`~/.codex/app-server-control/app-server-control.sock`), `MCTL_BRIDGE_WAKE_QUIET_MS`
+(30000), `MCTL_BRIDGE_WAKES_PER_HOUR` (12), `MCTL_BRIDGE_WAKES_PER_QUESTION` (2),
+`MCTL_BRIDGE_TURN_TIMEOUT_MS` (900000), `MCTL_BRIDGE_RPC_TIMEOUT_MS` (30000),
+`MCTL_BRIDGE_POLL_MS` (2000), `MCTL_BRIDGE_SWEEP_MS` (5000) and
+`MCTL_BRIDGE_STALE_MS` (30000).
+
 ## CLI
 
 ```sh
@@ -57,7 +77,9 @@ bun run --silent --no-env-file src/cli.ts init      # load the library, report d
 bun run --silent --no-env-file src/cli.ts wait --timeout 30
 bun run --silent --no-env-file src/cli.ts claim q-...
 bun run --silent --no-env-file src/cli.ts reply q-... --token c-... --text "use main"
-bun run --silent --no-env-file src/cli.ts errors
+bun run --silent --no-env-file src/cli.ts errors    # delivery_unknown, wake_unknown, late evidence
+bun run --silent --no-env-file src/cli.ts wakes
+bun run --silent --no-env-file src/cli.ts resolve w-... --reason "no turn in the thread"
 ```
 
 Exit status: 0 done, 1 refused by the state machine (the JSON says why), 2 usage or

@@ -13,7 +13,7 @@ import { ValkeyError } from "./valkey.ts";
 import type { Arg, Executor, Reply } from "./valkey.ts";
 
 export const PREFIX = "mctl:bridge:";
-export const LIBRARY_VERSION = "1";
+export const LIBRARY_VERSION = "2";
 export const LIBRARY_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "bridge.lua");
 export const MAX_PAYLOAD = 16384;
 
@@ -49,9 +49,12 @@ export const key = {
   dedup: (k: string) => `${PREFIX}dedup:${k}`,
   late: (id: string) => `${PREFIX}late:${id}`,
   msgAudit: (id: string) => `${PREFIX}audit:${id}`,
+  wakes: `${PREFIX}wakes`,
+  wake: (id: string) => `${PREFIX}wake:${id}`,
+  wakelock: (thread: string) => `${PREFIX}wakelock:${thread}`,
 };
 
-export function newId(kind: "t" | "q" | "r" | "a" | "c" | "k"): string {
+export function newId(kind: "t" | "q" | "r" | "a" | "c" | "k" | "w"): string {
   return `${kind}-${crypto.randomUUID()}`;
 }
 
@@ -209,6 +212,38 @@ export class Bridge {
 
   repair(id: string) {
     return this.call("bridge_repair", key.orch, [id]);
+  }
+
+  // ---- wakes (orchestrator role) ---------------------------------------------
+
+  wakeBegin(o: { question_id: string; thread_id: string; wake_id?: string; lock_ms: number; per_hour: number; quiet_ms: number; per_question?: number }) {
+    return this.call("bridge_wake_begin", key.orch, [
+      o.question_id, o.thread_id, o.wake_id ?? newId("w"), String(o.lock_ms), String(o.per_hour),
+      String(o.quiet_ms), String(o.per_question ?? 2),
+    ]);
+  }
+
+  wakeStarted(id: string, turnId: string) {
+    return this.call("bridge_wake_started", key.orch, [id, turnId]);
+  }
+
+  wakeFinish(id: string, outcome: "completed" | "failed" | "wake_unknown", reason = "") {
+    return this.call("bridge_wake_finish", key.orch, [id, outcome, reason]);
+  }
+
+  wakeResolve(id: string, reason: string, author: string) {
+    return this.call("bridge_wake_resolve", key.orch, [id, reason, author]);
+  }
+
+  async wake(id: string): Promise<Record<string, string>> {
+    return pairs(await this.exec.execute(["HGETALL", key.wake(id)]));
+  }
+
+  /** Wakes not yet settled: intent, started and wake_unknown. */
+  async openWakes(): Promise<Array<Record<string, string>>> {
+    const out = [];
+    for (const id of await this.members(key.wakes)) out.push({ id, ...(await this.wake(id)) });
+    return out;
   }
 
   // ---- reads ----------------------------------------------------------------
