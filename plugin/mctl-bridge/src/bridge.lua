@@ -15,7 +15,7 @@
 -- Every function returns a JSON object: {"ok":true,...} or {"ok":false,"code":...}.
 -- Rejections are data, not errors: a fenced or stale caller is an expected event.
 
-local VERSION = '1'
+local VERSION = '2'
 local P = 'mctl:bridge:'
 local MAX_PAYLOAD = 16384
 local MAX_HOP = 4
@@ -693,6 +693,122 @@ local function repair(keys, a)
   return ok({ action = action })
 end
 
+---------------------------------------------------------------------------------
+-- Wakes (orchestrator role). A wake is the waker's attempt to start a turn in the
+-- orchestrator thread for one question. It never answers; the turn has to claim.
+-- States: intent -> started -> completed, intent -> failed (the app server refused
+-- turn/start outright), and wake_unknown, which stays open until resolved.
+---------------------------------------------------------------------------------
+
+local WAKES = P .. 'wakes'
+local WAKE_OPEN = { intent = true, started = true, wake_unknown = true }
+local function wkey(id) return P .. 'wake:' .. id end
+local function lock_key(thread) return P .. 'wakelock:' .. thread end
+
+local function wake_move(id, w, to, reason, now, fields)
+  local args = { 'state', to, 'updated_ms', now, 'reason', reason or '' }
+  if fields then
+    for k, v in pairs(fields) do
+      args[#args + 1] = k
+      args[#args + 1] = v
+    end
+  end
+  redis.call('HSET', wkey(id), unpack(args))
+  audit(id, w.state, to, 'waker', reason, now)
+  if w.question_id then audit(w.question_id, 'wake', 'wake', 'waker', 'wake_' .. to .. ':' .. id, now) end
+  if not WAKE_OPEN[to] then
+    redis.call('SREM', WAKES, id)
+    redis.call('PEXPIRE', wkey(id), RETAIN_MS)
+    redis.call('PEXPIRE', P .. 'audit:' .. id, RETAIN_MS)
+  end
+  feed(id, 'wake_' .. to, now)
+  w.state = to
+end
+
+-- The lock goes only when this wake holds it; an unknown wake keeps it until PX.
+local function release(w, id)
+  if redis.call('GET', lock_key(w.thread_id)) == id then redis.call('DEL', lock_key(w.thread_id)) end
+end
+
+-- ARGV: question_id, thread_id, wake_id, lock_ms, per_hour, quiet_ms, per_question
+-- One call decides everything before any RPC: the question still waits unclaimed
+-- and long enough, it has no wake in progress or unresolved, the thread is free
+-- (wakelock NX) and the hourly budget allows it.
+local function wake_begin(keys, a)
+  local qid, thread, id = a[1], a[2], a[3]
+  local lock_ms, per_hour, quiet_ms, per_q = tonumber(a[4] or ''), tonumber(a[5] or ''), tonumber(a[6] or ''), tonumber(a[7] or '')
+  if keys[1] ~= ORCH or not valid_id(qid) or not valid_id(thread) or not valid_id(id)
+      or not lock_ms or lock_ms <= 0 or not per_hour or per_hour < 0 or not quiet_ms or quiet_ms < 0
+      or not per_q or per_q < 1 then
+    return no('bad_request')
+  end
+  local q = hgetall(mkey(qid))
+  if q.kind ~= 'question' or q.state ~= 'asked' then return no('not_asked', { state = q.state }) end
+  if redis.call('EXISTS', P .. 'claim:' .. qid) == 1 then return no('claimed') end
+  local now = now_ms()
+  if now - tonumber(q.updated_ms or q.created_ms or '0') < quiet_ms then return no('too_early') end
+  if q.wake_id and q.wake_id ~= '' then
+    local prev = redis.call('HGET', wkey(q.wake_id), 'state')
+    if prev and WAKE_OPEN[prev] then return no('woken', { wake_id = q.wake_id, state = prev }) end
+  end
+  if tonumber(q.wakes or '0') >= per_q then return no('question_wake_limit') end
+  if redis.call('EXISTS', wkey(id)) == 1 then return no('duplicate_id') end
+  local holder = redis.call('GET', lock_key(thread))
+  if holder then return no('thread_busy', { wake_id = holder }) end
+  local bucket = P .. 'wakes:hour:' .. math.floor(now / 3600000)
+  if tonumber(redis.call('GET', bucket) or '0') >= per_hour then return no('rate_limited') end
+  redis.call('INCR', bucket)
+  redis.call('PEXPIRE', bucket, 2 * 3600000)
+  redis.call('SET', lock_key(thread), id, 'PX', lock_ms)
+  redis.call('HSET', wkey(id), 'question_id', qid, 'thread_id', thread, 'state', 'intent',
+    'created_ms', now, 'updated_ms', now, 'turn_id', '', 'reason', '')
+  redis.call('SADD', WAKES, id)
+  redis.call('HSET', mkey(qid), 'wake_id', id)
+  redis.call('HINCRBY', mkey(qid), 'wakes', 1)
+  audit(id, '', 'intent', 'waker', qid, now)
+  audit(qid, 'wake', 'wake', 'waker', 'wake_intent:' .. id, now)
+  feed(id, 'wake_intent', now)
+  return ok({ wake_id = id })
+end
+
+-- ARGV: wake_id, turn_id
+local function wake_started(keys, a)
+  local id, turn = a[1], a[2]
+  if keys[1] ~= ORCH or not valid_id(id) or not valid_id(turn) then return no('bad_request') end
+  local w = hgetall(wkey(id))
+  if w.state == nil then return no('unknown') end
+  if w.state ~= 'intent' then return no('wrong_state', { state = w.state }) end
+  wake_move(id, w, 'started', '', now_ms(), { turn_id = turn })
+  return ok()
+end
+
+-- ARGV: wake_id, outcome (completed|failed|wake_unknown), reason
+local function wake_finish(keys, a)
+  local id, outcome, reason = a[1], a[2], a[3] or ''
+  if keys[1] ~= ORCH or not valid_id(id) then return no('bad_request') end
+  local w = hgetall(wkey(id))
+  if w.state == nil then return no('unknown') end
+  local from_ok = (outcome == 'completed' and w.state == 'started')
+    or (outcome == 'failed' and w.state == 'intent')
+    or (outcome == 'wake_unknown' and (w.state == 'intent' or w.state == 'started'))
+  if not from_ok then return no('wrong_state', { state = w.state }) end
+  wake_move(id, w, outcome, reason, now_ms())
+  if outcome ~= 'wake_unknown' then release(w, id) end
+  return ok()
+end
+
+-- ARGV: wake_id, reason, author. The way out of wake_unknown, after a look at the thread.
+local function wake_resolve(keys, a)
+  local id, reason, author = a[1], a[2] or '', a[3] or ''
+  if keys[1] ~= ORCH or not valid_id(id) or reason == '' or author == '' then return no('bad_request') end
+  local w = hgetall(wkey(id))
+  if w.state == nil then return no('unknown') end
+  if not WAKE_OPEN[w.state] then return no('wrong_state', { state = w.state }) end
+  wake_move(id, w, 'resolved', 'resolve:' .. author .. ':' .. reason, now_ms())
+  release(w, id)
+  return ok()
+end
+
 local function version() return VERSION end
 
 local function reg(name, fn, ro)
@@ -722,3 +838,7 @@ reg('bridge_resolve', resolve)
 reg('bridge_expire', expire)
 reg('bridge_slot_stale', slot_stale)
 reg('bridge_repair', repair)
+reg('bridge_wake_begin', wake_begin)
+reg('bridge_wake_started', wake_started)
+reg('bridge_wake_finish', wake_finish)
+reg('bridge_wake_resolve', wake_resolve)

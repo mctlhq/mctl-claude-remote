@@ -6,7 +6,7 @@ profile) and runs `bun test`; every mutation must make at least one test fail.
 Run from plugin/mctl-bridge:  python3 test/mutate.py [name ...]
 """
 import subprocess, sys, shutil
-LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'
+LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'
 M=[
  ("fencing off", LUA, "local function fenced(s, conn, epoch)\n  return", "local function fenced(s, conn, epoch)\n  do return false end\n  return", 1),
  ("busy gate off", LUA, "if s.busy ~= '0' then return no('busy') end", "", 1),
@@ -28,7 +28,8 @@ M=[
  ("hop limit send off", LUA, "  if hop > MAX_HOP then return no('hop_limit') end\n  local s = hgetall", "  local s = hgetall", 1),
  ("hop limit ask off", LUA, "  if hop > MAX_HOP then return no('hop_limit') end\n  if redis.call('EXISTS'", "  if redis.call('EXISTS'", 1),
  ("stale sweep off", LUA, "  abandon(slot, 'sweeper', 'heartbeat_lost', now)\n", "", 1),
- ("resolve reason optional", LUA, "not valid_id(id) or reason == '' or author == ''", "not valid_id(id) or author == ''", 1),
+ ("resolve reason optional", LUA, "not valid_id(id) or reason == '' or author == '' then return no('bad_request') end\n  local m = hgetall(mkey(id))", "not valid_id(id) or author == '' then return no('bad_request') end\n  local m = hgetall(mkey(id))", 1),
+ ("wake resolve reason optional", LUA, "not valid_id(id) or reason == '' or author == '' then return no('bad_request') end\n  local w = hgetall(wkey(id))", "not valid_id(id) or author == '' then return no('bad_request') end\n  local w = hgetall(wkey(id))", 1),
  ("audit off", LUA, "  audit(id, m.state, to, actor, reason, now)\n", "", 1),
  ("role key check off", LUA, "  if not valid_slot(slot) or keys[1] ~= skey(slot) then return no('bad_request') end\n  local s = hgetall(skey(slot))\n  if fenced(s, conn, epoch) then return no('fenced') end\n  redis.call('HSET', skey(slot), 'heartbeat'", "  if not valid_slot(slot) then return no('bad_request') end\n  local s = hgetall(skey(slot))\n  if fenced(s, conn, epoch) then return no('fenced') end\n  redis.call('HSET', skey(slot), 'heartbeat'", 1),
  ("task end keeps question open", LUA, "  close_question(m, 'slot:' .. slot, 'task_finished', now)\n", "", 1),
@@ -37,7 +38,7 @@ M=[
  ("expired question silent", LUA, "  if m.kind == 'question' and m.state == 'asked' then\n    transition(id, m, 'reply_committed'", "  if false then\n    transition(id, m, 'reply_committed'", 1),
  ("requeue ignores late evidence", LUA, "if tonumber(m.late_count or '0') > 0 and not force then", "if false then", 1),
  ("late trail never expires", LUA, "    redis.call('PEXPIRE', P .. 'late:' .. id, RETAIN_MS)\n", "", 1),
- ("audit trail never expires", LUA, "    redis.call('PEXPIRE', P .. 'audit:' .. id, RETAIN_MS)\n", "", 1),
+ ("audit trail never expires", LUA, "    redis.call('PEXPIRE', mkey(id), RETAIN_MS)\n    redis.call('PEXPIRE', P .. 'audit:' .. id, RETAIN_MS)\n", "    redis.call('PEXPIRE', mkey(id), RETAIN_MS)\n", 1),
  ("ask ttl guard off", LUA, "      or ttl == nil or ttl < 0 then", "      then", 1),
  ("close while waiting", LUA, "      if s.inflight == m.task_id and s.inflight_attempt == m.attempt_id then\n        return no('task_waiting'", "      if false then\n        return no('task_waiting'", 1),
  ("unregister fencing off", LUA, "  -- Fencing first: an old adapter must never touch a newer registration.\n  if fenced(s, conn, epoch) then return no('fenced') end\n", "", 1),
@@ -53,10 +54,24 @@ M=[
  ("adapter ignores a failed notify", CH, "      // may ack it from emit_intent, so it must not be settled.\n      this.emitUnsettled = true;\n", "      // may ack it from emit_intent, so it must not be settled.\n", 1),
  ("emit_lost keeps inflight", LUA, "      if m.kind == 'task' then clear_inflight(slot, id) end\n", "", 1),
  ("emit_lost not fenced", LUA, "  if fenced(s, conn, epoch) then return no('fenced') end\n  local now = now_ms()\n  local settled = 0\n", "  local now = now_ms()\n  local settled = 0\n", 1),
+ ("waker trusts the first turn/completed", WK, "        const status = ended.get(turnId);\n", "        const status = ended.values().next().value;\n", 1),
+ ("waker accepts an ambiguous history", WK, "    if (found.length !== 1) {\n", "    if (found.length === 0) {\n", 1),
+ ("waker reads a broken history as empty", WK, "        throw new ConnectionLost(\"thread/read returned no turns\"); // unreadable, not empty\n", "        return { turns: [] };\n", 1),
+ ("waker treats a refused start as unknown", WK, "        if (err instanceof RpcError) {\n", "        if (err instanceof RpcError && false) {\n", 1),
+ ("wake ignores the thread lock", LUA, "  if holder then return no('thread_busy', { wake_id = holder }) end\n", "", 1),
+ ("wake ignores the hourly limit", LUA, "  if tonumber(redis.call('GET', bucket) or '0') >= per_hour then return no('rate_limited') end\n", "", 1),
+ ("wake ignores the claim", LUA, "  if redis.call('EXISTS', P .. 'claim:' .. qid) == 1 then return no('claimed') end\n  local now = now_ms()\n  if now - tonumber(q.updated_ms", "  local now = now_ms()\n  if now - tonumber(q.updated_ms", 1),
+ ("wake ignores the quiet period", LUA, "then return no('too_early') end\n", "then end\n", 1),
+ ("wake again while unresolved", LUA, "    if prev and WAKE_OPEN[prev] then return no('woken', { wake_id = q.wake_id, state = prev }) end\n", "", 1),
+ ("unknown wake frees the thread", LUA, "  if outcome ~= 'wake_unknown' then release(w, id) end\n", "  release(w, id)\n", 1),
  ("no fsync", SUP, '"--appendfsync", "always"', '"--appendfsync", "no"', 1),
  ("no aof", SUP, '["--save", "", "--appendonly", "yes", "--appendfsync", "always"]', '["--save", "", "--appendonly", "no"]', 1),
 ]
 only=sys.argv[1:]
+# Every pattern must match exactly where intended before any file is touched.
+ambiguous=[(name, open(f).read().count(old)) for name,f,old,new,n in M if open(f).read().count(old)!=n]
+if ambiguous:
+    sys.exit(f"mutation patterns do not match as declared: {ambiguous}")
 survived=[]
 for name,f,old,new,n in M:
     if only and name not in only: continue

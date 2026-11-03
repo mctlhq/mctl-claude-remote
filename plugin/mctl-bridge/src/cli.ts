@@ -24,10 +24,12 @@ const USAGE = `usage: mctl-bridge <command> [options]
   renew QID --token T [--lease MS]
   reply QID --token T (--text T | --text -)
   resolve ID --as completed|failed|cancelled|closed|requeue --reason R [--author A] [--force]
+  resolve WAKE_ID --reason R [--author A]   close a wake (w-...) after looking at the thread
   sessions                               registered slots
   tasks                                  every open message
   status ID                              one message with its audit trail and late evidence
   errors                                 delivery_unknown, wake_unknown and late evidence
+  wakes                                  wakes not yet settled (intent, started, wake_unknown)
   sweep [--stale-ms MS]                  expiry, stale slots and recovery
 `;
 
@@ -143,10 +145,15 @@ export async function run(argv: string[], b: Bridge): Promise<{ code: number; ou
       if (!values.token) throw new Usage("--token is required");
       return result(await b.reply(positional(positionals, "QID"), values.token, readText(values.text)));
     case "resolve": {
-      if (!values.as || !values.reason) throw new Usage("--as and --reason are required");
+      const id = positional(positionals, "ID");
       const author = values.author || process.env.USER || "";
       if (!author) throw new Usage("--author is required when USER is not set");
-      return result(await b.resolve(positional(positionals, "ID"), values.as, values.reason, author, values.force === true));
+      if (id.startsWith("w-")) {
+        if (!values.reason) throw new Usage("--reason is required");
+        return result(await b.wakeResolve(id, values.reason, author));
+      }
+      if (!values.as || !values.reason) throw new Usage("--as and --reason are required");
+      return result(await b.resolve(id, values.as, values.reason, author, values.force === true));
     }
     case "sessions": {
       const now = Date.now();
@@ -167,14 +174,17 @@ export async function run(argv: string[], b: Bridge): Promise<{ code: number; ou
     }
     case "errors": {
       const open = await b.openMessages();
-      const unknown = open.filter((m) => m.state === "delivery_unknown" || m.state === "wake_unknown");
+      const unknown = open.filter((m) => m.state === "delivery_unknown");
+      const wakes = (await b.openWakes()).filter((w) => w.state === "wake_unknown");
       const late: Record<string, unknown> = {};
       for (const k of await lateKeys(b)) {
         const id = k.slice(key.late("").length);
         late[id] = await b.late(id);
       }
-      return { code: 0, out: { ok: true, unknown, late } };
+      return { code: 0, out: { ok: true, unknown, wakes, late } };
     }
+    case "wakes":
+      return { code: 0, out: { ok: true, wakes: await b.openWakes() } };
     case "sweep":
       return { code: 0, out: { ok: true, ...(await b.sweep(num(values["stale-ms"], 30000, "--stale-ms"))) } };
     default:

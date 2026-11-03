@@ -81,6 +81,25 @@ describe.skipIf(requiresValkey)("mctl-bridge CLI", () => {
     expect(cli(["status", sent.id]).out.message.state).toBe("completed");
   });
 
+  test("a wake_unknown shows in errors and wakes, and resolve closes it", async () => {
+    const b = new Bridge(server.client());
+    const reg = must(await b.register({ slot: "w", uuid: "u", conn_id: "kw", pid: 9, pid_start: "s", cwd: "/w" }));
+    const c = { slot: "w", conn_id: "kw", epoch: reg.epoch };
+    must(await b.heartbeat(c, false));
+    const sent = must(await b.send({ slot: "w", payload: "x" }));
+    const next = must(await b.next(c));
+    must(await b.emitted(c, sent.id));
+    const ack = must(await b.ackTask(c, sent.id, next.attempt_id));
+    const q = must(await b.ask("w", ack.admission, "which?"));
+    const wake = must(await b.wakeBegin({ question_id: q.question_id, thread_id: "thread-cli", lock_ms: 60_000, per_hour: 10, quiet_ms: 0 }));
+    must(await b.wakeFinish(wake.wake_id, "wake_unknown", "history_matches_0"));
+    expect(cli(["errors"]).out.wakes.find((w: any) => w.id === wake.wake_id)).toMatchObject({ state: "wake_unknown", reason: "history_matches_0" });
+    expect(cli(["wakes"]).out.wakes.map((w: any) => w.id)).toContain(wake.wake_id);
+    expect(cli(["resolve", wake.wake_id, "--author", "op"]).code).toBe(2); // a reason is required
+    expect(cli(["resolve", wake.wake_id, "--reason", "no turn in the thread", "--author", "op"]).code).toBe(0);
+    expect(cli(["wakes"]).out.wakes.map((w: any) => w.id)).not.toContain(wake.wake_id);
+  });
+
   test("usage errors exit 2", () => {
     expect(cli(["send"]).code).toBe(2);
     expect(cli(["nope"]).code).toBe(2);

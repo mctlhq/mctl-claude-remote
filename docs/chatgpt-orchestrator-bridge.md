@@ -224,6 +224,8 @@ active slots, the Codex app server and the waker.
 | `claim:<msg_id>` | string `<claim_token>` with PX | the right to commit a reply |
 | `wakelock:<thread_id>` | string `<wake_id>` with PX | the right to start a bridge-driven turn in a thread |
 | `wake:<wake_id>` | hash `{question_id, thread_id, state, turn_id}` | wake intent and outcome |
+| `wakes` | set of `wake_id` | wakes not yet settled (`intent`, `started`, `wake_unknown`) |
+| `wakes:hour:<n>` | counter with PX | the hourly wake budget |
 | `dedup:<idempotency_key>` | string → `msg_id` | deduplication |
 | `late:<task_id>` | stream | evidence that arrived after the sender lost the right to change state |
 | `audit:<id>` | stream (capped at about 200) | one message's own trail, read by `mctl-bridge status` |
@@ -266,7 +268,9 @@ plus `closed` and `delivery_unknown`.
 - An epoch change or a lost heartbeat moves the slot's open questions (`asked`,
   `reply_committed`) to `delivery_unknown` together with its tasks.
 
-Wakes: `intent → started → completed`, plus `wake_unknown`.
+Wakes: `intent → started → completed`, plus `intent → failed` (the app server refused
+`turn/start` with a JSON-RPC error, so no turn exists) and `wake_unknown`, which leaves
+only through `resolve` (`→ resolved`).
 
 - Channels does not acknowledge notifications: a resolved `notification()` means the
   message was written to stdio, not that the model read it. Only the slot's `ack`
@@ -516,6 +520,40 @@ Fixes P1-a.
 - Tests against a fake app server on a Unix socket (WebSocket, JSON-RPC): a foreign
   `turn/completed` arriving first is ignored; a lost `turn/start` reply resolves through
   the marker; an ambiguous history gives `wake_unknown`; two wakers produce one wake.
+
+Implementation notes (slice 3):
+
+- `bridge_wake_begin` is the one call before any RPC. It refuses a question that is no
+  longer `asked`, is claimed, is younger than the quiet period (`MCTL_BRIDGE_WAKE_QUIET_MS`,
+  default 30 s), already has a wake in `intent`, `started` or `wake_unknown`, or has used
+  its per-question budget (`MCTL_BRIDGE_WAKES_PER_QUESTION`, default 2). It also refuses
+  a thread whose wakelock is held and an hour whose budget is spent
+  (`MCTL_BRIDGE_WAKES_PER_HOUR`, default 12). The wakelock lasts the turn timeout
+  (`MCTL_BRIDGE_TURN_TIMEOUT_MS`, default 15 minutes) plus one minute.
+- `completed` and `failed` release the wakelock. A question that is still unclaimed
+  after one of them may be woken again, within its per-question budget. `wake_unknown`
+  keeps the wakelock until its PX runs out, because the turn may still be running. Its
+  question is not woken again until an operator runs
+  `mctl-bridge resolve <wake_id> --reason`.
+- The turn text carries the marker, the question id, the slot and the CLI commands, but
+  not the question's text. That text is slot input, and the orchestrator reads it
+  through `mctl-bridge status`, marked as input rather than instruction.
+- History is read with `thread/read {includeTurns: true}`. Only `userMessage` items are
+  searched for the marker. A response without a `turns` list is an unreadable history
+  and gives `wake_unknown (history_unreadable)`; it is never read as "no match".
+- After a lost connection, a started turn is followed by polling `thread/read` until
+  its status leaves `inProgress`. A turn that does not end in time becomes
+  `wake_unknown (turn_timeout)`. On start, the waker settles any `intent` from the
+  history and follows any `started`; recovery itself never starts a turn.
+- The sweeper is the existing `sweep` (expiry, stale slots, the `open` repair scan) on
+  its own timer (`MCTL_BRIDGE_SWEEP_MS`, default 5 s), so a long turn never delays it.
+  Every stream is capped by `MAXLEN`, and the queues are sorted sets, so no MINID pass is
+  needed.
+- `mctl-bridge errors` lists `wake_unknown` wakes, and `mctl-bridge wakes` lists every
+  open wake.
+- `turn/start` also accepts `clientUserMessageId` for idempotent retries. The waker does
+  not use it yet: whether the Mac mini's Codex build honours it is checked in slice 4
+  first.
 
 ### Slice 4: Mac mini, end to end on an isolated Valkey
 
