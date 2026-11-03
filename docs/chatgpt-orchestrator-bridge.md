@@ -1,7 +1,9 @@
 # ChatGPT app orchestrator for Claude Code slots on the Mac mini
 
 Status: design for an MVP. Both gates passed on 2026-11-03 (see
-[Gate results](#gate-results-2026-11-03)); the bridge itself is not written yet.
+[Gate results](#gate-results-2026-11-03)) and a second design review was folded in
+(see [Design review 2](#design-review-2-2026-11-03)); the bridge itself is not written
+yet. Implementation proceeds in [slices](#implementation-slices).
 This file is the canonical plan; change the design by editing it.
 
 ## Goal
@@ -14,7 +16,8 @@ orchestrator of Claude Code sessions. All work and state live on the Mac mini:
   there. The orchestrator chat works with the Mac mini's files and commands.
 - Claude Code sessions ("slots") run on the Mac mini and receive tasks through
   Claude Code Channels.
-- Messages are stored in the cluster Valkey, which the Mac mini already reaches
+- Messages are stored in Valkey: an isolated local instance on the Mac mini until the
+  end-to-end tests pass, then the cluster Valkey, which the Mac mini already reaches
   through the `events-valkey.mctl.ai` tunnel.
 
 The orchestrator dispatches tasks to slots, answers their questions and collects
@@ -128,16 +131,44 @@ channel server comes from `--mcp-config`; delivery works regardless.
 4. A missing ack after emit already maps to `delivery_unknown` without a resend;
    gate 2 shows that this path really happens.
 
-## Target layout (after the gates)
+## Design review 2 (2026-11-03)
+
+An independent review of this document after the gates found five P1 gaps. All of
+them share one shape: a process can die **between recording an intent in Valkey and
+acting on an external system** (the Codex app server, a slot's stdio), and the design
+must say what state that leaves behind. The fixes are folded into the sections below,
+slice by slice, so that each slice can be implemented from its own section:
+
+| Gap | Where it is fixed |
+|---|---|
+| P1-a The waker trusts the first `turn/completed` and may lose the `turn/start` reply | [Slice 3](#slice-3-waker-and-sweeper) |
+| P1-b Fencing check and stdio write are two steps | [Emit protocol](#emit-protocol-and-admission), [Slice 2](#slice-2-slot-adapter) |
+| P1-c Recovery depends on stream references; dedup expires while the outcome is unknown | [Recovery and retention](#recovery-and-retention) |
+| P1-d `reply` closes the question before the slot has the answer; a waiting slot can deadlock | [Questions and replies](#questions-and-replies), [Slice 2](#slice-2-slot-adapter) |
+| P1-e A slot's shell may reach the orchestrator's credentials or the Codex socket | [Permission boundary](#permission-boundary) |
+
+## Target layout
 
 ```text
-ChatGPT app (laptop) --SSH--> Codex app server (Mac mini), orchestrator thread
-                                 | local: mctl-bridge send/wait/claim/reply
-waker (launchd, Mac mini) -- starts a turn --+
-      ^                                        Valkey mctl:bridge:* (cluster, tunnel)
+ChatGPT app (laptop/phone) --remote--> Codex app server (Mac mini), orchestrator thread
+                                         | local: mctl-bridge send/wait/claim/reply/resolve
+waker + sweeper (launchd, Mac mini) -- starts a turn --+
+      ^                                                 Valkey mctl:bridge:*
+      |                                                 (isolated local Valkey first,
+      |                                                  cluster after end-to-end tests)
       +-- outbox <-- ask_orchestrator / ack / result -- Claude slots (mctl-bridge adapter)
-                     send --> inbox:claude:<uuid> --------------------> <channel>
+                     send/reply --> inbox:claude:<uuid> -------------------> <channel>
 ```
+
+**Who orchestrates.** The orchestrator is a thread of the Codex app server on the Mac
+mini. Its model is whatever model is selected for that thread in the ChatGPT app; its
+history lives in `~/.codex/sessions` on the Mac mini. The laptop and phone apps are
+clients only. The waker logs the model parameters it can actually observe for each
+turn it starts (from `thread/resume` and `turn/started`), not the ones it assumes.
+
+**What "exactly one answer" means.** For a question, at most one authoritative reply
+can be committed. Whether a specific slot received it is confirmed separately, by that
+slot's `ack` of the reply id. The design never claims more than this.
 
 ## What already exists
 
@@ -146,11 +177,18 @@ waker (launchd, Mac mini) -- starts a turn --+
   (`claude --remote-control` with the `mctl-events` Bun adapter). A PTY driver passes
   the development-channels confirmation that appears on every launch.
 - `plugin/mctl-events/src/` in this repository: `channel.ts` (XREADGROUP BLOCK,
-  pending recovery and reclaim, max_inflight, audit), `valkey.ts`, `envelope.ts`,
-  `policy.ts`. The bridge reuses this code.
+  pending recovery and reclaim, max_inflight, audit), `valkey.ts` (dependency-free
+  RESP2 client), `envelope.ts`, `policy.ts`; `test/support.ts` starts a throwaway
+  `valkey-server`/`redis-server` and a fake Claude Code client. CI installs
+  `redis-server` and Bun 1.3.14.
+- `docs/orchestrator-bridge-spike/wake.py`: the working Codex app-server protocol.
 - Valkey and its ACL in mctl-gitops:
   `platform-gitops/infra-components/data/valkey/externalsecret.yaml`, with the runbook
   `docs/runbooks/valkey-acl.md` (a `#` line inside `users.acl` aborts Valkey startup).
+
+A plugin is installed from its own directory (`${CLAUDE_PLUGIN_ROOT}`), so a shared
+`plugin/shared/` would not ship with it. `mctl-bridge` carries a copy of
+`mctl-events/src/valkey.ts`, and a test fails if the copy and the original differ.
 
 ## Resources (measured on the Mac mini, 2026-11-03)
 
@@ -161,95 +199,313 @@ Intel i3-8100B, 4 cores, 8 GB RAM, 2.4 GB of swap already in use.
 | Bun channel adapter (`mctl-events`) | 8.6 MB | 0.0% |
 | Idle Claude session (events, Sonnet) | 138 MB | 0.2% |
 | `claude self-hosted-runner` | 65 MB | 0.0% |
+| Codex app-server daemon | ~60 MB | ~0% |
 
 The channel itself is close to free. An idle measurement says nothing about active
-sessions running builds and tests, so the MVP is limited to **two slots**, raised only
-after measuring two active slots together with the Codex app server.
+sessions running builds and tests, so the MVP is limited to **two slots**. The limit is
+raised only after measuring memory pressure, swap and CPU (not only RSS) with two
+active slots, the Codex app server and the waker.
 
 ## Queue design
 
-### Keys under `mctl:bridge:*` and retention
+### Keys under `mctl:bridge:*`
 
-| Key | Type | Purpose | Retention |
-|---|---|---|---|
-| `msg:<id>` | hash | full payload, state, addressee `{slot, uuid, epoch}`, `expires_at` | until terminal state + 7 days |
-| `inbox:claude:<uuid>` | stream of `msg_id` only | wake the slot adapter | MINID: older than 7 days and not pending |
-| `outbox` | stream of `msg_id` only, one group `orchestrator` | questions, acks, results | same |
-| `claim:<msg_id>` | string `{owner}` with PX | ownership of handling one message | lease TTL, renewed |
-| `slot:<name>` | hash `{uuid, conn_id, epoch, pid, cwd, heartbeat}` | slot registration | while alive + 1 day |
-| `dedup:<idempotency_key>` | string → `msg_id` | deduplication | 7 days |
-| `audit` | stream | state transitions | MAXLEN ~ 30 days |
+| Key | Type | Purpose |
+|---|---|---|
+| `msg:<id>` | hash | authoritative record: payload, state, addressee `{slot, uuid, epoch}`, `attempt_id`, `expires_at`, history of the last transition |
+| `open` | set of `msg_id` | every message not yet in a terminal state; the recovery index |
+| `inbox:claude:<uuid>` | stream of `msg_id` only | wakes the slot adapter |
+| `outbox` | stream of `msg_id` only, one group `orchestrator` | questions, acks, results |
+| `claim:<msg_id>` | string `<claim_token>` with PX | the right to commit a reply |
+| `slot:<name>` | hash `{uuid, conn_id, epoch, pid, pid_start, cwd, heartbeat, inflight}` | slot registration and lease |
+| `wakelock:<thread_id>` | string `<wake_id>` with PX | the right to start a bridge-driven turn in a thread |
+| `wake:<wake_id>` | hash `{question_id, thread_id, state, turn_id}` | wake intent and outcome |
+| `dedup:<idempotency_key>` | string → `msg_id` | deduplication |
+| `late:<task_id>` | stream | evidence that arrived after the sender lost the right to change state |
+| `audit` | stream | every state transition |
 
-The payload lives in `msg:<id>` and streams carry only references, so trimming a
-stream never loses an unprocessed message. Expiry is an explicit transition to
-`expired` driven by `expires_at`, never a side effect of trimming.
-
-### Handling the outbox without double answers
-
-There is one consumer group, `orchestrator`. The right to answer a message is an
-atomic claim, `SET claim:<msg_id> <owner> NX PX <lease>`, renewed by compare-and-set
-on the owner for as long as the answer is being prepared. `reply` is accepted only
-from the claim owner, in one Lua script that checks the claim, moves the state, adds
-the reply to the slot inbox and acknowledges the outbox entry.
-
-The interactive `wait` and the waker compete only for the claim. **The waker never
-answers**: it starts an orchestrator turn when a message has sat unclaimed for N
-seconds, and that turn takes the claim itself. After a reconnect, unanswered entries
-are re-read from the pending list (`XAUTOCLAIM`).
-
-### Slot fencing at every step
-
-- Registration: a new adapter takes `epoch + 1`. Renewal and removal are Lua
-  compare-and-set on `conn_id`, so an old adapter cannot renew or delete the new
-  registration.
-- `send` records the addressee `{uuid, epoch}` in `msg:<id>` at send time.
-- Before emitting, the adapter checks atomically that its `conn_id`/`epoch` are
-  current and match the task's addressee; otherwise it does not emit.
-- `ack` and `result` are accepted only from the adapter whose `uuid`/`epoch` match the
-  task.
-- After `/clear` (new uuid, epoch + 1), an unacknowledged task is never handed to the
-  new context: it moves to `delivery_unknown` and the orchestrator decides whether to
-  resend.
-- Two live processes on one uuid are an explicit conflict, never a random choice.
+Every transition is **one Lua/FCALL call** that updates `msg:<id>`, `open`, `dedup` and
+`audit` together. No transition is split across round trips.
 
 ### States
 
-`queued → emitted → acked → completed | failed`, plus `expired`, `cancelled` (before
-emit only) and `delivery_unknown`.
+Tasks (orchestrator → slot):
+`queued → emit_intent → emitted → acked → completed | failed`, plus `expired`,
+`cancelled` (before `emit_intent` only) and `delivery_unknown`.
+
+Questions (slot → orchestrator):
+`asked → reply_committed → reply_emit_intent → reply_emitted → reply_acknowledged`,
+plus `expired` and `delivery_unknown`.
+
+Wakes: `intent → started → completed`, plus `wake_unknown`.
 
 - Channels does not acknowledge notifications: a resolved `notification()` means the
-  message was written to stdio, not that the model read it. Only `ack_task` moves a
-  task to `acked`.
-- Nothing is resent automatically for lack of an ack.
-- At most one unacknowledged task per slot.
+  message was written to stdio, not that the model read it. Only the slot's `ack`
+  moves a message past `emitted`.
+- Nothing is resent automatically. `delivery_unknown` and `wake_unknown` stay in
+  `open` until an explicit `resolve`.
 - A hop counter (at most 4) in the envelope stops orchestrator/slot loops; the waker
   has an hourly wake-up limit.
 
-### Code: `plugin/mctl-bridge/`
+### Emit protocol and admission
 
-Code shared with `mctl-events` moves to `plugin/shared/`.
+Fixes P1-b. The fencing check and the stdio write cannot be one operation, so the
+window between them is recorded instead of hidden:
 
-- `src/channel.ts`: slot adapter. Tools `ack_task`, `report_result`,
-  `ask_orchestrator`, `bridge_status`; heartbeat; fencing; watches the pid file
-  written by the SessionStart hook.
-- `src/cli.ts`: `mctl-bridge sessions | send | wait | claim | reply | status`, JSON
-  output for the orchestrator.
-- `src/waker.ts`: starts orchestrator turns.
-- `src/sweeper.ts`: expiry and retention (may live inside the waker).
-- All Lua scripts in one module with tests; every guarantee has a test that fails when
-  the guarantee is reverted.
+1. `emit_intent` (one Lua call) checks that the adapter's `conn_id` and `epoch` are
+   current and match the addressee, that the slot is idle with a fresh heartbeat, and
+   that `inflight` allows this message (below). It sets `inflight`, generates an
+   `attempt_id` and moves the message to `emit_intent`.
+2. The adapter writes the notification to stdio.
+3. `mark_emitted` moves it to `emitted`.
 
-### Mac mini
+An adapter that restarts and finds its own message in `emit_intent` cannot know whether
+step 2 happened, so the message moves to `delivery_unknown`. The same holds for a
+message in `emitted` without an ack when the slot's epoch changes (`/clear`, restart).
 
-- Codex CLI and `~/orchestrator/AGENTS.md`.
-- Slot launcher next to `~/mctl-events/run-session.sh`: `start|stop <slot> <repo>`,
-  limit 2. A slot is stopped as idle only when it has no task in `emitted`/`acked`, no
-  question waiting for an answer and no running tool (`claude agents --json` busy/idle
-  plus Valkey state). Silence on the channel is not idleness.
-- SessionStart hook writing `~/.claude/bridge/pid-$CLAUDE_PID.json`
-  (`session_id`, `source`); `/clear` changes the session id inside the same process,
-  so the adapter's spawn-time environment alone goes stale.
-- launchd `com.mctl.bridge-waker`.
+**Admission.** Every event carries an explicit instruction to call `ack_task` before
+doing any work. A successful `ack_task` returns an admission bound to
+`{task_id, attempt_id, uuid, epoch, conn_id}`; `report_result` and `ask_orchestrator`
+require it and reject any field mismatch. Admission is enforced only for operations
+that go through the bridge. It does **not** block an arbitrary Bash call in the slot;
+those stay under the slot's normal permission prompts. The design does not claim more.
+
+**Late evidence.** The right to change state and the right to leave evidence are
+separate. A `report_result` from an old epoch or attempt never completes the task, but
+it is appended to `late:<task_id>` and `audit` with
+`{task_id, attempt_id, epoch, conn_id, reason}`. `mctl-bridge errors` shows these next
+to `delivery_unknown`, so an operator sees that a first attempt already acted before
+deciding to rerun. `mctl-bridge resolve <id> --as completed|failed|requeue --reason`
+is the manual transition and records its author.
+
+### Questions and replies
+
+Fixes P1-d.
+
+- `ask_orchestrator` stores the question (`asked`), adds it to `outbox` and returns a
+  `question_id` immediately. The slot then ends its turn; it does not wait inside a
+  tool call. The originating task stays in `inflight`.
+- `reply` (orchestrator, one Lua call) checks the `claim_token`, stores the reply and
+  moves the question to `reply_committed`, adds it to the slot inbox and acknowledges
+  the outbox entry. It does not claim that the slot has the reply.
+- The adapter emits the reply with the same intent protocol (`reply_emit_intent →
+  reply_emitted`); the slot's `ack` of the `reply_id` moves it to
+  `reply_acknowledged`.
+- **Inflight rule.** A message may be emitted when `inflight` is empty, **or** when it
+  is a reply whose `question_id`, `attempt_id` and addressee match the task currently
+  in `inflight`. Without the second clause a task's own reply would be blocked forever
+  by that task. Unrelated tasks still wait.
+- End-to-end criterion: the slot acknowledges the `reply_id` and then finishes the
+  original task with `report_result` under the **same** `attempt_id`.
+
+### Claims
+
+There is one consumer group, `orchestrator`. The right to answer is an atomic claim,
+`SET claim:<msg_id> <claim_token> NX PX <lease>`, with a fresh random token per claim.
+Renewal and `reply` are compare-and-set on the token, not on the owner name: if the
+same owner loses the lease and claims again, its old token is dead. The interactive
+`wait`, a waker-started turn and a manual turn from the ChatGPT app all compete only
+for the claim. After a reconnect, unanswered entries are re-read from the pending list
+(`XAUTOCLAIM`).
+
+### Slot fencing
+
+- Registration: a new adapter takes `epoch + 1` and a fresh `conn_id`. Renewal and
+  removal are compare-and-set on `conn_id`.
+- A slot's identity is `pid + process start time + conn_id`, so a reused pid cannot
+  pass for an old process.
+- `send` records the addressee `{uuid, epoch}` in `msg:<id>`.
+- `ack` and `result` require the full admission tuple.
+- After `/clear` (new session id in the same process) the epoch moves on; a message in
+  `emit_intent` or `emitted` without an ack becomes `delivery_unknown` and is never
+  handed to the new context.
+- Two live processes on one uuid are an explicit conflict.
+
+### Recovery and retention
+
+Fixes P1-c.
+
+- On start, the sweeper scans `open`, not the streams or the pending list. A message
+  provably never handed to stdio (`queued`, no intent) is re-queued; `emit_intent`
+  becomes `delivery_unknown`; `asked` without a claim is re-added to the outbox if its
+  stream entry is gone.
+- `dedup:<key>` lives while its message is in `open`, plus a replay window (7 days)
+  after the terminal state, never a fixed TTL from creation.
+- `msg:<id>` lives until its terminal state plus 7 days. Streams are trimmed by MINID
+  only below the oldest entry still pending. `audit` keeps about 30 days.
+- Expiry is an explicit transition driven by `expires_at`.
+- Durability: Valkey runs with `appendonly yes` and `appendfsync always` for the bridge
+  (the recovery test below depends on it). The cluster Valkey's persistence settings
+  are checked before slice 5; a weaker policy is acceptable only if this document
+  records the resulting loss window.
+
+### Permission boundary
+
+Fixes P1-e. What a slot's shell can reach on the Mac mini decides what the bridge can
+promise:
+
+- The Codex control socket `~/.codex/app-server-control/app-server-control.sock` is
+  owned by the operator's uid. A process with that uid can start turns in any thread.
+- Valkey credentials readable by the slot's uid let it act as whoever owns them.
+
+The target boundary:
+
+- Slots run as a separate macOS user (`mctl-slot`). The control socket and the
+  orchestrator's credentials (mode 0600, operator uid) are out of reach.
+- Valkey has separate users: `bridge_orch` for the CLI and waker, and
+  `bridge_slot_<name>` per slot. Isolation rests on ACL checks of the keys an FCALL
+  declares: orchestrator functions (`claim`, `reply`, `resolve`) declare `claim:*`
+  keys that no slot user may touch; slot functions declare a key in the slot's own
+  namespace `s:<name>:*`, so slot A cannot write a result for slot B.
+- Adapter credentials go to the MCP process only, never into the session's
+  environment.
+- A reply to a question never grants approval, merge or deploy; those follow the
+  workspace rules and the slot's own permission prompts (approved through Remote
+  Control).
+
+If the MVP keeps one shared uid, that mode is called a **trusted experiment**, is
+documented as an accepted risk, and is not used for working slots. End-to-end
+scenario 8 tests the boundary either way.
+
+### Busy signal
+
+Hooks write a local file `~/.mctl-bridge/state/<claude_pid>.json` (`busy|idle`,
+`session_id`, `source`) atomically (temp file plus rename): `SessionStart` writes the
+session id, `UserPromptSubmit` sets busy, `Stop` sets idle. The adapter finds its file
+through `getppid()`. Hooks hold no Valkey credentials.
+
+## Implementation slices
+
+Each slice is one PR in this repository unless stated otherwise, with CI, the Claude
+review and agy, merged with a merge commit. Every guarantee gets a test, and each test
+is shown to fail with its guarantee reverted.
+
+### Slice 1: queue and state machine
+
+`plugin/mctl-bridge/` with `package.json`, `.claude-plugin/plugin.json`, `.mcp.json`,
+`bunfig.toml` as in `mctl-events`, and an entry in `.claude-plugin/marketplace.json`.
+
+- `src/valkey.ts` (copy) and a test that it matches `mctl-events`.
+- Lua functions and `src/store.ts`: `send`, `register_slot`, `heartbeat`,
+  `unregister`, `emit_intent`, `mark_emitted`, `ack` (returns admission), `result`,
+  `ask`, `claim`, `renew`, `reply`, `expire`, `mark_unknown`, `resolve`, `record_late`.
+  Each updates `msg`, `open`, `dedup` and `audit` atomically.
+- `src/cli.ts`: `send | wait | claim | reply | resolve | sessions | tasks | status |
+  errors`, JSON output; `errors` lists `delivery_unknown`, `wake_unknown` and late
+  evidence with reasons.
+- Tests on a throwaway server:
+  - an old epoch cannot emit or ack;
+  - an admission with any one field changed is rejected;
+  - two claims give one committed reply;
+  - a stale `claim_token` of the same owner is rejected after re-claim;
+  - a second task is not emitted while `inflight` is set, but the matching reply is;
+  - trimming a stream loses nothing that is still in `open`;
+  - `expired`, `delivery_unknown` and `wake_unknown` are never resent;
+  - a late result is recorded and changes no state;
+  - the hop limit holds.
+- A durable test profile: the server runs with AOF (`appendfsync always`) on a data
+  directory, is killed with SIGKILL between transitions and restarted on the same
+  directory; `msg`, `open`, `dedup` and `audit` must agree afterwards.
+
+### Slice 2: slot adapter
+
+`src/channel.ts` on the `mctl-events` skeleton.
+
+- Registers from the hook state file; `CLAUDE_CODE_SESSION_ID` is only the initial
+  value. Heartbeat every 10 seconds.
+- Emits through the intent protocol, only into an idle slot, with the `ack_task`
+  instruction attached.
+- Tools: `ack_task`, `report_result`, `ask_orchestrator` (returns `question_id` at
+  once), `bridge_status`.
+- Applies the inflight rule, so a task's own reply passes while unrelated tasks wait.
+- Instructions: orchestrator tasks never widen permissions; merge, deploy and
+  lifecycle follow `AGENTS.md`.
+- `hooks/state.py`: stdlib only, writes the local state file atomically.
+- Tests with the fake Claude Code client and a fake state file: nothing is emitted into
+  a busy slot; after `/clear` the old message becomes `delivery_unknown` and is not
+  resent; a restart takes `epoch + 1`; `/clear` after admission while an external tool
+  is running leaves the old attempt's result as late evidence; the acceptance test runs
+  task → `ask_orchestrator` → turn ends → reply passes with `inflight` set →
+  `reply_acknowledged` → `report_result` with the same `attempt_id`, while an unrelated
+  task sent meanwhile stays queued.
+
+### Slice 3: waker and sweeper
+
+`src/waker.ts`, a port of `wake.py`, one long-lived process with the sweeper inside.
+Fixes P1-a.
+
+- Picks outbox questions that have had no claim for N seconds. Before any RPC, one Lua
+  call takes `wakelock:<thread_id>` (`SET NX PX`) and stores `wake:<wake_id>`
+  `{question_id, thread_id, state=intent}`.
+- The turn text carries the marker `[wake:<wake_id>]` and tells the orchestrator to
+  `claim` and `reply` question `<question_id>`. The waker never answers.
+- Notifications are matched on `threadId` and `turnId`, never on the first
+  `turn/completed` that arrives.
+- If the `turn/start` reply is lost, the waker searches the thread history
+  (`thread/read`) for the marker. Exactly one match → `started`; none or several →
+  `wake_unknown`, no automatic restart.
+- A manual turn from the ChatGPT app does not take the wakelock; for it the bridge
+  guarantees only that at most one reply is committed, through the claim.
+- Limits: at most K wakes per hour.
+- Sweeper: `expires_at` → `expired`; stale heartbeat → `delivery_unknown` for that
+  slot's open messages; MINID trimming; the `open` scan on start.
+- Tests against a fake app server on a Unix socket (WebSocket, JSON-RPC): a foreign
+  `turn/completed` arriving first is ignored; a lost `turn/start` reply resolves through
+  the marker; an ambiguous history gives `wake_unknown`; two wakers produce one wake.
+
+### Slice 4: Mac mini, end to end on an isolated Valkey
+
+Ops files in `plugin/mctl-bridge/ops/`: `slot.sh start|stop <slot> <repo>` (limit 2,
+built on `~/mctl-events/run-session.sh` and the PTY driver), the settings file with
+hooks, the launchd plists, and a section for `~/orchestrator/AGENTS.md` on how the
+orchestrator uses the CLI and what it must not do.
+
+- **Isolated Valkey.** A `valkey-server` built from source on the Mac mini (it has no
+  Valkey or Redis, and Docker Desktop does not fit in 8 GB), bound to `127.0.0.1` on
+  its own port. launchd `com.mctl.bridge-valkey` (RunAtLoad, KeepAlive), data in
+  `~/mctl-bridge/valkey/`, AOF with the policy from slice 1.
+- Every client (adapter, waker, CLI) reconnects with backoff, whatever the start order.
+- The permission boundary is chosen before these tests run.
+- A slot is stopped as idle only when it has nothing in `emit_intent`, `emitted` or
+  `acked`, no unanswered question and no running tool. Silence on the channel is not
+  idleness.
+
+Scenarios:
+
+1. Addressing: a task for A never appears in B.
+2. Laptop closed: question → waker → claim and reply → answer in the same slot → the
+   turn is visible on the phone.
+3. `wait` and the waker at once give one committed reply.
+4. `/clear`, and the adapter killed before and after emit, give `delivery_unknown`
+   without a resend.
+5. Mac mini reboot: launchd starts Valkey, the Codex daemon, the waker and the slots in
+   any order. Afterwards the specific `task_id`, `attempt_id` and audit entries are
+   found, dedup is intact, and the question either reaches an answer or the operator
+   sees a definite reason why it stopped.
+6. A task sent while a tool runs waits for idle.
+7. **The main test.** Slot A is working on a task, asks a question and ends its turn.
+   The laptop is closed. The orchestrator commits a reply; the waker is killed before it
+   sees `turn/completed`. After the restart, A receives the reply, continues the **same
+   attempt** and reports its result. The phone shows the question, the reply and the
+   result in one thread. B receives nothing.
+8. From slot A's shell: try to reply for the orchestrator, write B's result and open the
+   Codex control socket. Expected: refused. In trusted-experiment mode the bypass is
+   recorded instead.
+
+Then measure two active slots with the Codex app server and the waker.
+
+### Slice 5: cluster Valkey
+
+A PR in mctl-gitops adds the users from the permission boundary (`bridge_orch`,
+`bridge_slot_<name>`, not one shared `bridge`) following the Valkey ACL runbook,
+including its render check on the target image. Before that, check the cluster
+Valkey's persistence settings and whether it is standalone or a Cluster; hash-slot
+co-location of keys used in one script matters only for a Cluster. The Valkey restart
+is agreed separately because it interrupts the events pipeline. Then the bridge
+switches to the tunnel and scenarios 2, 5, 7 and 8 are repeated.
+
+**Gate before working slots:** the end-to-end tests pass, scenario 8 is refused rather
+than run as a trusted experiment, and the owner approves.
 
 ## Risks
 
@@ -257,31 +513,16 @@ Code shared with `mctl-events` moves to `plugin/shared/`.
   claude-remote session was running; that is an unconfirmed observation, not an
   established cause. The concurrency limit is justified by the Mac mini's resources
   and by the usage limits of the Claude and ChatGPT plans.
-- **Prompt injection and permissions.** Only the `bridge` ACL user may write
-  `mctl:bridge:*`. The channel instructions say that orchestrator tasks never widen a
-  session's permissions; merge, deploy and lifecycle decisions follow the workspace
-  rules. There is no permission relay in the MVP; approvals go through Remote Control.
+- **Prompt injection.** Orchestrator tasks never widen a session's permissions. There
+  is no permission relay in the MVP; approvals go through Remote Control.
+- **Shared uid.** Until slots run under their own user, a slot's shell can reach the
+  Codex socket; see [Permission boundary](#permission-boundary).
 - **Data in the cluster.** No secrets in message content; retention as above.
-
-## Steps after the gates
-
-3. `bridge` ACL user in mctl-gitops, following the Valkey ACL runbook including its
-   render check.
-4. Implement `mctl-bridge` (Lua plus tests).
-5. End to end on two slots: addressing; fencing (`/clear`, adapter restart, a task read
-   by the old adapter before the epoch change is not emitted); claim (`wait` and waker
-   at once give one answer); autonomy (app closed, answer still produced and visible in
-   the app afterwards); failures (adapter killed before and after emit gives
-   `delivery_unknown`, tunnel restart, TTL, stream trim with a non-empty pending list).
-6. Measure RSS/CPU with two active slots and the Codex app server. Working slots are
-   added only after that.
 
 ## Acceptance
 
-- A task reaches only the current slot (uuid and epoch).
-- Acks and results are visible in the orchestrator chat.
-- A slot's question gets exactly one answer, also while the app is closed, and that
-  turn is visible in the app afterwards.
-- Nothing is lost across reconnects; trimming streams loses nothing unprocessed.
-- `delivery_unknown` is visible to the operator.
-- Resource use with two active slots is measured.
+- Scenarios 1–8 pass on the isolated Valkey; 2, 5, 7 and 8 pass again on the cluster.
+- Every guarantee has a test that fails with the guarantee reverted.
+- `mctl-bridge errors` shows every `delivery_unknown`, `wake_unknown` and late result
+  with its reason.
+- Two active slots fit in the Mac mini's memory without growing swap under load.
