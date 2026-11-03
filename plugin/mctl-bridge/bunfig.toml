@@ -1,0 +1,3 @@
+# Passed to every bun invocation of this plugin's code with --config, so that a
+# bunfig.toml in the session's working directory (which can preload arbitrary
+# code) is never read in its place. Intentionally empty.

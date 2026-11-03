@@ -1,0 +1,12 @@
+{
+  "name": "mctl-bridge",
+  "version": "0.1.0",
+  "description": "Bridge between a ChatGPT-app orchestrator on the Mac mini and Claude Code slots: queue, state machine and the mctl-bridge CLI. The slot adapter arrives in a later release.",
+  "author": {
+    "name": "MCTL",
+    "url": "https://github.com/mctlhq"
+  },
+  "homepage": "https://github.com/mctlhq/mctl-claude-remote/tree/main/plugin/mctl-bridge",
+  "repository": "https://github.com/mctlhq/mctl-claude-remote",
+  "license": "MIT"
+}

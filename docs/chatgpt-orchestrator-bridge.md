@@ -157,7 +157,7 @@ waker + sweeper (launchd, Mac mini) -- starts a turn --+
       |                                                 (isolated local Valkey first,
       |                                                  cluster after end-to-end tests)
       +-- outbox <-- ask_orchestrator / ack / result -- Claude slots (mctl-bridge adapter)
-                     send/reply --> inbox:claude:<uuid> -------------------> <channel>
+                     send/reply --> s:<slot>:ready (+ inbox doorbell) ------> <channel>
 ```
 
 **Who orchestrates.** The orchestrator is a thread of the Codex app server on the Mac
@@ -214,18 +214,31 @@ active slots, the Codex app server and the waker.
 |---|---|---|
 | `msg:<id>` | hash | authoritative record: payload, state, addressee `{slot, uuid, epoch}`, `attempt_id`, `expires_at`, history of the last transition |
 | `open` | set of `msg_id` | every message not yet in a terminal state; the recovery index |
-| `inbox:claude:<uuid>` | stream of `msg_id` only | wakes the slot adapter |
-| `outbox` | stream of `msg_id` only, one group `orchestrator` | questions, acks, results |
+| `slots` | set of slot names | every slot that ever registered |
+| `s:<slot>:slot` | hash `{uuid, conn_id, epoch, pid, pid_start, cwd, heartbeat, busy, inflight, inflight_attempt}` | slot registration and lease |
+| `s:<slot>:ready` | sorted set of `msg_id` | **the slot's queue**: tasks in `queued` and replies in `reply_committed` |
+| `s:<slot>:open` | set of `msg_id` | the slot's open messages, invalidated together on an epoch change |
+| `s:<slot>:inbox` | stream of `msg_id` | doorbell for the slot adapter only |
+| `asked` | sorted set of `msg_id` | **the orchestrator's queue**: questions in `asked` |
+| `outbox` | stream `{id, event}` | doorbell and event feed for `mctl-bridge wait` (asked, acked, result, late, delivery_unknown) |
 | `claim:<msg_id>` | string `<claim_token>` with PX | the right to commit a reply |
-| `slot:<name>` | hash `{uuid, conn_id, epoch, pid, pid_start, cwd, heartbeat, inflight}` | slot registration and lease |
 | `wakelock:<thread_id>` | string `<wake_id>` with PX | the right to start a bridge-driven turn in a thread |
 | `wake:<wake_id>` | hash `{question_id, thread_id, state, turn_id}` | wake intent and outcome |
 | `dedup:<idempotency_key>` | string → `msg_id` | deduplication |
 | `late:<task_id>` | stream | evidence that arrived after the sender lost the right to change state |
 | `audit` | stream | every state transition |
 
-Every transition is **one Lua/FCALL call** that updates `msg:<id>`, `open`, `dedup` and
-`audit` together. No transition is split across round trips.
+Every transition is **one Lua/FCALL call** that updates `msg:<id>`, `open`, the queues,
+`dedup` and `audit` together. No transition is split across round trips.
+
+Queues are sorted sets changed in the same call as the state, so a queue entry cannot
+go missing on its own. Streams are only doorbells: a lost or trimmed stream entry
+delays a wake-up and loses nothing. The functions live in one library,
+`plugin/mctl-bridge/src/bridge.lua`, and derive their keys from the ids they are given,
+so the bridge needs a standalone Valkey, not a Cluster. The first key every function
+declares is its role key: `orch` for orchestrator functions and `s:<slot>:slot` for
+slot functions (see [Permission boundary](#permission-boundary)). `wakelock` and `wake`
+arrive with slice 3.
 
 ### States
 
@@ -300,13 +313,15 @@ Fixes P1-d.
 
 ### Claims
 
-There is one consumer group, `orchestrator`. The right to answer is an atomic claim,
+The orchestrator's queue is the `asked` sorted set; there is no consumer group, because
+ownership is decided by the claim alone. The right to answer is an atomic claim,
 `SET claim:<msg_id> <claim_token> NX PX <lease>`, with a fresh random token per claim.
 Renewal and `reply` are compare-and-set on the token, not on the owner name: if the
 same owner loses the lease and claims again, its old token is dead. The interactive
 `wait`, a waker-started turn and a manual turn from the ChatGPT app all compete only
-for the claim. After a reconnect, unanswered entries are re-read from the pending list
-(`XAUTOCLAIM`).
+for the claim. `mctl-bridge wait` lists questions in `asked` without a live claim, plus
+feed events after a cursor kept in `orch`; after a reconnect nothing needs re-reading,
+because the queue is the sorted set, not the stream.
 
 ### Slot fencing
 
@@ -325,10 +340,12 @@ for the claim. After a reconnect, unanswered entries are re-read from the pendin
 
 Fixes P1-c.
 
-- On start, the sweeper scans `open`, not the streams or the pending list. A message
-  provably never handed to stdio (`queued`, no intent) is re-queued; `emit_intent`
-  becomes `delivery_unknown`; `asked` without a claim is re-added to the outbox if its
-  stream entry is gone.
+- The sweeper scans `open`, not the streams. A message that may be handed out
+  (`queued`, `reply_committed`) is put back into its slot's queue if missing, an `asked`
+  question back into `asked`, and an id without a record is dropped from `open`.
+  `emit_intent` and `reply_emit_intent` are never put back: an epoch change or a lost
+  heartbeat moves them to `delivery_unknown`. A committed reply keeps its `reply_id`
+  through recovery.
 - `dedup:<key>` lives while its message is in `open`, plus a replay window (7 days)
   after the terminal state, never a fixed TTL from creation.
 - `msg:<id>` lives until its terminal state plus 7 days. Streams are trimmed by MINID
@@ -337,7 +354,10 @@ Fixes P1-c.
 - Durability: Valkey runs with `appendonly yes` and `appendfsync always` for the bridge
   (the recovery test below depends on it). The cluster Valkey's persistence settings
   are checked before slice 5; a weaker policy is acceptable only if this document
-  records the resulting loss window.
+  records the resulting loss window. A SIGKILL test cannot tell `always` from
+  `everysec` (the page cache outlives a killed process), so `mctl-bridge init` reads
+  the live server's settings and reports `durable`, `weak` or `unknown`; a config the
+  client may not read is `unknown`, never `durable`.
 
 ### Permission boundary
 
@@ -382,14 +402,15 @@ is shown to fail with its guarantee reverted.
 
 ### Slice 1: queue and state machine
 
-`plugin/mctl-bridge/` with `package.json`, `.claude-plugin/plugin.json`, `.mcp.json`,
-`bunfig.toml` as in `mctl-events`, and an entry in `.claude-plugin/marketplace.json`.
+`plugin/mctl-bridge/` with `package.json`, `.claude-plugin/plugin.json` and `bunfig.toml`
+as in `mctl-events`. `.mcp.json` and the marketplace entry arrive with the adapter in
+slice 2; until then there is nothing for Claude Code to load.
 
 - `src/valkey.ts` (copy) and a test that it matches `mctl-events`.
-- Lua functions and `src/store.ts`: `send`, `register_slot`, `heartbeat`,
-  `unregister`, `emit_intent`, `mark_emitted`, `ack` (returns admission), `result`,
-  `ask`, `claim`, `renew`, `reply`, `expire`, `mark_unknown`, `resolve`, `record_late`.
-  Each updates `msg`, `open`, `dedup` and `audit` atomically.
+- `src/bridge.lua` and `src/store.ts`: `register`, `heartbeat`, `unregister`,
+  `next` (emit_intent), `emitted`, `ack_task` (returns admission), `ack_reply`,
+  `result`, `ask`, `send`, `claim`, `renew`, `reply`, `resolve`, `expire`,
+  `slot_stale`, `repair`; late evidence is recorded inside `result` and `ask`.
 - `src/cli.ts`: `send | wait | claim | reply | resolve | sessions | tasks | status |
   errors`, JSON output; `errors` lists `delivery_unknown`, `wake_unknown` and late
   evidence with reasons.
@@ -406,6 +427,8 @@ is shown to fail with its guarantee reverted.
 - A durable test profile: the server runs with AOF (`appendfsync always`) on a data
   directory, is killed with SIGKILL between transitions and restarted on the same
   directory; `msg`, `open`, `dedup` and `audit` must agree afterwards.
+- `test/mutate.py` reverts each guarantee in turn and fails if any revert leaves the
+  tests green; CI runs it.
 
 ### Slice 2: slot adapter
 

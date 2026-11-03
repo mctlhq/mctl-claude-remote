@@ -1,0 +1,19 @@
+{
+  "name": "mctl-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Valkey-backed bridge between a ChatGPT-app orchestrator and Claude Code slots. Runs on Bun with no runtime dependencies.",
+  "type": "module",
+  "engines": {
+    "bun": ">=1.3"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "bun test"
+  },
+  "devDependencies": {
+    "@types/bun": "1.3.14",
+    "typescript": "6.0.3"
+  }
+}

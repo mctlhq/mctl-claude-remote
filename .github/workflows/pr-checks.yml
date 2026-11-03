@@ -50,6 +50,25 @@ jobs:
         working-directory: plugin/mctl-events
         run: bun test
 
+      # The orchestrator bridge: its state machine is a server-side function
+      # library, tested against the same real server. The mutation run reverts
+      # each guarantee in turn and fails if any revert leaves the tests green.
+      - name: Bridge plugin dev dependencies
+        working-directory: plugin/mctl-bridge
+        run: bun install --frozen-lockfile
+
+      - name: Bridge typecheck
+        working-directory: plugin/mctl-bridge
+        run: bunx tsc --noEmit
+
+      - name: Bridge tests
+        working-directory: plugin/mctl-bridge
+        run: bun test
+
+      - name: Bridge mutation check
+        working-directory: plugin/mctl-bridge
+        run: python3 test/mutate.py
+
       - name: Docker build
         uses: docker/build-push-action@v6
         with:
