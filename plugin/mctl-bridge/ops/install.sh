@@ -1,0 +1,92 @@
+#!/bin/zsh
+# Install or update mctl-bridge on the Mac mini for the end-to-end run (slice 4).
+#
+#   ops/install.sh <orchestrator thread id>
+#
+# Run from a checkout (or `git archive` copy) of plugin/mctl-bridge. Idempotent: it
+# keeps existing passwords and data, and replaces code, config and launchd jobs.
+#
+# MODE: trusted experiment. Every slot shares one Valkey user (`bridge_slot`), and
+# that user can write any bridge key: Valkey checks ACLs on every command and key a
+# function touches, so per-slot users cannot isolate the current keyspace. Do not
+# attach working slots to this install. Slice 4b replaces this boundary.
+set -euo pipefail
+
+THREAD_ID=${1:?usage: install.sh <orchestrator thread id>}
+SRC=${0:A:h:h}
+H=${MCTL_BRIDGE_HOME:-$HOME/mctl-bridge}
+V=$H/valkey/bin
+PORT=${MCTL_BRIDGE_PORT:-6390}
+BUN=${BUN:-$HOME/.bun/bin/bun}
+LA=$HOME/Library/LaunchAgents
+UID_=$(id -u)
+
+[[ -x $V/valkey-server ]] || { echo "no valkey-server in $V (build it first, see ops/README.md)" >&2; exit 1; }
+[[ -x $BUN ]] || { echo "no bun at $BUN" >&2; exit 1; }
+
+umask 077
+mkdir -p $H/etc $H/valkey/data $H/log $H/slots $H/plugin
+for u in admin orch slot; do
+  [[ -s $H/etc/$u.pw ]] || openssl rand -hex 24 > $H/etc/$u.pw
+done
+hash() { printf %s "$(cat $H/etc/$1.pw)" | shasum -a 256 | cut -d' ' -f1; }
+
+# ACL file: no comment lines (a `#` line aborts startup); `#<sha256>` sets a password.
+# Only bridge_admin may load or delete the library (FUNCTION LOAD/DELETE/FLUSH are not
+# in @dangerous, so @scripting is removed and only FCALL and FUNCTION LIST are added).
+cat > $H/etc/users.acl <<ACL
+user default off resetchannels -@all
+user bridge_admin on #$(hash admin) ~* &* +@all
+user bridge_orch on #$(hash orch) resetchannels ~mctl:bridge:* +@all -@admin -@dangerous -@scripting +fcall +fcall_ro +function|list +config|get
+user bridge_slot on #$(hash slot) resetchannels ~mctl:bridge:* +@all -@admin -@dangerous -@scripting +fcall +fcall_ro +function|list
+ACL
+
+cat > $H/etc/valkey.conf <<CONF
+bind 127.0.0.1
+port $PORT
+protected-mode yes
+dir $H/valkey/data
+aclfile $H/etc/users.acl
+appendonly yes
+appendfsync always
+save ""
+logfile $H/log/valkey.log
+CONF
+
+# Code: only what runs. No runtime dependencies.
+rsync -a --delete --exclude node_modules --exclude test --exclude ops "$SRC/" $H/plugin/
+cp $SRC/ops/mctl-bridge $SRC/ops/slot.sh $H/
+chmod 755 $H/mctl-bridge $H/slot.sh
+mkdir -p $HOME/.local/bin
+ln -sfn $H/mctl-bridge $HOME/.local/bin/mctl-bridge
+
+# The orchestrator thread may run the bridge CLI without a prompt (see the rules file).
+mkdir -p $HOME/.codex/rules
+cp $SRC/ops/codex-mctl-bridge.rules $HOME/.codex/rules/mctl-bridge.rules
+chmod 600 $HOME/.codex/rules/mctl-bridge.rules
+
+render() {
+  sed -e "s|@HOME@|$HOME|g" -e "s|@H@|$H|g" -e "s|@BUN@|$BUN|g" -e "s|@THREAD@|$THREAD_ID|g" -e "s|@PORT@|$PORT|g" "$1"
+}
+for job in valkey waker; do
+  label=com.mctl.bridge-$job
+  render $SRC/ops/$label.plist > $LA/$label.plist
+  chmod 644 $LA/$label.plist
+  launchctl bootout gui/$UID_/$label 2>/dev/null || true
+  # bootout is asynchronous: a bootstrap before it finishes fails with error 5.
+  for i in {1..50}; do launchctl print gui/$UID_/$label >/dev/null 2>&1 || break; sleep 0.2; done
+done
+launchctl bootstrap gui/$UID_ $LA/com.mctl.bridge-valkey.plist
+# RunAtLoad does not fire for a job bootstrapped from an ssh session: start it.
+launchctl kickstart gui/$UID_/com.mctl.bridge-valkey
+for i in {1..50}; do
+  $V/valkey-cli -p $PORT --user bridge_admin --pass "$(cat $H/etc/admin.pw)" --no-auth-warning PING >/dev/null 2>&1 && break
+  sleep 0.2
+done
+
+MCTL_BRIDGE_VALKEY_URL=redis://bridge_admin@127.0.0.1:$PORT/0 MCTL_BRIDGE_VALKEY_PASSWORD_FILE=$H/etc/admin.pw \
+  $BUN run --silent --no-env-file --config=$H/plugin/bunfig.toml $H/plugin/src/cli.ts init
+
+launchctl bootstrap gui/$UID_ $LA/com.mctl.bridge-waker.plist
+launchctl kickstart gui/$UID_/com.mctl.bridge-waker
+echo "installed: valkey :$PORT, waker on thread $THREAD_ID, CLI ~/.local/bin/mctl-bridge"

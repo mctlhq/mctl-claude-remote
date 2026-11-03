@@ -1,0 +1,7 @@
+#!/bin/zsh
+# The orchestrator's CLI on the Mac mini, with the bridge_orch credentials.
+# The password stays in a 0600 file; it is never put in the environment of a session.
+H=${MCTL_BRIDGE_HOME:-$HOME/mctl-bridge}
+export MCTL_BRIDGE_VALKEY_URL=redis://bridge_orch@127.0.0.1:${MCTL_BRIDGE_PORT:-6390}/0
+export MCTL_BRIDGE_VALKEY_PASSWORD_FILE=$H/etc/orch.pw
+exec ${BUN:-$HOME/.bun/bin/bun} run --silent --no-env-file --config=$H/plugin/bunfig.toml $H/plugin/src/cli.ts "$@"

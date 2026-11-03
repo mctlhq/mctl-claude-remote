@@ -1,0 +1,12 @@
+# Installed by ops/install.sh as ~/.codex/rules/mctl-bridge.rules on the Mac mini.
+# Lets the orchestrator thread run the bridge CLI without an approval prompt, so a
+# wake can be answered while every client (laptop, phone) is closed. Only the
+# subcommands an orchestrator needs are allowed. `resolve`, `init` and `sweep` still
+# prompt: those are operator decisions.
+prefix_rule(
+    pattern = ["mctl-bridge", ["sessions", "tasks", "status", "errors", "wakes", "claim", "renew", "reply", "send", "wait"]],
+    decision = "allow",
+    justification = "mctl-bridge orchestrator CLI: local Valkey as bridge_orch, no other access",
+    match = [["mctl-bridge", "status", "q-1"], ["mctl-bridge", "reply", "q-1", "--token", "c-1", "--text", "yes"]],
+    not_match = [["mctl-bridge", "resolve", "t-1", "--as", "failed", "--reason", "x"], ["mctl-bridge", "init"], ["mctl-bridge-x", "status"]],
+)
