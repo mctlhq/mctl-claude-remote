@@ -6,7 +6,7 @@ profile) and runs `bun test`; every mutation must make at least one test fail.
 Run from plugin/mctl-bridge:  python3 test/mutate.py [name ...]
 """
 import subprocess, sys, shutil
-LUA='src/bridge.lua'; SUP='test/support.ts'
+LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'
 M=[
  ("fencing off", LUA, "local function fenced(s, conn, epoch)\n  return", "local function fenced(s, conn, epoch)\n  do return false end\n  return", 1),
  ("busy gate off", LUA, "if s.busy ~= '0' then return no('busy') end", "", 1),
@@ -27,19 +27,32 @@ M=[
  ("dedup retention off", LUA, "      redis.call('PEXPIRE', P .. 'dedup:' .. m.idem, RETAIN_MS)\n", "", 1),
  ("hop limit send off", LUA, "  if hop > MAX_HOP then return no('hop_limit') end\n  local s = hgetall", "  local s = hgetall", 1),
  ("hop limit ask off", LUA, "  if hop > MAX_HOP then return no('hop_limit') end\n  if redis.call('EXISTS'", "  if redis.call('EXISTS'", 1),
- ("stale sweep off", LUA, "      transition(id, m, 'delivery_unknown', 'sweeper', 'heartbeat_lost', now)\n", "", 1),
+ ("stale sweep off", LUA, "  abandon(slot, 'sweeper', 'heartbeat_lost', now)\n", "", 1),
  ("resolve reason optional", LUA, "not valid_id(id) or reason == '' or author == ''", "not valid_id(id) or author == ''", 1),
  ("audit off", LUA, "  audit(id, m.state, to, actor, reason, now)\n", "", 1),
  ("role key check off", LUA, "  if not valid_slot(slot) or keys[1] ~= skey(slot) then return no('bad_request') end\n  local s = hgetall(skey(slot))\n  if fenced(s, conn, epoch) then return no('fenced') end\n  redis.call('HSET', skey(slot), 'heartbeat'", "  if not valid_slot(slot) then return no('bad_request') end\n  local s = hgetall(skey(slot))\n  if fenced(s, conn, epoch) then return no('fenced') end\n  redis.call('HSET', skey(slot), 'heartbeat'", 1),
  ("task end keeps question open", LUA, "  close_question(m, 'slot:' .. slot, 'task_finished', now)\n", "", 1),
  ("resolve keeps question open", LUA, "    close_question(m, actor, 'task_resolved', now)\n", "", 1),
- ("stale keeps questions", LUA, "      transition(id, m, 'delivery_unknown', 'sweeper', 'asker_heartbeat_lost', now)\n", "", 1),
+ ("abandon keeps questions", LUA, "      transition(id, m, 'delivery_unknown', actor, 'asker_' .. why, now)\n", "", 1),
  ("expired question silent", LUA, "  if m.kind == 'question' and m.state == 'asked' then\n    transition(id, m, 'reply_committed'", "  if false then\n    transition(id, m, 'reply_committed'", 1),
  ("requeue ignores late evidence", LUA, "if tonumber(m.late_count or '0') > 0 and not force then", "if false then", 1),
  ("late trail never expires", LUA, "    redis.call('PEXPIRE', P .. 'late:' .. id, RETAIN_MS)\n", "", 1),
  ("audit trail never expires", LUA, "    redis.call('PEXPIRE', P .. 'audit:' .. id, RETAIN_MS)\n", "", 1),
  ("ask ttl guard off", LUA, "      or ttl == nil or ttl < 0 then", "      then", 1),
  ("close while waiting", LUA, "      if s.inflight == m.task_id and s.inflight_attempt == m.attempt_id then\n        return no('task_waiting'", "      if false then\n        return no('task_waiting'", 1),
+ ("unregister fencing off", LUA, "  -- Fencing first: an old adapter must never touch a newer registration.\n  if fenced(s, conn, epoch) then return no('fenced') end\n", "", 1),
+ ("unregister keeps emits", LUA, "  abandon(slot, 'slot:' .. slot, 'unregistered', now)\n", "  redis.call('HSET', skey(slot), 'conn_id', '')\n", 1),
+ ("register stale_ms guard off", LUA, "      or stale_ms == nil or stale_ms <= 0 then", "      then", 1),
+ ("adapter emit hold off", CH, "if (this.emittedAt > 0 && reportedMs <= this.emittedAt && now - this.emittedAt < this.cfg.emitHoldMs) return true;", "", 1),
+ ("adapter ignores /clear", CH, "if (this.conn === null || this.conn.uuid !== sessionId) await this.register(sessionId);", "if (this.conn === null) await this.register(sessionId);", 1),
+ ("adapter no unregister", CH, "        await this.bridge.unregister(this.conn);\n", "", 1),
+ ("adapter no ack instruction", CH, "        `First call ack_task with task_id=\"${m.id}\" and attempt_id=\"${m.attempt_id}\". Do no work on this task before it succeeds.`,\n", "", 1),
+ ("adapter resets on transport error", CH, "        log(\"tick failed\", { error: err instanceof Error ? err.message : String(err) });\n", "        log(\"tick failed\", { error: err instanceof Error ? err.message : String(err) });\n        this.conn = null;\n", 1),
+ ("adapter stop does not wait", CH, "    await this.current?.catch(() => undefined);\n", "", 1),
+ ("adapter ignores a lost next", CH, "      // would hold inflight for good. Settle it before anything else is emitted.\n      this.emitUnsettled = true;\n", "      // would hold inflight for good. Settle it before anything else is emitted.\n", 1),
+ ("adapter ignores a failed notify", CH, "      // may ack it from emit_intent, so it must not be settled.\n      this.emitUnsettled = true;\n", "      // may ack it from emit_intent, so it must not be settled.\n", 1),
+ ("emit_lost keeps inflight", LUA, "      if m.kind == 'task' then clear_inflight(slot, id) end\n", "", 1),
+ ("emit_lost not fenced", LUA, "  if fenced(s, conn, epoch) then return no('fenced') end\n  local now = now_ms()\n  local settled = 0\n", "  local now = now_ms()\n  local settled = 0\n", 1),
  ("no fsync", SUP, '"--appendfsync", "always"', '"--appendfsync", "no"', 1),
  ("no aof", SUP, '["--save", "", "--appendonly", "yes", "--appendfsync", "always"]', '["--save", "", "--appendonly", "no"]', 1),
 ]

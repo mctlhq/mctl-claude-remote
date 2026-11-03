@@ -433,6 +433,40 @@ describe.skipIf(requiresValkey)("bridge state machine", () => {
     expect(r).toMatchObject({ ok: false, code: "bad_request" });
   });
 
+  test("unregister fences first: an old adapter cannot touch the new registration", async () => {
+    const a1 = await register("a");
+    const a2 = await register("a");
+    const sent = must(await b.send({ slot: "a", payload: "for the new context" }));
+    must(await b.next(a2));
+    const before = await b.slotInfo("a");
+    expect(await b.unregister(a1)).toMatchObject({ ok: false, code: "fenced" });
+    expect(await b.slotInfo("a")).toEqual(before);
+    expect(await state(sent.id)).toBe("emit_intent");
+  });
+
+  test("unregister moves what the adapter held to delivery_unknown and frees inflight", async () => {
+    const a = await register("a");
+    const { admission } = await admitted(a);
+    const q = must(await b.ask("a", admission, "?"));
+    must(await b.claim(q.question_id));
+    const queued = must(await b.send({ slot: "a", payload: "later" }));
+    must(await b.unregister(a));
+    expect(await b.message(admission.task_id)).toMatchObject({ state: "delivery_unknown", reason: "unregistered" });
+    expect(await b.message(q.question_id)).toMatchObject({ state: "delivery_unknown", reason: "asker_unregistered" });
+    expect(await b.exec.execute(["EXISTS", key.claim(q.question_id)])).toBe(0);
+    expect(await state(queued.id)).toBe("queued");
+    expect(await b.slotInfo("a")).toMatchObject({ conn_id: "", inflight: "", inflight_attempt: "" });
+  });
+
+  test("register with a malformed stale_ms is a bad request and changes nothing", async () => {
+    const a = await register("a");
+    const before = await b.slotInfo("a");
+    const r = JSON.parse(text(await b.exec.execute(["FCALL", "bridge_register", 1, key.slot("a"), "a", "u9", "k9", "100", "s1", "/w", "soon"])));
+    expect(r).toMatchObject({ ok: false, code: "bad_request" });
+    expect(await b.slotInfo("a")).toEqual(before);
+    expect(a.epoch).toBe(before.epoch);
+  });
+
   test("functions reject a first key that is not the caller's role key", async () => {
     const a = await register("a");
     const r = JSON.parse(text(await b.exec.execute(["FCALL", "bridge_heartbeat", 1, key.slot("b"), "a", a.conn_id, a.epoch, "0"])));

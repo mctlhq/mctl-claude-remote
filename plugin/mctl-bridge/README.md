@@ -3,9 +3,8 @@
 The queue and state machine between a ChatGPT-app orchestrator on the Mac mini and
 Claude Code slots. Design: [`docs/chatgpt-orchestrator-bridge.md`](../../docs/chatgpt-orchestrator-bridge.md).
 
-This release is **slice 1**: the server-side function library and the orchestrator's
-CLI. The slot adapter (the Channels MCP server) arrives in slice 2, so the plugin has
-nothing for Claude Code to load yet and is not in the marketplace.
+Slices 1 and 2: the server-side function library, the orchestrator's CLI, and the slot
+adapter. The waker (slice 3) and the Mac mini launcher (slice 4) are not here yet.
 
 ## Layout
 
@@ -14,7 +13,41 @@ nothing for Claude Code to load yet and is not in the marketplace.
   together. Needs a standalone Valkey (or Redis 7+).
 - `src/store.ts`: typed wrappers; rejections come back as `{ ok: false, code }`.
 - `src/cli.ts`: `mctl-bridge`, the orchestrator's command line (JSON output).
+- `src/channel.ts`: the slot adapter, a Claude Code Channels MCP server over stdio.
+  Tools: `ack_task`, `ack_reply`, `ask_orchestrator`, `report_result`, `bridge_status`.
+- `hooks/state.py`: SessionStart / UserPromptSubmit / Stop hook writing the session's
+  busy/idle state to `~/.mctl-bridge/state/<claude pid>.json`. Holds no credentials.
 - `src/valkey.ts`: a byte-identical copy of the `mctl-events` client (a test enforces it).
+
+## Running a slot
+
+The adapter takes its configuration from its own environment, set in the slot's
+`--mcp-config` so the credentials never enter the session's environment. There is
+deliberately no plugin `.mcp.json`.
+
+```json
+{
+  "mcpServers": {
+    "mctl-bridge": {
+      "command": "bun",
+      "args": ["run", "--silent", "--no-env-file", "--config=<plugin>/bunfig.toml", "<plugin>/src/channel.ts"],
+      "env": {
+        "MCTL_BRIDGE_SLOT": "a",
+        "MCTL_BRIDGE_VALKEY_URL": "redis://bridge_slot_a@127.0.0.1:6390/0",
+        "MCTL_BRIDGE_VALKEY_PASSWORD_FILE": "/path/to/password"
+      }
+    }
+  }
+}
+```
+
+```sh
+claude --mcp-config slot-a.json --strict-mcp-config --settings hooks.json \
+  --dangerously-load-development-channels server:mctl-bridge
+```
+
+where `hooks.json` wires `hooks/state.py` to `SessionStart`, `UserPromptSubmit` and
+`Stop`.
 
 ## CLI
 
