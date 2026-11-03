@@ -47,6 +47,8 @@ M=[
  ("adapter ignores /clear", CH, "if (this.conn === null || this.conn.uuid !== sessionId) await this.register(sessionId);", "if (this.conn === null) await this.register(sessionId);", 1),
  ("adapter no unregister", CH, "        await this.bridge.unregister(this.conn);\n", "", 1),
  ("adapter no ack instruction", CH, "        `First call ack_task with task_id=\"${m.id}\" and attempt_id=\"${m.attempt_id}\". Do no work on this task before it succeeds.`,\n", "", 1),
+ ("adapter resets on transport error", CH, "        log(\"tick failed\", { error: err instanceof Error ? err.message : String(err) });\n", "        log(\"tick failed\", { error: err instanceof Error ? err.message : String(err) });\n        this.conn = null;\n", 1),
+ ("adapter stop does not wait", CH, "    await this.current?.catch(() => undefined);\n", "", 1),
  ("no fsync", SUP, '"--appendfsync", "always"', '"--appendfsync", "no"', 1),
  ("no aof", SUP, '["--save", "", "--appendonly", "yes", "--appendfsync", "always"]', '["--save", "", "--appendonly", "no"]', 1),
 ]

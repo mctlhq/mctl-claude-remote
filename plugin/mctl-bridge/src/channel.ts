@@ -161,6 +161,7 @@ export class Adapter {
   private lastBusy: boolean | null = null;
   private emittedAt = 0;
   private stopped = false;
+  private current: Promise<void> | null = null;
   private readonly pidStart: string;
 
   constructor(bridge: Bridge, cfg: Config, notify: (msg: Message) => Promise<void>) {
@@ -312,21 +313,34 @@ export class Adapter {
 
   async run(): Promise<void> {
     let backoff = this.cfg.pollMs;
+    // A retry must come well before the sweeper calls the slot stale
+    // (stale_ms = 3 heartbeats), or the backoff itself would fence the slot.
+    const maxBackoff = Math.max(this.cfg.pollMs, this.cfg.heartbeatMs);
     while (!this.stopped) {
       try {
-        await this.tick();
+        this.current = this.tick();
+        await this.current;
         backoff = this.cfg.pollMs;
       } catch (err) {
+        // The registration stays: a transport error says nothing about the
+        // session, and registering again would reset it (cancel the queue,
+        // turn the task in flight into delivery_unknown). The connection
+        // reconnects by itself; only a `fenced` reply drops the registration.
         log("tick failed", { error: err instanceof Error ? err.message : String(err) });
-        this.conn = null; // re-register after a transport failure
-        backoff = Math.min(backoff * 2, 30_000);
+        backoff = Math.min(backoff * 2, maxBackoff);
+      } finally {
+        this.current = null;
       }
+      if (this.stopped) break;
       await new Promise((r) => setTimeout(r, backoff));
     }
   }
 
   async stop(): Promise<void> {
     this.stopped = true;
+    // A tick in flight may be registering or emitting; let it finish so the
+    // unregister below sees the registration it made and nothing runs after it.
+    await this.current?.catch(() => undefined);
     if (this.conn !== null) {
       try {
         await this.bridge.unregister(this.conn);

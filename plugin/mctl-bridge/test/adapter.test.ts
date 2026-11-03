@@ -184,6 +184,47 @@ describe.skipIf(requiresValkey)("slot adapter over MCP", () => {
     expect(await b.message(t.id)).toMatchObject({ state: "delivery_unknown", reason: "unregistered" });
   });
 
+  test("a dropped Valkey connection keeps the registration, the task in flight and the queue", async () => {
+    const c = await start();
+    const epoch = (await b.slotInfo("a")).epoch;
+    const t1 = must(await b.send({ slot: "a", payload: "long task" }));
+    const ev = await c.notification();
+    c.hook("busy", "s-1");
+    expect((await c.call("ack_task", { task_id: t1.id, attempt_id: ev.params.meta.attempt_id })).isError).toBe(false);
+    const t2 = must(await b.send({ slot: "a", payload: "queued behind it" }));
+    const killer = server.client();
+    for (let i = 0; i < 3; i++) {
+      await killer.execute(["CLIENT", "KILL", "TYPE", "normal", "SKIPME", "yes"]);
+      await sleep(60);
+    }
+    b = new Bridge(server.client()); // the test's own connection was killed too
+    const killedAt = Date.now();
+    await until(async () => c.stderr.join("").includes("tick failed"));
+    // the adapter recovers on its own, on the same registration
+    await until(async () => Number((await b.slotInfo("a")).heartbeat) > killedAt);
+    expect((await b.slotInfo("a")).epoch).toBe(epoch);
+    expect((await b.message(t1.id)).state).toBe("acked");
+    expect((await b.message(t2.id)).state).toBe("queued");
+    const res = await c.call("report_result", { task_id: t1.id, status: "completed", summary: "done across the blip" });
+    expect(res.isError).toBe(false);
+    expect(await b.message(t1.id)).toMatchObject({ state: "completed", attempt_id: ev.params.meta.attempt_id });
+  });
+
+  test("stopping while register is in flight still unregisters", async () => {
+    const c = new FakeClaude(server.url, "a", { stateDir });
+    clients.push(c);
+    await c.handshake(); // no state file yet: nothing to register as
+    await sleep(150);
+    const admin = server.client();
+    await admin.execute(["CLIENT", "PAUSE", 800, "WRITE"]); // register (a write function) now blocks
+    c.hook("idle", "s-1");
+    await sleep(150); // the tick is inside register()
+    await c.close(); // stdin closes while register is still pending
+    expect(await c.exited).toBe(0);
+    expect(c.stderr.join("")).toContain("registered");
+    expect((await b.slotInfo("a")).conn_id).toBe("");
+  });
+
   test("two slots never see each other's tasks", async () => {
     const ca = await start("a", "sa");
     const cb = await start("b", "sb", { pid: process.pid + 100000 });
