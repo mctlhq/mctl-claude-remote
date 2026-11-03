@@ -261,6 +261,7 @@ describe.skipIf(requiresValkey)("slot adapter, lost replies", () => {
   let lossy: LoseOneReply;
   let adapter: Adapter;
   let notes: Record<string, any>[];
+  let failNotify: boolean;
   let dir: string;
 
   function idle(session = "s-1"): void {
@@ -281,11 +282,18 @@ describe.skipIf(requiresValkey)("slot adapter, lost replies", () => {
     lossy = new LoseOneReply(server.client());
     dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-state-"));
     notes = [];
+    failNotify = false;
     const cfg: Config = {
       slot: "a", stateDir: dir, claudePid: process.pid, pollMs: 20, heartbeatMs: 1000, graceMs: 0,
       emitHoldMs: 60_000, initialSessionId: "", cwd: dir,
     };
-    adapter = new Adapter(new Bridge(lossy), cfg, async (m) => { notes.push(m); });
+    adapter = new Adapter(new Bridge(lossy), cfg, async (m) => {
+      if (failNotify) {
+        failNotify = false;
+        throw new Error("stdout write failed");
+      }
+      notes.push(m);
+    });
     idle();
     await adapter.tick(); // registers; nothing to emit yet
   });
@@ -338,6 +346,32 @@ describe.skipIf(requiresValkey)("slot adapter, lost replies", () => {
     expect(notes).toHaveLength(1);
     expect((await b.message(t1.id)).state).toBe("acked");
     expect((await b.slotInfo("a")).inflight).toBe(t1.id);
+  });
+
+  test("a failed stdio write settles the task like a lost `next`", async () => {
+    const t1 = must(await b.send({ slot: "a", payload: "first" }));
+    const t2 = must(await b.send({ slot: "a", payload: "second" }));
+    failNotify = true;
+    await expect(adapter.tick()).rejects.toThrow("stdout write failed");
+    expect((await b.message(t1.id)).state).toBe("emit_intent");
+    await sleep(5);
+    idle(); // past the emit hold, as when the hooks report again
+
+    await adapter.tick();
+    expect((await b.message(t1.id))).toMatchObject({ state: "delivery_unknown", reason: "emit_reply_lost" });
+    expect(notes).toHaveLength(1);
+    expect(notes[0]!.params.meta).toMatchObject({ kind: "task", task_id: t2.id });
+  });
+
+  test("a lost `emitted` reply leaves the delivered task alone", async () => {
+    const t1 = must(await b.send({ slot: "a", payload: "first" }));
+    lossy.armed = "bridge_emitted";
+    await expect(adapter.tick()).rejects.toThrow("reply lost");
+    expect(notes).toHaveLength(1); // the model has it
+    await adapter.tick();
+    expect((await b.message(t1.id)).state).toBe("emitted");
+    const ack = (await adapter.call("ack_task", { task_id: t1.id, attempt_id: notes[0]!.params.meta.attempt_id })) as Result;
+    expect(ack.ok).toBe(true);
   });
 
   test("settling a lost emit is fenced to the connection that lost it", async () => {

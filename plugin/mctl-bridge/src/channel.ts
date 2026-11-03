@@ -257,7 +257,15 @@ export class Adapter {
     }
     // emit_intent is recorded; from here a crash leaves delivery_unknown.
     this.emittedAt = Date.now();
-    await this.notify(this.notificationFor(next as Message));
+    try {
+      await this.notify(this.notificationFor(next as Message));
+    } catch (err) {
+      // Not written, or written in part: the same ambiguity as a lost `next`.
+      // A failed `emitted` below is different: the model has the message and
+      // may ack it from emit_intent, so it must not be settled.
+      this.emitUnsettled = true;
+      throw err;
+    }
     const marked = await this.bridge.emitted(conn, String(next.id));
     if (!marked.ok && marked.code !== "wrong_state") log("could not mark emitted", { id: next.id, code: marked.code });
   }
