@@ -3,10 +3,19 @@
 // answers a question; the turn it starts has to claim and reply like anyone else.
 //
 // Every wake is recorded before any RPC (`wake_begin`: wakelock NX + wake intent in
-// one call). The turn text carries `[wake:<wake_id>]`, so a lost `turn/start` reply
-// is settled from the thread history: exactly one turn with the marker means it
-// started, anything else is `wake_unknown`, and nothing is restarted automatically.
+// one call). `turn/start` carries the wake id as `clientUserMessageId`, which the
+// server keeps on the user message (`clientId`), so a lost reply is settled from the
+// thread history: exactly one turn holding that client id means it started, anything
+// else is `wake_unknown`, and nothing is restarted automatically. The `[wake:<id>]`
+// marker in the text is for people reading the thread; it is not what is matched, so
+// a marker pasted into a manual turn proves nothing.
 // Turn notifications are matched on threadId and turn id, never on arrival order.
+//
+// Live protocol (Codex 0.163, checked 2026-11-03): `turn/start` on a busy thread does
+// not refuse, it adds the input to the running turn and returns that turn. So the
+// waker only wakes an idle thread; a start that races a manual turn joins it, and the
+// wake then follows that turn. `clientUserMessageId` is not deduplicated: a repeated
+// id starts a new turn, which is why a lost start is never retried.
 
 import os from "node:os";
 import path from "node:path";
@@ -17,7 +26,7 @@ import type { Note } from "./appserver.ts";
 import { Bridge, newId } from "./store.ts";
 import { Connection, endpointFromUrl } from "./valkey.ts";
 
-export const WAKER_VERSION = "0.3.0";
+export const WAKER_VERSION = "0.3.1";
 
 export interface WakerConfig {
   threadId: string;
@@ -53,14 +62,17 @@ export function turnText(wakeId: string, q: Record<string, string>): string {
   ].join("\n");
 }
 
-/** Turns whose user input carries the marker. */
-export function turnsWithMarker(thread: any, wakeId: string): any[] {
-  const turns: any[] = Array.isArray(thread?.turns) ? thread.turns : [];
-  const m = marker(wakeId);
+/** Turns holding a user message this wake sent: its client id is the wake id. */
+export function turnsForWake(turns: readonly any[], wakeId: string): any[] {
   return turns.filter((t) =>
-    (Array.isArray(t?.items) ? t.items : []).some((it: any) => it?.type === "userMessage" && JSON.stringify(it).includes(m)),
+    (Array.isArray(t?.items) ? t.items : []).some((it: any) => it?.type === "userMessage" && it?.clientId === wakeId),
   );
 }
+
+/** Page size for thread/turns/list, and how far back before a wake its turn may start. */
+const TURN_PAGE = 20;
+const START_SLACK_S = 300;
+const MAX_PAGES = 50;
 
 /** Only a status the server actually reports, other than inProgress, ends a turn. */
 export function turnEnded(turn: any): boolean {
@@ -99,16 +111,56 @@ export class Waker {
     }
   }
 
-  private async readThread(): Promise<any> {
+  /**
+   * The thread's turns that started since `sinceMs` (with some slack), newest first,
+   * with their items. Reads pages of thread/turns/list until a page reaches back past
+   * that point. Any failed or malformed page, or a window too long to page through,
+   * is an unreadable history, never a shorter one.
+   */
+  private async readTurns(sinceMs: number): Promise<any[]> {
     const c = await this.session();
     try {
-      const r = await c.request("thread/read", { threadId: this.cfg.threadId, includeTurns: true }, this.cfg.rpcTimeoutMs);
-      if (!r || typeof r !== "object" || !r.thread || !Array.isArray(r.thread.turns)) {
-        throw new ConnectionLost("thread/read returned no turns"); // unreadable, not empty
+      const sinceS = Math.floor(sinceMs / 1000) - START_SLACK_S;
+      const out: any[] = [];
+      let cursor: string | null = null;
+      for (let page = 0; page < MAX_PAGES; page++) {
+        const r = await c.request("thread/turns/list", {
+          threadId: this.cfg.threadId, itemsView: "full", sortDirection: "desc", limit: TURN_PAGE, cursor,
+        }, this.cfg.rpcTimeoutMs);
+        if (!r || typeof r !== "object" || !Array.isArray(r.data)) {
+          throw new ConnectionLost(`thread/turns/list page ${page} returned no data`);
+        }
+        let older = false;
+        for (const t of r.data) {
+          // `summary` would drop a second user message of a turn; insist on full items.
+          if (t?.itemsView !== undefined && t.itemsView !== "full") throw new ConnectionLost(`turn ${t?.id} items ${t.itemsView}`);
+          out.push(t);
+          if (typeof t?.startedAt === "number" && t.startedAt < sinceS) older = true;
+        }
+        if (older || r.nextCursor === null || r.nextCursor === undefined) return out;
+        if (typeof r.nextCursor !== "string") throw new ConnectionLost("thread/turns/list: bad cursor");
+        cursor = r.nextCursor;
       }
-      return r.thread;
+      throw new ConnectionLost(`more than ${MAX_PAGES} pages of turns since the wake`);
     } finally {
       c.close();
+    }
+  }
+
+  /** Whether the thread is idle. Anything else, including a status we cannot read, is "no". */
+  private async threadIdle(): Promise<boolean> {
+    let c: AppClient | null = null;
+    try {
+      c = await this.session();
+      const r = await c.request("thread/read", { threadId: this.cfg.threadId }, this.cfg.rpcTimeoutMs);
+      const type = r?.thread?.status?.type;
+      if (type !== "idle") log("thread not idle, no wake this pass", { status: type ?? "unreadable" });
+      return type === "idle";
+    } catch (err) {
+      log("thread status unreadable, no wake this pass", { error: String(err) });
+      return false;
+    } finally {
+      c?.close();
     }
   }
 
@@ -119,8 +171,11 @@ export class Waker {
 
   /** One pass: wake for the oldest question that waits unclaimed, if any may be woken. */
   async tick(): Promise<string | null> {
-    for (const q of await this.bridge.askedQuestions()) {
-      if (q.claimed === "1" || q.state !== "asked") continue;
+    const waiting = (await this.bridge.askedQuestions()).filter((q) => q.claimed !== "1" && q.state === "asked");
+    if (waiting.length === 0) return null;
+    // A start on a busy thread would join the operator's turn: wait until it is idle.
+    if (!(await this.threadIdle())) return null;
+    for (const q of waiting) {
       const wakeId = newId("w");
       const r = await this.bridge.wakeBegin({
         question_id: q.id!,
@@ -137,14 +192,14 @@ export class Waker {
         continue;
       }
       log("wake intent", { wake_id: wakeId, question_id: q.id });
-      await this.run(wakeId, q as Record<string, string>);
+      await this.run(wakeId, q as Record<string, string>, Date.now());
       return wakeId;
     }
     return null;
   }
 
   /** Start the turn for a recorded intent and follow it to its end. */
-  async run(wakeId: string, q: Record<string, string>): Promise<void> {
+  async run(wakeId: string, q: Record<string, string>, sinceMs = Date.now()): Promise<void> {
     let c: AppClient;
     try {
       c = await this.session();
@@ -167,6 +222,7 @@ export class Waker {
       try {
         started = await c.request("turn/start", {
           threadId: this.cfg.threadId,
+          clientUserMessageId: wakeId,
           input: [{ type: "text", text: turnText(wakeId, q) }],
         }, this.cfg.rpcTimeoutMs);
       } catch (err) {
@@ -175,12 +231,12 @@ export class Waker {
           return;
         }
         log("turn/start reply lost, reading the thread", { wake_id: wakeId, error: String(err) });
-        await this.settleFromHistory(wakeId, deadline);
+        await this.settleFromHistory(wakeId, deadline, sinceMs);
         return;
       }
       turnId = typeof started?.turn?.id === "string" ? started.turn.id : null;
       if (turnId === null) {
-        await this.settleFromHistory(wakeId, deadline);
+        await this.settleFromHistory(wakeId, deadline, sinceMs);
         return;
       }
       const st = await this.bridge.wakeStarted(wakeId, turnId);
@@ -196,7 +252,7 @@ export class Waker {
           return;
         }
         if (c.isClosed) {
-          await this.follow(wakeId, turnId, deadline);
+          await this.follow(wakeId, turnId, deadline, sinceMs);
           return;
         }
         await sleep(this.cfg.pollMs);
@@ -208,16 +264,16 @@ export class Waker {
     }
   }
 
-  /** The turn/start reply was lost: exactly one turn carrying the marker means it started. */
-  async settleFromHistory(wakeId: string, deadline: number): Promise<void> {
-    let thread: any;
+  /** The turn/start reply was lost: exactly one turn holding the wake's client id means it started. */
+  async settleFromHistory(wakeId: string, deadline: number, sinceMs: number): Promise<void> {
+    let turns: any[];
     try {
-      thread = await this.readThread();
+      turns = await this.readTurns(sinceMs);
     } catch (err) {
       await this.finish(wakeId, "wake_unknown", `history_unreadable: ${err instanceof Error ? err.message : String(err)}`);
       return;
     }
-    const found = turnsWithMarker(thread, wakeId);
+    const found = turnsForWake(turns, wakeId);
     if (found.length !== 1) {
       await this.finish(wakeId, "wake_unknown", `history_matches_${found.length}`);
       return;
@@ -229,17 +285,16 @@ export class Waker {
       return;
     }
     if (turnEnded(turn)) await this.finish(wakeId, "completed", String(turn.status));
-    else await this.follow(wakeId, String(turn.id), deadline);
+    else await this.follow(wakeId, String(turn.id), deadline, sinceMs);
   }
 
   /** Follow a started turn through the history when its notifications are out of reach. */
-  async follow(wakeId: string, turnId: string, deadline: number): Promise<void> {
+  async follow(wakeId: string, turnId: string, deadline: number, sinceMs: number): Promise<void> {
     // Always look at least once: a waker restarted after the deadline must still
     // see a turn that finished meanwhile, not call it unknown unread.
     for (;;) {
       try {
-        const thread = await this.readThread();
-        const turn = (thread.turns as any[]).find((t) => t?.id === turnId);
+        const turn = (await this.readTurns(sinceMs)).find((t) => t?.id === turnId);
         if (!turn) {
           await this.finish(wakeId, "wake_unknown", "turn_missing");
           return;
@@ -249,7 +304,7 @@ export class Waker {
           return;
         }
       } catch (err) {
-        log("thread/read failed while following a turn", { wake_id: wakeId, error: String(err) });
+        log("thread/turns/list failed while following a turn", { wake_id: wakeId, error: String(err) });
       }
       if (this.stopped) return;
       if (Date.now() >= deadline) break;
@@ -262,9 +317,10 @@ export class Waker {
   async recover(): Promise<void> {
     for (const w of await this.bridge.openWakes()) {
       if (w.thread_id !== this.cfg.threadId) continue;
-      const deadline = Number(w.created_ms ?? 0) + this.cfg.turnTimeoutMs;
-      if (w.state === "intent") await this.settleFromHistory(w.id!, deadline);
-      else if (w.state === "started") await this.follow(w.id!, w.turn_id!, deadline);
+      const since = Number(w.created_ms ?? 0);
+      const deadline = since + this.cfg.turnTimeoutMs;
+      if (w.state === "intent") await this.settleFromHistory(w.id!, deadline, since);
+      else if (w.state === "started") await this.follow(w.id!, w.turn_id!, deadline, since);
     }
   }
 

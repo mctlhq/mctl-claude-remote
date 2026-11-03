@@ -25,8 +25,20 @@ export class FakeApp {
   completeAfterMs: number | null = 30;
   /** Send a turn/completed for another thread and another turn first. */
   foreignFirst = true;
-  /** thread/read answers without turns: an unreadable history. */
+  /** thread/turns/list answers without `data`: an unreadable history. */
   brokenRead = false;
+  /** thread/turns/list fails from this page on (0-based); null never. */
+  brokenPage: number | null = null;
+  /** thread/read answers without a status: the thread's state cannot be observed. */
+  brokenStatus = false;
+  /** thread/read answers with a JSON-RPC error. */
+  failStatus = false;
+  /** Page size of thread/turns/list when the caller asks for more. */
+  pageLimit = 20;
+  /** The cursor of every thread/turns/list call, null for a first page. */
+  cursors: Array<string | null> = [];
+  /** thread/read calls without turns (status checks). */
+  statusReads = 0;
   private server: Server<unknown> | null = null;
   private readonly sockets = new Set<ServerWebSocket<unknown>>();
 
@@ -61,9 +73,29 @@ export class FakeApp {
     for (const ws of this.sockets) ws.close();
   }
 
-  /** A turn the operator started by hand from the ChatGPT app. */
+  /** A turn the operator started by hand from the ChatGPT app: the app's own client id. */
   manualTurn(text: string, status: string | null = "completed"): void {
-    this.turns.push({ id: `turn-manual-${this.turns.length}`, status, items: [{ type: "userMessage", id: "u", content: [{ type: "text", text }] }] });
+    const n = this.turns.length;
+    this.turns.push(this.turn(`turn-manual-${n}`, status, [this.userMessage(text, `app-${n}`)]));
+  }
+
+  /** A turn a waker started (before a crash, say): its client id is the wake id. */
+  wakeTurn(wakeId: string, status: string | null = "completed"): string {
+    const id = `turn-wake-${this.turns.length}`;
+    this.turns.push(this.turn(id, status, [this.userMessage(`[wake:${wakeId}] ...`, wakeId)]));
+    return id;
+  }
+
+  private turn(id: string, status: string | null, items: any[]): any {
+    return { id, status, items, itemsView: "full", startedAt: Math.floor(Date.now() / 1000) };
+  }
+
+  private userMessage(text: string, clientId: string | null): any {
+    return { type: "userMessage", id: `u-${Math.random()}`, clientId, content: [{ type: "text", text }] };
+  }
+
+  get active(): any | undefined {
+    return this.turns.find((t) => t.status === "inProgress");
   }
 
   complete(turnId: string, status = "completed", broadcast = true): void {
@@ -87,8 +119,24 @@ export class FakeApp {
       case "thread/resume":
         return reply({ thread: { id: this.threadId, turns: [] } });
       case "thread/read":
-        this.reads++;
-        return reply(this.brokenRead ? { thread: { id: this.threadId } } : { thread: { id: this.threadId, turns: this.turns } });
+        // Metadata only: the waker reads turns through thread/turns/list.
+        this.statusReads++;
+        if (this.failStatus) {
+          ws.send(JSON.stringify({ id: m.id, error: { code: -32603, message: "thread not loaded" } }));
+          return;
+        }
+        if (this.brokenStatus) return reply({ thread: { id: this.threadId } });
+        return reply({ thread: { id: this.threadId, status: this.active ? { type: "active", activeFlags: [] } : { type: "idle" }, turns: [] } });
+      case "thread/turns/list": {
+        const page = this.reads++;
+        this.cursors.push(m.params.cursor ?? null);
+        if (this.brokenRead || (this.brokenPage !== null && page >= this.brokenPage)) return reply({ nextCursor: null });
+        const desc = [...this.turns].reverse();
+        const from = m.params.cursor ? Number(m.params.cursor) : 0;
+        const n = Math.min(m.params.limit ?? this.pageLimit, this.pageLimit);
+        const data = desc.slice(from, from + n);
+        return reply({ data, nextCursor: from + n < desc.length ? String(from + n) : null, backwardsCursor: null });
+      }
       case "turn/start": {
         this.starts.push(m.params);
         if (this.mode === "error") {
@@ -99,7 +147,14 @@ export class FakeApp {
           ws.close();
           return;
         }
-        const turn = { id: `turn-${this.turns.length}`, status: "inProgress", items: [{ type: "userMessage", id: "u", content: m.params.input }] };
+        const msg = this.userMessage(m.params.input?.[0]?.text ?? "", m.params.clientUserMessageId ?? null);
+        // A busy thread does not refuse: the input joins the running turn (seen live, Codex 0.163).
+        const running = this.active;
+        if (running) {
+          running.items.push(msg);
+          return reply({ turn: { id: running.id, status: "inProgress", items: [], itemsView: "notLoaded" } });
+        }
+        const turn = this.turn(`turn-${this.turns.length}`, "inProgress", [msg]);
         this.turns.push(turn);
         if (this.completeAfterMs !== null) {
           const delay = this.completeAfterMs;
@@ -114,7 +169,7 @@ export class FakeApp {
           ws.send(JSON.stringify({ method: "turn/completed", params: { threadId: "thread-other", turn: { id: turn.id, status: "completed" } } }));
           ws.send(JSON.stringify({ method: "turn/completed", params: { threadId: this.threadId, turn: { id: "turn-foreign", status: "completed" } } }));
         }
-        return reply({ turn: { id: turn.id, status: "inProgress", items: [] } });
+        return reply({ turn: { id: turn.id, status: "inProgress", items: [], itemsView: "notLoaded" } });
       }
       default:
         ws.send(JSON.stringify({ id: m.id, error: { code: -32601, message: `unknown method ${m.method}` } }));

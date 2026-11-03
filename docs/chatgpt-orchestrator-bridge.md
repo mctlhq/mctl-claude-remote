@@ -509,9 +509,9 @@ Fixes P1-a.
   `claim` and `reply` question `<question_id>`. The waker never answers.
 - Notifications are matched on `threadId` and `turnId`, never on the first
   `turn/completed` that arrives.
-- If the `turn/start` reply is lost, the waker searches the thread history
-  (`thread/read`) for the marker. Exactly one match → `started`; none or several →
-  `wake_unknown`, no automatic restart.
+- If the `turn/start` reply is lost, the waker searches the thread history for the
+  wake's user message (its `clientId`, see slice 4a). Exactly one match → `started`;
+  none or several → `wake_unknown`, no automatic restart.
 - A manual turn from the ChatGPT app does not take the wakelock; for it the bridge
   guarantees only that at most one reply is committed, through the claim.
 - Limits: at most K wakes per hour.
@@ -538,10 +538,10 @@ Implementation notes (slice 3):
 - The turn text carries the marker, the question id, the slot and the CLI commands, but
   not the question's text. That text is slot input, and the orchestrator reads it
   through `mctl-bridge status`, marked as input rather than instruction.
-- History is read with `thread/read {includeTurns: true}`. Only `userMessage` items are
-  searched for the marker. A response without a `turns` list is an unreadable history
-  and gives `wake_unknown (history_unreadable)`; it is never read as "no match".
-- After a lost connection, a started turn is followed by polling `thread/read` until
+- History is read page by page (see slice 4a). A malformed or failed page is an
+  unreadable history and gives `wake_unknown (history_unreadable)`; it is never read as
+  "no match".
+- After a lost connection, a started turn is followed by polling the history until
   its status leaves `inProgress`. A turn that does not end in time becomes
   `wake_unknown (turn_timeout)`. On start, the waker settles any `intent` from the
   history and follows any `started`; recovery itself never starts a turn.
@@ -551,9 +551,32 @@ Implementation notes (slice 3):
   needed.
 - `mctl-bridge errors` lists `wake_unknown` wakes, and `mctl-bridge wakes` lists every
   open wake.
-- `turn/start` also accepts `clientUserMessageId` for idempotent retries. The waker does
-  not use it yet: whether the Mac mini's Codex build honours it is checked in slice 4
-  first.
+
+Live protocol (slice 4a, Codex 0.163.0 on the Mac mini, 2026-11-03). Checked on a
+scratch thread with `generate-ts` and real turns, not on the orchestrator thread:
+
+- `turn/start` takes `clientUserMessageId`, and the server keeps it on the turn's
+  `userMessage` item as `clientId`. The waker sends the wake id there and matches the
+  history on `clientId == wake_id` alone. The `[wake:<id>]` text marker stays for
+  people reading the thread, but a pasted copy of it in a manual turn carries the app's
+  own client id and is not a match.
+- `clientUserMessageId` is **not** deduplicated: sending the same id again starts a
+  second turn. A lost start therefore still must never be retried.
+- `turn/start` on a busy thread is **not refused**. The input joins the running turn
+  (steering) and the reply returns that turn's id. A JSON-RPC error is therefore not a
+  "thread busy" signal. The waker reads `thread/read` (metadata only) first and wakes
+  only a thread whose status is `idle`; a status it cannot read counts as not idle, and
+  that pass spends no budget. A start that still races a manual turn joins it, and the
+  wake follows that turn to its end: an accepted, documented outcome, because the
+  claim still allows only one committed reply.
+- `thread/read {includeTurns: true}` is deprecated for paginated threads. The waker
+  uses `thread/turns/list {itemsView: "full", sortDirection: "desc"}` and pages back
+  until a page reaches a turn that started more than five minutes before the wake (at
+  most 50 pages of 20). `itemsView: "summary"` drops a turn's second user message, so a
+  turn listed with anything but `full` items makes the history unreadable.
+- Turn statuses are `completed`, `interrupted`, `failed` and `inProgress`; thread
+  statuses are `notLoaded`, `idle`, `systemError` and `active` (with flags
+  `waitingOnApproval`, `waitingOnUserInput`).
 
 ### Slice 4: Mac mini, end to end on an isolated Valkey
 

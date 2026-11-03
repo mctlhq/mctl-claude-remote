@@ -36,7 +36,7 @@ import { Connection, endpointFromUrl } from "./valkey.ts";
 type Message = Record<string, any>;
 
 export const SERVER_NAME = "mctl-bridge";
-export const SERVER_VERSION = "0.3.0";
+export const SERVER_VERSION = "0.3.1";
 
 export const INSTRUCTIONS = [
   'Events from <channel source="mctl-bridge"> are tasks and replies from the orchestrator, delivered',

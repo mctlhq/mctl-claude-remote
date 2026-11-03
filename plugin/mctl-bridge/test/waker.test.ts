@@ -102,6 +102,7 @@ describe.skipIf(requiresValkey)("waker", () => {
     expect(await running).toBe(wake.id!);
     expect(await b.wake(wake.id!)).toMatchObject({ state: "completed", reason: "completed" });
     expect(app.starts).toHaveLength(1);
+    expect(app.starts[0].clientUserMessageId).toBe(wake.id!); // what the history is matched on
     const text = app.starts[0].input[0].text as string;
     expect(text).toContain(marker(wake.id!));
     expect(text).toContain(`mctl-bridge claim ${qid}`);
@@ -119,15 +120,23 @@ describe.skipIf(requiresValkey)("waker", () => {
     expect(app.starts).toHaveLength(1);
   });
 
+  test("a marker pasted into a manual turn is not taken for the wake's start", async () => {
+    const qid = await question();
+    app.mode = "drop-unrecorded";
+    const id = newId("w");
+    app.manualTurn(`${marker(id)} copied by hand`); // same text, the app's own client id
+    must(await b.wakeBegin({ question_id: qid, thread_id: app.threadId, wake_id: id, lock_ms: 60_000, per_hour: 10, quiet_ms: 0 }));
+    await waker().run(id, { id: qid, slot: "a", task_id: "t" });
+    expect(await b.wake(id)).toMatchObject({ state: "wake_unknown", reason: "history_matches_0" });
+  });
+
   test("an ambiguous history gives wake_unknown and no second turn", async () => {
     const qid = await question();
-    app.mode = "drop";
-    app.completeAfterMs = null;
-    // The operator pasted the same marker into a manual turn: two matches.
+    app.mode = "drop-unrecorded";
     const id = newId("w");
-    app.manualTurn(`${marker(id)} copied by hand`);
+    app.wakeTurn(id);
+    app.wakeTurn(id); // two turns holding the same client id
     const w = waker();
-    // Drive the wake with a known id so the copy matches it.
     must(await b.wakeBegin({ question_id: qid, thread_id: app.threadId, wake_id: id, lock_ms: 60_000, per_hour: 10, quiet_ms: 0 }));
     await w.run(id, { id: qid, slot: "a", task_id: "t" });
     expect(await b.wake(id)).toMatchObject({ state: "wake_unknown", reason: "history_matches_2" });
@@ -136,6 +145,80 @@ describe.skipIf(requiresValkey)("waker", () => {
     expect(await w.tick()).toBeNull(); // no automatic restart while unresolved
     expect(app.starts).toHaveLength(1);
     expect((await b.openWakes()).map((x) => x.id)).toEqual([id]); // stays open
+  });
+
+  test("a busy thread is not woken until it is idle, and an unreadable status is not idle", async () => {
+    await question();
+    app.manualTurn("the operator is working", "inProgress");
+    const w = waker();
+    expect(await w.tick()).toBeNull();
+    expect(app.starts).toHaveLength(0);
+    expect(await server.client().execute(["KEYS", key.wake("*")])).toEqual([]); // no budget spent
+    app.complete("turn-manual-0");
+    app.brokenStatus = true;
+    expect(await w.tick()).toBeNull();
+    expect(app.starts).toHaveLength(0);
+    app.brokenStatus = false;
+    app.failStatus = true; // a status read that fails outright is not idle either
+    expect(await w.tick()).toBeNull();
+    expect(app.starts).toHaveLength(0);
+    app.failStatus = false;
+    expect(await w.tick()).not.toBeNull();
+    expect(app.starts).toHaveLength(1);
+  });
+
+  test("a start that races a manual turn joins it, and the wake follows that turn", async () => {
+    const qid = await question();
+    app.manualTurn("the operator started this a moment ago", "inProgress");
+    const id = newId("w");
+    must(await b.wakeBegin({ question_id: qid, thread_id: app.threadId, wake_id: id, lock_ms: 60_000, per_hour: 10, quiet_ms: 0 }));
+    const running = waker().run(id, { id: qid, slot: "a", task_id: "t" });
+    for (let i = 0; i < 100 && (await b.wake(id)).state !== "started"; i++) await sleep(20);
+    expect(await b.wake(id)).toMatchObject({ state: "started", turn_id: "turn-manual-0" });
+    app.complete("turn-manual-0");
+    await running;
+    expect(await b.wake(id)).toMatchObject({ state: "completed", turn_id: "turn-manual-0" });
+    expect(app.turns).toHaveLength(1);
+  });
+
+  test("the history is paged back to the wake, and a failed later page is unreadable", async () => {
+    for (let i = 0; i < 45; i++) app.manualTurn(`recent ${i}`);
+    await question();
+    app.mode = "drop";
+    expect(await waker().tick()).not.toBeNull();
+    expect(await onlyWake()).toMatchObject({ state: "completed" });
+    expect(app.cursors.slice(0, 3)).toEqual([null, "20", "40"]); // all 46 recent turns were counted
+  });
+
+  test("a later page that fails makes the history unreadable, not shorter", async () => {
+    for (let i = 0; i < 45; i++) app.manualTurn(`recent ${i}`);
+    await question();
+    app.mode = "drop";
+    app.brokenPage = 1;
+    await waker().tick();
+    const w = await onlyWake();
+    expect(w.state).toBe("wake_unknown");
+    expect(w.reason).toStartWith("history_unreadable");
+  });
+
+  test("turns from before the wake are not paged through", async () => {
+    for (let i = 0; i < 45; i++) app.manualTurn(`old ${i}`);
+    for (const t of app.turns) t.startedAt = 1_000; // long before
+    await question();
+    app.mode = "drop";
+    expect(await waker().tick()).not.toBeNull();
+    expect(await onlyWake()).toMatchObject({ state: "completed" });
+    expect(app.cursors.filter((c) => c !== null)).toEqual([]); // first pages only
+  });
+
+  test("turns listed without their full items are unreadable", async () => {
+    const qid = await question();
+    const id = newId("w");
+    must(await b.wakeBegin({ question_id: qid, thread_id: app.threadId, wake_id: id, lock_ms: 60_000, per_hour: 10, quiet_ms: 0 }));
+    app.wakeTurn(id);
+    for (const t of app.turns) t.itemsView = "summary"; // a summary may drop a user message
+    await waker().recover();
+    expect((await b.wake(id)).reason).toStartWith("history_unreadable");
   });
 
   test("no marker in the history gives wake_unknown too", async () => {
@@ -226,11 +309,11 @@ describe.skipIf(requiresValkey)("waker", () => {
     const found = newId("w");
     const lost = newId("w");
     must(await b.wakeBegin({ question_id: q1, thread_id: app.threadId, wake_id: found, lock_ms: 60_000, per_hour: 10, quiet_ms: 0 }));
-    app.manualTurn(`${marker(found)} started before the crash`);
+    const foundTurn = app.wakeTurn(found); // started before the crash
     await server.client().execute(["DEL", key.wakelock(app.threadId)]);
     must(await b.wakeBegin({ question_id: q2, thread_id: app.threadId, wake_id: lost, lock_ms: 60_000, per_hour: 10, quiet_ms: 0 }));
     await waker().recover();
-    expect(await b.wake(found)).toMatchObject({ state: "completed", turn_id: "turn-manual-0" });
+    expect(await b.wake(found)).toMatchObject({ state: "completed", turn_id: foundTurn });
     expect(await b.wake(lost)).toMatchObject({ state: "wake_unknown", reason: "history_matches_0" });
     expect(app.starts).toHaveLength(0); // recovery never starts a turn
   });
@@ -242,12 +325,10 @@ describe.skipIf(requiresValkey)("waker", () => {
     const running = newId("w");
     const base = { thread_id: app.threadId, lock_ms: 60_000, per_hour: 10, quiet_ms: 0 };
     must(await b.wakeBegin({ ...base, question_id: q1, wake_id: done }));
-    app.manualTurn(`${marker(done)} first`, "completed");
-    must(await b.wakeStarted(done, "turn-manual-0"));
+    must(await b.wakeStarted(done, app.wakeTurn(done, "completed")));
     await server.client().execute(["DEL", key.wakelock(app.threadId)]);
     must(await b.wakeBegin({ ...base, question_id: q2, wake_id: running }));
-    app.manualTurn(`${marker(running)} second`, "inProgress");
-    must(await b.wakeStarted(running, "turn-manual-1"));
+    must(await b.wakeStarted(running, app.wakeTurn(running, "inProgress")));
     // The waker was down for longer than the turn timeout.
     for (const id of [done, running]) await server.client().execute(["HSET", key.wake(id), "created_ms", "0"]);
     await waker().recover();
@@ -260,7 +341,7 @@ describe.skipIf(requiresValkey)("waker", () => {
     const qid = await question();
     const id = newId("w");
     must(await b.wakeBegin({ question_id: qid, thread_id: app.threadId, wake_id: id, lock_ms: 60_000, per_hour: 10, quiet_ms: 0 }));
-    app.manualTurn(`${marker(id)} odd shape`, null);
+    app.wakeTurn(id, null); // odd shape: no status
     await server.client().execute(["HSET", key.wake(id), "created_ms", "0"]);
     await waker().recover(); // intent: one match, then followed
     expect(await b.wake(id)).toMatchObject({ state: "wake_unknown", reason: "turn_timeout" });
