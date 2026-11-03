@@ -478,6 +478,13 @@ slice 2; until then there is nothing for Claude Code to load.
   sent, so the server records it as late evidence.
 - `unregister` (on stdin close) checks `conn_id` first, then moves what the adapter held
   to `delivery_unknown` and frees `inflight`, as `slot_stale` does.
+- A transport error keeps the registration: registering again would reset a live
+  session. The retry backoff is capped at one heartbeat, well inside `stale_ms`, and
+  only a `fenced` reply drops the registration. A lost reply to `next` is ambiguous,
+  since the server may have recorded an `emit_intent` the model never saw. Before
+  emitting anything else, the adapter calls `emit_lost`, a fenced operation that moves
+  this connection's own `emit_intent` or `reply_emit_intent` to `delivery_unknown`
+  (reason `emit_reply_lost`, never resent). A task also frees `inflight`.
 - Tests with the fake Claude Code client and a fake state file: nothing is emitted into
   a busy slot; after `/clear` the old message becomes `delivery_unknown` and is not
   resent; a restart takes `epoch + 1`; `/clear` after admission while an external tool

@@ -147,6 +147,11 @@ export class Bridge {
     return this.call("bridge_emitted", key.slot(c.slot), [c.slot, c.conn_id, c.epoch, id]);
   }
 
+  /** The reply to `next` was lost: settle what this connection may have left in emit_intent. */
+  emitLost(c: SlotConn) {
+    return this.call("bridge_emit_lost", key.slot(c.slot), [c.slot, c.conn_id, c.epoch]);
+  }
+
   ackTask(c: SlotConn, taskId: string, attemptId: string) {
     return this.call("bridge_ack_task", key.slot(c.slot), [c.slot, c.conn_id, c.epoch, taskId, attemptId]);
   }

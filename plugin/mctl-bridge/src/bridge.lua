@@ -336,6 +336,30 @@ local function mark_emitted(keys, a)
   return ok()
 end
 
+-- ARGV: slot, conn_id, epoch
+-- The adapter lost the reply to its own `next`: the server may have recorded an
+-- emit_intent the model never saw. Whatever this connection holds in emit_intent
+-- or reply_emit_intent becomes delivery_unknown (never re-sent), and a task frees
+-- inflight so the queue moves on. Idempotent; finds nothing if `next` never ran.
+local function emit_lost(keys, a)
+  local slot, conn, epoch = a[1], a[2], a[3]
+  if not valid_slot(slot) or keys[1] ~= skey(slot) then return no('bad_request') end
+  local s = hgetall(skey(slot))
+  if fenced(s, conn, epoch) then return no('fenced') end
+  local now = now_ms()
+  local settled = 0
+  for _, id in ipairs(redis.call('SMEMBERS', slot_open_key(slot))) do
+    local m = hgetall(mkey(id))
+    if (m.state == 'emit_intent' or m.state == 'reply_emit_intent')
+        and m.emit_conn == conn and m.emit_epoch == epoch then
+      transition(id, m, 'delivery_unknown', 'slot:' .. slot, 'emit_reply_lost', now)
+      if m.kind == 'task' then clear_inflight(slot, id) end
+      settled = settled + 1
+    end
+  end
+  return ok({ settled = settled })
+end
+
 -- ack_task. ARGV: slot, conn_id, epoch, task_id, attempt_id
 -- Returns the admission that report_result and ask_orchestrator require.
 local function ack_task(keys, a)
@@ -685,6 +709,7 @@ reg('bridge_heartbeat', heartbeat)
 reg('bridge_unregister', unregister)
 reg('bridge_next', next_message)
 reg('bridge_emitted', mark_emitted)
+reg('bridge_emit_lost', emit_lost)
 reg('bridge_ack_task', ack_task)
 reg('bridge_ack_reply', ack_reply)
 reg('bridge_result', report_result)

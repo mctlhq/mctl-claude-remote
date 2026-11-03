@@ -8,8 +8,12 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { Adapter } from "../src/channel.ts";
+import type { Config } from "../src/channel.ts";
 import { Bridge, key } from "../src/store.ts";
 import type { Result } from "../src/store.ts";
+import { ValkeyConnectionError } from "../src/valkey.ts";
+import type { Arg, ExecuteOptions, Executor, Reply } from "../src/valkey.ts";
 import { FakeClaude, ValkeyServer, requiresValkey, sleep } from "./support.ts";
 
 const HOOK = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "hooks", "state.py");
@@ -231,6 +235,119 @@ describe.skipIf(requiresValkey)("slot adapter over MCP", () => {
     must(await b.send({ slot: "b", payload: "for b" }));
     expect((await cb.notification()).params.content).toContain("for b");
     await ca.noNotification(0.3);
+  });
+});
+
+// The adapter in process, over a connection that can lose exactly one reply
+// after the server has run the command: the window a socket kill or a
+// client-side timeout opens, which no spawned process can hit deterministically.
+class LoseOneReply implements Executor {
+  armed: string | null = null;
+  private readonly inner: Executor;
+  constructor(inner: Executor) {
+    this.inner = inner;
+  }
+  async execute(args: readonly Arg[], options?: ExecuteOptions): Promise<Reply> {
+    const reply = await this.inner.execute(args, options);
+    if (this.armed !== null && args[0] === "FCALL" && args[1] === this.armed) {
+      this.armed = null;
+      throw new ValkeyConnectionError("reply lost");
+    }
+    return reply;
+  }
+}
+
+describe.skipIf(requiresValkey)("slot adapter, lost replies", () => {
+  let lossy: LoseOneReply;
+  let adapter: Adapter;
+  let notes: Record<string, any>[];
+  let dir: string;
+
+  function idle(session = "s-1"): void {
+    const file = path.join(dir, `${process.pid}.json`);
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify({ session_id: session, state: "idle", t: Date.now() / 1000 }));
+    fs.renameSync(`${file}.tmp`, file);
+  }
+
+  beforeAll(async () => {
+    server = await ValkeyServer.start();
+  });
+  afterAll(async () => {
+    await server.stop();
+  });
+  beforeEach(async () => {
+    await server.client().execute(["FLUSHALL"]);
+    b = await server.bridge();
+    lossy = new LoseOneReply(server.client());
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-state-"));
+    notes = [];
+    const cfg: Config = {
+      slot: "a", stateDir: dir, claudePid: process.pid, pollMs: 20, heartbeatMs: 1000, graceMs: 0,
+      emitHoldMs: 60_000, initialSessionId: "", cwd: dir,
+    };
+    adapter = new Adapter(new Bridge(lossy), cfg, async (m) => { notes.push(m); });
+    idle();
+    await adapter.tick(); // registers; nothing to emit yet
+  });
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a lost `next` reply settles the task as delivery_unknown and the queue moves on", async () => {
+    const t1 = must(await b.send({ slot: "a", payload: "first" }));
+    const t2 = must(await b.send({ slot: "a", payload: "second" }));
+    lossy.armed = "bridge_next";
+    await expect(adapter.tick()).rejects.toThrow("reply lost");
+    // The server ran it: t1 holds inflight, and the model never saw it.
+    expect((await b.message(t1.id)).state).toBe("emit_intent");
+    expect((await b.slotInfo("a")).inflight).toBe(t1.id);
+    const epoch = (await b.slotInfo("a")).epoch;
+    expect(notes).toHaveLength(0);
+
+    await adapter.tick();
+    const m1 = await b.message(t1.id);
+    expect(m1.state).toBe("delivery_unknown");
+    expect(m1.reason).toBe("emit_reply_lost");
+    expect(notes).toHaveLength(1); // t1 is never re-sent; t2 goes out
+    expect(notes[0]!.params.meta).toMatchObject({ kind: "task", task_id: t2.id });
+    expect((await b.message(t2.id)).state).toBe("emitted");
+    const info = await b.slotInfo("a");
+    expect(info.epoch).toBe(epoch); // no re-registration
+    expect(info.inflight).toBe(t2.id);
+  });
+
+  test("a lost `next` reply for a reply settles the question; the task keeps inflight", async () => {
+    const t1 = must(await b.send({ slot: "a", payload: "work" }));
+    await adapter.tick();
+    const attempt = notes[0]!.params.meta.attempt_id;
+    must((await adapter.call("ack_task", { task_id: t1.id, attempt_id: attempt })) as Result);
+    const asked = must((await adapter.call("ask_orchestrator", { task_id: t1.id, question: "which name?" })) as Result);
+    const claim = must(await b.claim(asked.question_id));
+    must(await b.reply(asked.question_id, claim.claim_token, "keep it"));
+    await sleep(5);
+    idle(); // Stop after asking, newer than the emit
+
+    lossy.armed = "bridge_next";
+    await expect(adapter.tick()).rejects.toThrow("reply lost");
+    expect((await b.message(asked.question_id)).state).toBe("reply_emit_intent");
+
+    await adapter.tick();
+    const q = await b.message(asked.question_id);
+    expect(q.state).toBe("delivery_unknown"); // never re-sent automatically
+    expect(q.reason).toBe("emit_reply_lost");
+    expect(notes).toHaveLength(1);
+    expect((await b.message(t1.id)).state).toBe("acked");
+    expect((await b.slotInfo("a")).inflight).toBe(t1.id);
+  });
+
+  test("settling a lost emit is fenced to the connection that lost it", async () => {
+    const t1 = must(await b.send({ slot: "a", payload: "first" }));
+    lossy.armed = "bridge_next";
+    await expect(adapter.tick()).rejects.toThrow("reply lost");
+    const info = await b.slotInfo("a");
+    const other = { slot: "a", conn_id: "k-other", epoch: info.epoch };
+    expect(await b.emitLost(other)).toMatchObject({ ok: false, code: "fenced" });
+    expect((await b.message(t1.id)).state).toBe("emit_intent");
   });
 });
 

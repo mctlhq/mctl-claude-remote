@@ -160,6 +160,8 @@ export class Adapter {
   private lastBeat = 0;
   private lastBusy: boolean | null = null;
   private emittedAt = 0;
+  /** A `next` threw: the server may hold an emit_intent nobody will write. */
+  private emitUnsettled = false;
   private stopped = false;
   private current: Promise<void> | null = null;
   private readonly pidStart: string;
@@ -198,6 +200,7 @@ export class Adapter {
     this.conn = { slot: this.cfg.slot, conn_id, epoch: String(r.epoch), uuid: sessionId };
     this.lastBusy = null;
     this.emittedAt = 0;
+    this.emitUnsettled = false; // the registration has just settled everything the old one held
     log("registered", { slot: this.cfg.slot, epoch: r.epoch, session_id: sessionId });
   }
 
@@ -209,6 +212,20 @@ export class Adapter {
     if (this.conn === null || this.conn.uuid !== sessionId) await this.register(sessionId);
     const conn = this.conn;
     if (conn === null) return;
+    if (this.emitUnsettled) {
+      const r = await this.bridge.emitLost(conn);
+      if (r.ok) {
+        this.emitUnsettled = false;
+        if (Number(r.settled) > 0) log("lost emit settled as delivery_unknown", { settled: r.settled });
+      } else if (r.code === "fenced") {
+        this.emitUnsettled = false; // a newer registration has already settled it
+        this.conn = null;
+        return;
+      } else {
+        log("could not settle a lost emit", { code: r.code });
+        return; // emit nothing until it is settled
+      }
+    }
 
     const busy = this.busy(st, now);
     if (busy !== this.lastBusy || now - this.lastBeat >= this.cfg.heartbeatMs) {
@@ -225,7 +242,15 @@ export class Adapter {
     // says busy, and the heartbeat above has just sent the current flag.
     if (busy) return;
 
-    const next = await this.bridge.next(conn);
+    let next: Result;
+    try {
+      next = await this.bridge.next(conn);
+    } catch (err) {
+      // The server may have run it: an emit_intent the model will never see
+      // would hold inflight for good. Settle it before anything else is emitted.
+      this.emitUnsettled = true;
+      throw err;
+    }
     if (!next.ok) {
       if (next.code === "fenced") this.conn = null;
       return;
