@@ -69,6 +69,10 @@ Optional settings: `MCTL_BRIDGE_CODEX_SOCKET` (default
 `MCTL_BRIDGE_POLL_MS` (2000), `MCTL_BRIDGE_SWEEP_MS` (5000) and
 `MCTL_BRIDGE_STALE_MS` (30000).
 
+The waker wakes only an idle thread: `turn/start` on a busy Codex thread joins the
+running turn instead of refusing. It sends the wake id as `clientUserMessageId` and
+matches the history on that id, read through `thread/turns/list` with full items.
+
 ## CLI
 
 ```sh
