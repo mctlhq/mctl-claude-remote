@@ -544,6 +544,16 @@ local function resolve(keys, a)
   if m.kind == 'task' and (as == 'completed' or as == 'failed' or as == 'cancelled') then
     target = as
   elseif m.kind == 'question' and as == 'closed' then
+    -- While the asking attempt still holds inflight, closing the question would
+    -- leave that task waiting for a reply that never comes, and the slot wedged.
+    -- The operator ends the task instead; that closes the question with it.
+    if m.state ~= 'delivery_unknown' then
+      local s = hgetall(skey(m.slot))
+      if s.inflight == m.task_id and s.inflight_attempt == m.attempt_id then
+        return no('task_waiting', { task_id = m.task_id,
+          hint = 'resolve the task instead: mctl-bridge resolve ' .. m.task_id .. ' --as failed|cancelled --reason ...' })
+      end
+    end
     target = 'closed'
   else
     return no('bad_request')

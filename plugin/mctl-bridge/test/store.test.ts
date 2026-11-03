@@ -369,6 +369,38 @@ describe.skipIf(requiresValkey)("bridge state machine", () => {
     expect((await b.slotInfo("a")).inflight).toBe("");
   });
 
+  test("a question cannot be closed while its attempt waits for it, and the attempt goes on", async () => {
+    const a = await register("a");
+    const { admission } = await admitted(a);
+    const q = must(await b.ask("a", admission, "?"));
+    const refused = await b.resolve(q.question_id, "closed", "no longer needed", "op");
+    expect(refused).toMatchObject({ ok: false, code: "task_waiting", task_id: admission.task_id });
+    expect(String((refused as any).hint)).toContain(`resolve ${admission.task_id}`);
+    expect(await state(q.question_id)).toBe("asked");
+
+    const c = must(await b.claim(q.question_id));
+    const committed = must(await b.reply(q.question_id, c.claim_token, "main"));
+    expect(await b.resolve(q.question_id, "closed", "no longer needed", "op")).toMatchObject({ ok: false, code: "task_waiting" });
+    expect(await state(q.question_id)).toBe("reply_committed");
+
+    // the committed reply is still delivered and the same attempt finishes
+    const got = must(await b.next(a));
+    expect(got).toMatchObject({ reply_id: committed.reply_id, attempt_id: admission.attempt_id });
+    must(await b.emitted(a, q.question_id));
+    must(await b.ackReply(a, q.question_id, committed.reply_id));
+    must(await b.result("a", admission, "completed", "done"));
+  });
+
+  test("a question whose asker is gone can be closed", async () => {
+    const a = await register("a");
+    const { admission } = await admitted(a);
+    const q = must(await b.ask("a", admission, "?"));
+    await register("a");
+    expect(await state(q.question_id)).toBe("delivery_unknown");
+    must(await b.resolve(q.question_id, "closed", "asker reset", "op"));
+    expect(await state(q.question_id)).toBe("closed");
+  });
+
   test("requeue is refused while late evidence exists, unless forced", async () => {
     const a1 = await register("a");
     const { admission } = await admitted(a1);

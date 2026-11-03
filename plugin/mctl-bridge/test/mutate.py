@@ -39,6 +39,7 @@ M=[
  ("late trail never expires", LUA, "    redis.call('PEXPIRE', P .. 'late:' .. id, RETAIN_MS)\n", "", 1),
  ("audit trail never expires", LUA, "    redis.call('PEXPIRE', P .. 'audit:' .. id, RETAIN_MS)\n", "", 1),
  ("ask ttl guard off", LUA, "      or ttl == nil or ttl < 0 then", "      then", 1),
+ ("close while waiting", LUA, "      if s.inflight == m.task_id and s.inflight_attempt == m.attempt_id then\n        return no('task_waiting'", "      if false then\n        return no('task_waiting'", 1),
  ("no fsync", SUP, '"--appendfsync", "always"', '"--appendfsync", "no"', 1),
  ("no aof", SUP, '["--save", "", "--appendonly", "yes", "--appendfsync", "always"]', '["--save", "", "--appendonly", "no"]', 1),
 ]

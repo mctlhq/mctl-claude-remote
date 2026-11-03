@@ -259,6 +259,10 @@ plus `closed` and `delivery_unknown`.
   The feed carries `question_expired`.
 - When a task ends (`report_result`, or `resolve` to a terminal state) its open question
   is `closed` and its claim dropped; no reply can reach it any more.
+- `resolve --as closed` is refused (`task_waiting`, with the `task_id`) while the asking
+  attempt still holds `inflight`: closing the question would leave that task waiting
+  for a reply that never comes. The operator ends the task instead, which closes the
+  question with it; a reply already committed stays deliverable.
 - An epoch change or a lost heartbeat moves the slot's open questions (`asked`,
   `reply_committed`) to `delivery_unknown` together with its tasks.
 
