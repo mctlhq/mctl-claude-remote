@@ -184,6 +184,23 @@ local function record_late(slot, task_id, m, a, code, kind, payload, now)
   end
 end
 
+-- The slot's adapter is gone (stopped or silent): fence it off and move what it
+-- held to delivery_unknown. Queued tasks stay; the next registration decides.
+local function abandon(slot, actor, why, now)
+  redis.call('HSET', skey(slot), 'conn_id', '', 'busy', '1', 'inflight', '', 'inflight_attempt', '')
+  for _, id in ipairs(redis.call('SMEMBERS', slot_open_key(slot))) do
+    local m = hgetall(mkey(id))
+    local st = m.state
+    if st == 'emit_intent' or st == 'emitted' or st == 'acked'
+        or st == 'reply_emit_intent' or st == 'reply_emitted' then
+      transition(id, m, 'delivery_unknown', actor, why, now)
+    elseif st == 'asked' or st == 'reply_committed' then
+      transition(id, m, 'delivery_unknown', actor, 'asker_' .. why, now)
+      redis.call('DEL', P .. 'claim:' .. id)
+    end
+  end
+end
+
 ---------------------------------------------------------------------------------
 -- Slot functions (first key: mctl:bridge:s:<slot>:slot)
 ---------------------------------------------------------------------------------
@@ -194,7 +211,8 @@ end
 local function register(keys, a)
   local slot, uuid, conn, pid, pid_start, cwd = a[1], a[2], a[3], a[4], a[5], a[6]
   local stale_ms = tonumber(a[7] or '30000')
-  if not valid_slot(slot) or not valid_id(uuid) or not valid_id(conn) or keys[1] ~= skey(slot) then
+  if not valid_slot(slot) or not valid_id(uuid) or not valid_id(conn) or keys[1] ~= skey(slot)
+      or stale_ms == nil or stale_ms <= 0 then
     return no('bad_request')
   end
   local now = now_ms()
@@ -243,8 +261,12 @@ local function unregister(keys, a)
   local slot, conn, epoch = a[1], a[2], a[3]
   if not valid_slot(slot) or keys[1] ~= skey(slot) then return no('bad_request') end
   local s = hgetall(skey(slot))
+  -- Fencing first: an old adapter must never touch a newer registration.
   if fenced(s, conn, epoch) then return no('fenced') end
-  redis.call('HSET', skey(slot), 'conn_id', '', 'heartbeat', 0, 'busy', '1')
+  local now = now_ms()
+  abandon(slot, 'slot:' .. slot, 'unregistered', now)
+  redis.call('HSET', skey(slot), 'heartbeat', 0)
+  feed(slot, 'unregistered', now)
   return ok()
 end
 
@@ -610,18 +632,7 @@ local function slot_stale(keys, a)
   if s.conn_id == nil or s.conn_id == '' or (now - tonumber(s.heartbeat or '0')) < stale_ms then
     return ok({ stale = false })
   end
-  redis.call('HSET', skey(slot), 'conn_id', '', 'busy', '1', 'inflight', '', 'inflight_attempt', '')
-  for _, id in ipairs(redis.call('SMEMBERS', slot_open_key(slot))) do
-    local m = hgetall(mkey(id))
-    local st = m.state
-    if st == 'emit_intent' or st == 'emitted' or st == 'acked'
-        or st == 'reply_emit_intent' or st == 'reply_emitted' then
-      transition(id, m, 'delivery_unknown', 'sweeper', 'heartbeat_lost', now)
-    elseif st == 'asked' or st == 'reply_committed' then
-      transition(id, m, 'delivery_unknown', 'sweeper', 'asker_heartbeat_lost', now)
-      redis.call('DEL', P .. 'claim:' .. id)
-    end
-  end
+  abandon(slot, 'sweeper', 'heartbeat_lost', now)
   feed(slot, 'stale', now)
   return ok({ stale = true })
 end
