@@ -415,4 +415,71 @@ describe.skipIf(requiresValkey)("admission grant", () => {
       fs.rmSync(stateDir, { recursive: true, force: true });
     }
   });
+
+  test("a grant whose connection was replaced meanwhile starts no work", async () => {
+    const stateDir = fs.mkdtempSync(path.join(os.tmpdir(), "bridge-state-"));
+    try {
+      await server.client().execute(["FLUSHALL"]);
+      const bridge = await server.bridge();
+      const pid = 424243;
+      fs.writeFileSync(path.join(stateDir, `${pid}.json`), JSON.stringify({ session_id: "s-1", state: "idle", t: Date.now() / 1000 }));
+      let swap: (() => void) | null = null;
+      class Swap extends Bridge {
+        override async ackTask(c: Parameters<Bridge["ackTask"]>[0], taskId: string, attemptId: string): Promise<Result> {
+          const real = await super.ackTask(c, taskId, attemptId);
+          swap?.(); // the adapter re-registered while the answer was on its way
+          return real;
+        }
+      }
+      const cfg: Config = {
+        slot: "a", stateDir, claudePid: pid, pollMs: 10, heartbeatMs: 1000, graceMs: 0,
+        emitHoldMs: 5000, initialSessionId: "s-1", cwd: "/tmp",
+      };
+      const sent: unknown[] = [];
+      const adapter = new Adapter(new Swap(server.client()), cfg, async (m) => void sent.push(m));
+      swap = () => void ((adapter as any).conn = { ...(adapter as any).conn });
+      await adapter.tick();
+      must(await bridge.send({ slot: "a", payload: "work" }));
+      await adapter.tick();
+      await adapter.tick();
+      const meta = (sent[0] as any).params.meta;
+      const r: any = await adapter.call("ack_task", { task_id: meta.task_id, attempt_id: meta.attempt_id });
+      expect(r).toMatchObject({ ok: false, code: "stale_grant" });
+    } finally {
+      fs.rmSync(stateDir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe.skipIf(requiresValkey)("rpc retries", () => {
+  beforeAll(async () => {
+    server = await ValkeyServer.start();
+  });
+  afterAll(async () => {
+    await server.stop();
+  });
+
+  test("an unanswered request is repeated under the same id and applied once", async () => {
+    const raw2 = server.client();
+    await raw2.execute(["FLUSHALL"]);
+    const bridge = await server.bridge();
+    const c = await server.addSlot("c");
+    await raw2.execute(["SREM", key.allowed, "c"]); // not served yet
+    const ing = new Ingester(bridge);
+    const pump = ing.run(50);
+    try {
+      const link = new SlotLink(c.client(), "c", { attemptMs: 300, attempts: 6 });
+      setTimeout(() => void raw2.execute(["SADD", key.allowed, "c"]), 450);
+      const reg = ["u-1", newId("k"), "7", "t0", "/tmp", "30000"];
+      const r = must(await link.rpc("register", reg, "x-retry"));
+      expect(r.epoch).toBe("1");
+      expect((await bridge.slotInfo("c")).epoch).toBe("1"); // however many copies were queued
+      await sleep(300);
+      const memos = (await raw2.execute(["KEYS", "mctl:bridge:rpc:c:*"])) as Reply[];
+      expect(memos.map((k) => text(k!))).toEqual(["mctl:bridge:rpc:c:x-retry"]); // every copy carried the same id
+    } finally {
+      ing.stop();
+      await pump;
+    }
+  });
 });

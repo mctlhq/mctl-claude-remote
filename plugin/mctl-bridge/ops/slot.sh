@@ -9,13 +9,16 @@
 #
 # Slots run in --permission-mode default, never with --dangerously-skip-permissions.
 # Only the bridge's own tools are pre-allowed; anything else prompts, and prompts are
-# answered through Remote Control. TRUSTED EXPERIMENT: all slots share the
-# bridge_slot Valkey user and the operator's uid (see install.sh).
+# answered through Remote Control. Each slot has its own Valkey user and password file;
+# the user can only append to its request stream and read its response stream and inbox.
+# Slots still run under the operator's uid until the host boundary step is done.
 set -euo pipefail
 H=${MCTL_BRIDGE_HOME:-$HOME/mctl-bridge}
 MAX=${MCTL_BRIDGE_MAX_SLOTS:-2}
 MODEL=${MCTL_BRIDGE_SLOT_MODEL:-haiku}
 cmd=${1:-}; shift || true
+
+admin() { $H/valkey/bin/valkey-cli -p ${MCTL_BRIDGE_PORT:-6390} --user bridge_admin --pass "$(cat $H/etc/admin.pw)" --no-auth-warning "$@"; }
 
 running() { screen -ls 2>/dev/null | grep -oE '[0-9]+\.bridge-slot-[a-z0-9-]+' | sed 's/.*bridge-slot-//' || true; }
 
@@ -29,10 +32,19 @@ case $cmd in
     (( n < MAX )) || { echo "already $n slots running (limit $MAX)" >&2; exit 1; }
     d=$H/slots/$s
     mkdir -p $d
+    # Own Valkey user. Request stream: write only. Response stream and inbox: read only.
+    # No FCALL, no scripting: the ingester applies requests as the orchestrator.
+    pw=$H/etc/slot-$s.pw
+    [[ -s $pw ]] || (umask 077; openssl rand -hex 24 > $pw)
+    k=mctl:bridge:s:$s:
+    admin ACL SETUSER bridge_slot_$s reset on ">$(cat $pw)" -@all +xadd +xread +xrevrange +ping \
+      "%W~${k}out" "%R~${k}resp" "%R~${k}inbox" >/dev/null
+    admin SADD mctl:bridge:slots-allowed $s >/dev/null
+    admin ACL SAVE >/dev/null
     # Credentials reach only the MCP process, through its own env block.
     cat > $d/mcp.json <<JSON
 {"mcpServers":{"mctl-bridge":{"command":"${BUN:-$HOME/.bun/bin/bun}","args":["run","--silent","--no-env-file","--config=$H/plugin/bunfig.toml","$H/plugin/src/channel.ts"],
- "env":{"MCTL_BRIDGE_SLOT":"$s","MCTL_BRIDGE_VALKEY_URL":"redis://bridge_slot@127.0.0.1:${MCTL_BRIDGE_PORT:-6390}/0","MCTL_BRIDGE_VALKEY_PASSWORD_FILE":"$H/etc/slot.pw"}}}}
+ "env":{"MCTL_BRIDGE_SLOT":"$s","MCTL_BRIDGE_TRANSPORT":"rpc","MCTL_BRIDGE_VALKEY_URL":"redis://bridge_slot_$s@127.0.0.1:${MCTL_BRIDGE_PORT:-6390}/0","MCTL_BRIDGE_VALKEY_PASSWORD_FILE":"$pw"}}}}
 JSON
     hook="/usr/bin/python3 $H/plugin/hooks/state.py"
     cat > $d/settings.json <<JSON
