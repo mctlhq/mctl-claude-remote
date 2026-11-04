@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { ValkeyError } from "./valkey.ts";
+import { ValkeyConnectionError, ValkeyError } from "./valkey.ts";
 import type { Arg, Executor, Reply } from "./valkey.ts";
 
 export const PREFIX = "mctl:bridge:";
@@ -129,6 +129,30 @@ export class Bridge implements SlotApi {
     }
     if (found !== LIBRARY_VERSION) {
       throw new Error(`mctl_bridge library version ${found}, this client needs ${LIBRARY_VERSION}`);
+    }
+  }
+
+  /**
+   * Startup wait: a server that is still loading its dataset (LOADING) or not yet accepting
+   * connections is UNKNOWN, not "library absent", so keep asking until the deadline. A missing
+   * or mismatched library is a definite answer and fails at once; so does running out of time
+   * (with the last unknown state in the message) rather than starting on a guess.
+   */
+  async waitReady(opts: { timeoutMs?: number; intervalMs?: number; onWait?: (reason: string) => void } = {}): Promise<void> {
+    const deadline = Date.now() + (opts.timeoutMs ?? 120_000);
+    const interval = opts.intervalMs ?? 1000;
+    for (;;) {
+      try {
+        await this.checkVersion();
+        return;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        const unknown = err instanceof ValkeyConnectionError || (err instanceof Error && /\bLOADING\b/.test(msg)) || /ECONNREFUSED|ECONNRESET|connection closed/.test(msg);
+        if (!unknown) throw err;
+        if (Date.now() + interval > deadline) throw new Error(`valkey not ready before the deadline: ${msg}`);
+        opts.onWait?.(msg);
+        await new Promise((r) => setTimeout(r, interval));
+      }
     }
   }
 
