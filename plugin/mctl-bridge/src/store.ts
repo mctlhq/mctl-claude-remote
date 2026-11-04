@@ -13,7 +13,7 @@ import { ValkeyError } from "./valkey.ts";
 import type { Arg, Executor, Reply } from "./valkey.ts";
 
 export const PREFIX = "mctl:bridge:";
-export const LIBRARY_VERSION = "2";
+export const LIBRARY_VERSION = "3";
 export const LIBRARY_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "bridge.lua");
 export const MAX_PAYLOAD = 16384;
 
@@ -33,6 +33,25 @@ export interface SlotConn {
   epoch: string;
 }
 
+/**
+ * What the slot adapter needs from the bridge. `Bridge` implements it by calling
+ * the functions directly (tests, trusted setups); `SlotLink` implements it over the
+ * slot's own request and response streams, which is all a slot credential can reach.
+ */
+export interface SlotApi {
+  register(o: { slot: string; uuid: string; conn_id: string; pid: number | string; pid_start: string; cwd: string; stale_ms?: number }): Promise<Result>;
+  heartbeat(c: SlotConn, busy: boolean): Promise<Result>;
+  unregister(c: SlotConn): Promise<Result>;
+  next(c: SlotConn, attemptId?: string): Promise<Result>;
+  emitted(c: SlotConn, id: string): Promise<Result>;
+  emitLost(c: SlotConn): Promise<Result>;
+  ackTask(c: SlotConn, taskId: string, attemptId: string): Promise<Result>;
+  ackReply(c: SlotConn, questionId: string, replyId: string): Promise<Result>;
+  result(slot: string, a: Admission, status: "completed" | "failed", payload: string): Promise<Result>;
+  ask(slot: string, a: Admission, payload: string, o?: { question_id?: string; ttl_ms?: number }): Promise<Result>;
+  slotInfo(slot: string): Promise<Record<string, string>>;
+}
+
 export const key = {
   orch: `${PREFIX}orch`,
   open: `${PREFIX}open`,
@@ -45,6 +64,11 @@ export const key = {
   ready: (slot: string) => `${PREFIX}s:${slot}:ready`,
   inbox: (slot: string) => `${PREFIX}s:${slot}:inbox`,
   slotOpen: (slot: string) => `${PREFIX}s:${slot}:open`,
+  out: (slot: string) => `${PREFIX}s:${slot}:out`,
+  resp: (slot: string) => `${PREFIX}s:${slot}:resp`,
+  checkpoint: (slot: string) => `${PREFIX}ingest:${slot}`,
+  rejected: (slot: string) => `${PREFIX}rejected:${slot}`,
+  allowed: `${PREFIX}slots-allowed`,
   claim: (id: string) => `${PREFIX}claim:${id}`,
   dedup: (k: string) => `${PREFIX}dedup:${k}`,
   late: (id: string) => `${PREFIX}late:${id}`,
@@ -54,7 +78,7 @@ export const key = {
   wakelock: (thread: string) => `${PREFIX}wakelock:${thread}`,
 };
 
-export function newId(kind: "t" | "q" | "r" | "a" | "c" | "k" | "w"): string {
+export function newId(kind: "t" | "q" | "r" | "a" | "c" | "k" | "w" | "x"): string {
   return `${kind}-${crypto.randomUUID()}`;
 }
 
@@ -77,7 +101,7 @@ export async function loadLibrary(exec: Executor): Promise<void> {
   await exec.execute(["FUNCTION", "LOAD", "REPLACE", fs.readFileSync(LIBRARY_PATH, "utf8")]);
 }
 
-export class Bridge {
+export class Bridge implements SlotApi {
   readonly exec: Executor;
 
   constructor(exec: Executor) {

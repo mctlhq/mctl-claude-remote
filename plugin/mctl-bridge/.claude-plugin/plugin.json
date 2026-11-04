@@ -1,6 +1,6 @@
 {
   "name": "mctl-bridge",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "Bridge between a ChatGPT-app orchestrator on the Mac mini and Claude Code slots: queue and state machine, the mctl-bridge CLI, and the slot adapter (a Channels MCP server started per slot through --mcp-config).",
   "author": {
     "name": "MCTL",

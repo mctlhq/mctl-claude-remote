@@ -30,7 +30,8 @@ import readline from "node:readline";
 import { fileURLToPath } from "node:url";
 
 import { Bridge, newId } from "./store.ts";
-import type { Admission, Result, SlotConn } from "./store.ts";
+import type { Admission, Result, SlotApi, SlotConn } from "./store.ts";
+import { SlotLink } from "./slotlink.ts";
 import { Connection, endpointFromUrl } from "./valkey.ts";
 
 type Message = Record<string, any>;
@@ -152,7 +153,7 @@ function str(args: Record<string, unknown>, name: string): string {
 }
 
 export class Adapter {
-  private readonly bridge: Bridge;
+  private readonly bridge: SlotApi;
   private readonly cfg: Config;
   private readonly notify: (msg: Message) => Promise<void>;
   private conn: (SlotConn & { uuid: string }) | null = null;
@@ -166,7 +167,7 @@ export class Adapter {
   private current: Promise<void> | null = null;
   private readonly pidStart: string;
 
-  constructor(bridge: Bridge, cfg: Config, notify: (msg: Message) => Promise<void>) {
+  constructor(bridge: SlotApi, cfg: Config, notify: (msg: Message) => Promise<void>) {
     this.bridge = bridge;
     this.cfg = cfg;
     this.notify = notify;
@@ -315,8 +316,18 @@ export class Adapter {
     switch (name) {
       case "ack_task": {
         const taskId = str(args, "task_id");
-        const r = await this.bridge.ackTask(this.requireConn(), taskId, str(args, "attempt_id"));
-        if (r.ok) this.admissions.set(taskId, r.admission as Admission);
+        const conn = this.requireConn();
+        const attemptId = str(args, "attempt_id");
+        const r = await this.bridge.ackTask(conn, taskId, attemptId);
+        if (!r.ok) return r;
+        // The grant is good only for this task, attempt and registration. An answer that
+        // belongs to an earlier session (a replayed or delayed one) starts no work.
+        const g = r.admission as Admission | undefined;
+        if (!g || g.task_id !== taskId || g.attempt_id !== attemptId || g.conn_id !== conn.conn_id
+            || g.epoch !== conn.epoch || g.uuid !== conn.uuid || this.conn !== conn) {
+          return { ok: false, code: "stale_grant" };
+        }
+        this.admissions.set(taskId, g);
         return r;
       }
       case "ack_reply":
@@ -458,8 +469,24 @@ export async function main(): Promise<number> {
   const pwFile = process.env.MCTL_BRIDGE_VALKEY_PASSWORD_FILE;
   const password = pwFile ? fs.readFileSync(pwFile, "utf8").replace(/[\r\n]+$/, "") : null;
   const conn = new Connection(endpointFromUrl(url, password));
-  const bridge = new Bridge(conn);
-  await bridge.checkVersion();
+  // A slot credential cannot call functions: requests go through its own streams
+  // (src/slotlink.ts). `direct` calls the functions itself and exists for tests and
+  // for a trusted, single-slot setup.
+  const transport = process.env.MCTL_BRIDGE_TRANSPORT || "rpc";
+  let bridge: SlotApi;
+  if (transport === "direct") {
+    const direct = new Bridge(conn);
+    await direct.checkVersion();
+    bridge = direct;
+  } else if (transport === "rpc") {
+    bridge = new SlotLink(conn, slot, {
+      attemptMs: intEnv("MCTL_BRIDGE_RPC_ATTEMPT_MS", 4000),
+      attempts: intEnv("MCTL_BRIDGE_RPC_ATTEMPTS", 3),
+    });
+  } else {
+    log("MCTL_BRIDGE_TRANSPORT must be rpc or direct");
+    return 2;
+  }
 
   const cfg: Config = {
     slot,

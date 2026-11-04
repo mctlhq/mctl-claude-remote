@@ -67,7 +67,7 @@ export class ValkeyServer {
     this.proc = spawn(
       VALKEY_SERVER!,
       ["--port", String(this.port), "--bind", "127.0.0.1", ...persistence, "--dir", this.dir],
-      { stdio: "ignore" },
+      { stdio: process.env.VALKEY_LOG ? ["ignore", fs.openSync(process.env.VALKEY_LOG, "a"), "inherit"] : "ignore" },
     );
     const deadline = Date.now() + 10_000;
     for (;;) {
@@ -104,6 +104,30 @@ export class ValkeyServer {
     const conn = new Connection(endpointFromUrl(this.url));
     this.clients.push(conn);
     return conn;
+  }
+
+  /**
+   * A slot user as ops/slot.sh creates it: no functions, no scripting, and only its own
+   * request stream (write), response stream and inbox (read). Returns a connection for it.
+   */
+  async addSlot(slot: string, password = `pw-${slot}`): Promise<{ user: string; password: string; url: string; client: () => Connection }> {
+    const admin = this.client();
+    const user = `bridge_slot_${slot}`;
+    const p = "mctl:bridge:s:" + slot + ":";
+    await admin.execute([
+      "ACL", "SETUSER", user, "reset", "on", `>${password}`, "-@all", "+xadd", "+xread", "+xrevrange", "+ping",
+      `%W~${p}out`, `%R~${p}resp`, `%R~${p}inbox`,
+    ]);
+    await admin.execute(["SADD", "mctl:bridge:slots-allowed", slot]);
+    const url = this.url.replace("redis://", `redis://${user}@`);
+    return {
+      user, password, url,
+      client: () => {
+        const c = new Connection(endpointFromUrl(url, password));
+        this.clients.push(c);
+        return c;
+      },
+    };
   }
 
   async bridge(): Promise<Bridge> {
@@ -155,6 +179,7 @@ export class FakeClaude {
         MCTL_BRIDGE_STARTUP_GRACE_MS: "50",
         MCTL_BRIDGE_EMIT_HOLD_MS: "5000",
         CLAUDE_CODE_SESSION_ID: "",
+        MCTL_BRIDGE_TRANSPORT: "direct", // the adapter tests drive the functions; isolation.test.ts uses rpc
         ...o.env,
       },
       stdio: ["pipe", "pipe", "pipe"],

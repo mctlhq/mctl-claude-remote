@@ -6,10 +6,13 @@
 # Run from a checkout (or `git archive` copy) of plugin/mctl-bridge. Idempotent: it
 # keeps existing passwords and data, and replaces code, config and launchd jobs.
 #
-# MODE: trusted experiment. Every slot shares one Valkey user (`bridge_slot`), and
-# that user can write any bridge key: Valkey checks ACLs on every command and key a
-# function touches, so per-slot users cannot isolate the current keyspace. Do not
-# attach working slots to this install. Slice 4b replaces this boundary.
+# MODE (slice 4b): per-slot Valkey users. A slot user (`bridge_slot_<name>`, created by
+# slot.sh) has no FCALL at all: it may append to its own request stream and read its own
+# response stream and inbox, nothing else. Valkey checks ACLs on every command and key a
+# function touches, so a slot allowed to FCALL could write any key; the single ingester
+# (com.mctl.bridge-ingest, running as bridge_orch) applies the requests instead.
+# Host-level separation of slots from the operator's uid is a separate operator step and
+# is NOT done here: until it is, slot credential files are readable by the same uid.
 set -euo pipefail
 
 THREAD_ID=${1:?usage: install.sh <orchestrator thread id>}
@@ -26,7 +29,7 @@ UID_=$(id -u)
 
 umask 077
 mkdir -p $LA $H/etc $H/valkey/data $H/log $H/slots $H/plugin
-for u in admin orch slot; do
+for u in admin orch; do
   [[ -s $H/etc/$u.pw ]] || openssl rand -hex 24 > $H/etc/$u.pw
 done
 hash() { printf %s "$(cat $H/etc/$1.pw)" | shasum -a 256 | cut -d' ' -f1; }
@@ -34,12 +37,14 @@ hash() { printf %s "$(cat $H/etc/$1.pw)" | shasum -a 256 | cut -d' ' -f1; }
 # ACL file: no comment lines (a `#` line aborts startup); `#<sha256>` sets a password.
 # Only bridge_admin may load or delete the library (FUNCTION LOAD/DELETE/FLUSH are not
 # in @dangerous, so @scripting is removed and only FCALL and FUNCTION LIST are added).
+# Slot users are created by slot.sh and saved into this file with ACL SAVE: keep them.
+KEEP=$(grep '^user bridge_slot_' $H/etc/users.acl 2>/dev/null || true)
 cat > $H/etc/users.acl <<ACL
 user default off resetchannels -@all
 user bridge_admin on #$(hash admin) ~* &* +@all
 user bridge_orch on #$(hash orch) resetchannels ~mctl:bridge:* +@all -@admin -@dangerous -@scripting +fcall +fcall_ro +function|list +config|get
-user bridge_slot on #$(hash slot) resetchannels ~mctl:bridge:* +@all -@admin -@dangerous -@scripting +fcall +fcall_ro +function|list
 ACL
+[[ -z $KEEP ]] || print -r -- "$KEEP" >> $H/etc/users.acl
 
 cat > $H/etc/valkey.conf <<CONF
 bind 127.0.0.1
@@ -68,7 +73,7 @@ chmod 600 $HOME/.codex/rules/mctl-bridge.rules
 render() {
   sed -e "s|@HOME@|$HOME|g" -e "s|@H@|$H|g" -e "s|@BUN@|$BUN|g" -e "s|@THREAD@|$THREAD_ID|g" -e "s|@PORT@|$PORT|g" "$1"
 }
-for job in valkey waker; do
+for job in valkey ingest waker; do
   label=com.mctl.bridge-$job
   render $SRC/ops/$label.plist > $LA/$label.plist
   chmod 644 $LA/$label.plist
@@ -89,6 +94,8 @@ $V/valkey-cli -p $PORT --user bridge_admin --pass "$(cat $H/etc/admin.pw)" --no-
 MCTL_BRIDGE_VALKEY_URL=redis://bridge_admin@127.0.0.1:$PORT/0 MCTL_BRIDGE_VALKEY_PASSWORD_FILE=$H/etc/admin.pw \
   $BUN run --silent --no-env-file --config=$H/plugin/bunfig.toml $H/plugin/src/cli.ts init
 
+launchctl bootstrap gui/$UID_ $LA/com.mctl.bridge-ingest.plist
+launchctl kickstart gui/$UID_/com.mctl.bridge-ingest
 launchctl bootstrap gui/$UID_ $LA/com.mctl.bridge-waker.plist
 launchctl kickstart gui/$UID_/com.mctl.bridge-waker
-echo "installed: valkey :$PORT, waker on thread $THREAD_ID, CLI ~/.local/bin/mctl-bridge"
+echo "installed: valkey :$PORT, ingester, waker on thread $THREAD_ID, CLI ~/.local/bin/mctl-bridge"

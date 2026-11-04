@@ -3,8 +3,40 @@
 The queue and state machine between a ChatGPT-app orchestrator on the Mac mini and
 Claude Code slots. Design: [`docs/chatgpt-orchestrator-bridge.md`](../../docs/chatgpt-orchestrator-bridge.md).
 
-Slices 1 to 3: the server-side function library, the orchestrator's CLI, the slot
-adapter, and the waker with the sweeper. The Mac mini launcher (slice 4) is not here yet.
+Slices 1 to 4: the server-side function library, the orchestrator's CLI, the slot
+adapter, the waker with the sweeper, and the Mac mini launcher (`ops/`). Slice 4b adds
+the per-slot boundary below.
+
+## Slot isolation (slice 4b)
+
+A slot's Valkey user has **no FCALL and no scripting**: Valkey checks the ACL on every
+command and key a function touches, so a slot allowed to call functions could write any
+key. Instead the slot talks through three keys that are its own:
+
+- `mctl:bridge:s:<slot>:out` (write): requests `{rid, fn, args}`, `args` a JSON array of
+  strings without the slot.
+- `mctl:bridge:s:<slot>:resp` (read): answers `{rid, resp}`, written by the orchestrator side.
+- `mctl:bridge:s:<slot>:inbox` (read).
+
+One ingester (`src/ingest.ts`, running as `bridge_orch`) takes the slot from the stream
+name, never from the request, and applies each entry in one `FCALL bridge_ingest`: it
+checks the per-slot checkpoint, looks the request id up in a memo (a retry returns the
+stored answer; the same id with another request is refused as `rid_conflict`), runs the
+slot function, stores the memo and the answer, and advances the checkpoint, all together.
+A rejected entry is recorded under `mctl:bridge:rejected:<slot>` and the audit trail, the
+checkpoint moves on, and its request id is not remembered, so a forged id cannot suppress
+a later valid request. A slot can trim its own staging stream (`XADD ... MAXLEN 0`), so
+the adapter reports success only after reading an answer.
+
+The adapter's transport is `MCTL_BRIDGE_TRANSPORT=rpc` (default; `direct` is for tests
+and the trusted tooling). `ack_task` returns a grant only if its `task_id`, `attempt_id`,
+`conn_id`, `epoch`, `uuid` and the live connection all match; otherwise `stale_grant`
+and no work starts. `ops/slot.sh start` creates `bridge_slot_<name>`, its password file
+and the allow-list entry (`mctl:bridge:slots-allowed`).
+
+Not done by this slice: A and B still run under one OS account. Separate uids, protected
+credential files and the Codex socket are an operator step (needs sudo); until then the
+credential files of A and B are readable from either.
 
 ## Layout
 
