@@ -74,9 +74,9 @@ chmod 755 $H/mctl-bridge $H/slot.sh
 for f in codex-remote-guard.sh bridge-updater.sh wake-state.sh; do
   cp $SRC/ops/$f $H/$f.new && chmod 755 $H/$f.new && mv -f $H/$f.new $H/$f
 done
-# What the updater needs: the thread to wake, and what is installed.
+# What the updater needs: the thread to wake. It records the installed release in
+# $H/VERSION itself, only after this script exits 0.
 print -r -- "$THREAD_ID" > $H/etc/thread-id
-print -r -- "${MCTL_BRIDGE_VERSION:-manual}" > $H/VERSION
 mkdir -p $HOME/.local/bin
 ln -sfn $H/mctl-bridge $HOME/.local/bin/mctl-bridge
 

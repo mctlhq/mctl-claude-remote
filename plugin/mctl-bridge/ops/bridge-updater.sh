@@ -7,8 +7,11 @@
 #   2. otherwise the highest release tag (MAJOR.MINOR.PATCH, no "v") whose commit is an
 #      ancestor of origin main. main is protected and every change reaches it through a
 #      reviewed PR, so a tag on any other commit never deploys.
-# Installed state: $H/VERSION ("<tag> <commit>"). On a difference the tagged tree is
-# exported with git archive and ops/install.sh is run from that copy.
+# Installed state: $H/VERSION ("<tag> <commit>"), written by this script and only after
+# install.sh exits 0. On a difference the tagged tree is exported with git archive and
+# ops/install.sh is run from that copy. Without a pin the updater never goes backwards:
+# a tag that sorts below the installed one is reported, not installed (a tag pushed on an
+# old main commit cannot roll the mini back; only the operator's pin can).
 #
 # Safety:
 #  - "could not observe" is never "up to date": a failed fetch, an unreadable waker log or
@@ -52,7 +55,10 @@ main() {
   fi
   echo $$ > "$lock/pid"
   tmp=
-  trap 'rm -rf "$lock" "$tmp"' EXIT INT TERM
+  # In POSIX sh a signal handler returns into the script: exit explicitly, and let the
+  # EXIT trap release the lock.
+  trap 'rm -rf "$lock" "$tmp"' EXIT
+  trap 'exit 1' INT TERM
 
   git_dir=$H/updater/repo.git
   [ -d "$git_dir" ] || git init -q --bare "$git_dir" || return 1
@@ -87,7 +93,15 @@ main() {
   if [ "$have" = "$want $sha" ]; then
     return 0
   fi
-  if [ "$(cat "$H/etc/updater-failed" 2>/dev/null || true)" = "$want $sha" ]; then
+  if [ -z "$pin" ] && [ -n "$have" ]; then
+    # newest of the two by MAJOR.MINOR.PATCH; the installed one wins a tie
+    top=$(printf '%s\n%s\n' "${have%% *}" "$want" | sort -t. -k1,1nr -k2,2nr -k3,3nr | head -n 1)
+    if [ "${have%% *}" != "$want" ] && [ "$top" = "${have%% *}" ]; then
+      say "$want is older than the installed ${have%% *}; refusing to go back without etc/pin"
+      return 0
+    fi
+  fi
+  if [ -z "$pin" ] && [ "$(cat "$H/etc/updater-failed" 2>/dev/null || true)" = "$want $sha" ]; then
     say "$want ($sha) failed to install earlier; waiting for a newer release or a pin"
     return 0
   fi
@@ -109,9 +123,10 @@ main() {
     echo "$want $sha" > "$H/etc/updater-failed"
     return 1
   fi
-  if MCTL_BRIDGE_HOME=$H MCTL_BRIDGE_FROM_UPDATER=1 MCTL_BRIDGE_VERSION="$want $sha" \
+  if MCTL_BRIDGE_HOME=$H MCTL_BRIDGE_FROM_UPDATER=1 \
       "$ZSH" "$tmp/$SUB/ops/install.sh" "$thread"; then
     rm -f "$H/etc/updater-failed"
+    printf '%s\n' "$want $sha" > "$H/VERSION" || { say "installed $want but could not write $H/VERSION"; return 1; }
     say "now on $want ($sha)"
     return 0
   fi

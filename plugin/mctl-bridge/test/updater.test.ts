@@ -25,7 +25,7 @@ function commit(repo: string, marker: string, opts: { failInstall?: boolean } = 
   fs.mkdirSync(dir, { recursive: true });
   fs.writeFileSync(
     path.join(dir, "install.sh"),
-    `#!/bin/zsh\nprint -r -- "${marker} thread=$1 home=$MCTL_BRIDGE_HOME ver=$MCTL_BRIDGE_VERSION fromupd=$MCTL_BRIDGE_FROM_UPDATER" >> "$MCTL_BRIDGE_HOME/installs"\n${opts.failInstall ? "exit 3" : "exit 0"}\n`,
+    `#!/bin/zsh\nprint -r -- "${marker} thread=$1 home=$MCTL_BRIDGE_HOME fromupd=$MCTL_BRIDGE_FROM_UPDATER" >> "$MCTL_BRIDGE_HOME/installs"\n${opts.failInstall ? "exit 3" : "exit 0"}\n`,
   );
   git(repo, "add", "-A");
   git(repo, "commit", "-q", "-m", marker);
@@ -53,14 +53,17 @@ function setup() {
 }
 
 describe.skipIf(!usable)("bridge-updater", () => {
-  test("installs the highest release tag on main, with thread id, home and version", () => {
+  test("installs the highest release tag on main, with thread id and home, and records the version after success", () => {
     const t = setup();
     commit(t.repo, "a"); git(t.repo, "tag", "0.9.0");
     commit(t.repo, "b"); git(t.repo, "tag", "0.10.0"); // numeric, not lexical: 0.10.0 > 0.9.0
     const sha = git(t.repo, "rev-parse", "HEAD");
     const r = t.run();
     expect(r.status).toBe(0);
-    expect(t.installs()).toEqual([`b thread=thread-1 home=${t.H} ver=0.10.0 ${sha} fromupd=1`]);
+    expect(t.installs()).toEqual([`b thread=thread-1 home=${t.H} fromupd=1`]);
+    expect(t.version()).toBe(`0.10.0 ${sha}`);
+    t.run();
+    expect(t.installs()).toHaveLength(1); // stable: no reinstall loop
   });
 
   test("an unchanged release is not installed again", () => {
@@ -109,7 +112,37 @@ describe.skipIf(!usable)("bridge-updater", () => {
     t.run();
     expect(t.installs()).toHaveLength(1);
     expect(t.installs()[0]).toContain("a thread");
-    expect(t.version()).toBeNull(); // the stub does not write it; install.sh does
+    expect(t.version()).toBe(`1.0.0 ${git(t.repo, "rev-list", "-n", "1", "1.0.0")}`);
+    t.run();
+    expect(t.installs()).toHaveLength(1); // a release whose install.sh never wrote VERSION does not loop
+  });
+
+  test("without a pin the updater never goes backwards; a pin can", () => {
+    const t = setup();
+    commit(t.repo, "a"); git(t.repo, "tag", "1.0.0");
+    commit(t.repo, "b"); git(t.repo, "tag", "1.1.0");
+    t.run();
+    expect(t.installs()).toHaveLength(1);
+    // installed is newer than the declared release (e.g. a tag pushed on an old main commit)
+    fs.writeFileSync(path.join(t.H, "VERSION"), `5.0.0 ${"1".repeat(40)}\n`);
+    const r = t.run();
+    expect(r.out).toContain("refusing to go back");
+    expect(t.installs()).toHaveLength(1);
+    fs.writeFileSync(path.join(t.H, "etc", "pin"), "1.0.0\n");
+    t.run();
+    expect(t.installs()).toHaveLength(2);
+    expect(t.installs()[1]).toContain("a thread");
+  });
+
+  test("a pin overrides the failed-release marker", () => {
+    const t = setup();
+    commit(t.repo, "bad", { failInstall: true }); git(t.repo, "tag", "1.0.0");
+    t.run();
+    t.run();
+    expect(t.installs()).toHaveLength(1);
+    fs.writeFileSync(path.join(t.H, "etc", "pin"), "1.0.0\n");
+    t.run();
+    expect(t.installs()).toHaveLength(2);
   });
 
   test("a pin to a tag that is not on main is refused", () => {
@@ -161,6 +194,7 @@ describe.skipIf(!usable)("bridge-updater", () => {
     const t = setup();
     commit(t.repo, "bad", { failInstall: true }); git(t.repo, "tag", "1.0.0");
     expect(t.run().status).toBe(1);
+    expect(t.version()).toBeNull(); // a failed install never records the version
     expect(t.run().status).toBe(0); // skipped, not retried
     expect(t.installs()).toHaveLength(1);
     expect(fs.existsSync(path.join(t.H, "etc", "updater-failed"))).toBe(true);
@@ -186,12 +220,12 @@ describe.skipIf(!usable)("bridge-updater", () => {
 
   // install.sh needs Valkey and launchd, so its updater-related guarantees are checked on
   // the script text; the mutations in mutate.py prove each of these lines matters.
-  test("install.sh: never boots out the updater job from inside the updater, swaps scripts by rename, records thread and version", () => {
+  test("install.sh: never boots out the updater job from inside the updater, swaps scripts by rename, records the thread id and leaves VERSION to the updater", () => {
     const src = fs.readFileSync(path.join(OPS, "install.sh"), "utf8");
     expect(src).toContain("if [[ -z ${MCTL_BRIDGE_FROM_UPDATER:-} ]]; then\n  launchctl bootout gui/$UID_/$upd");
     expect(src).toContain("mv -f $H/$f.new $H/$f");
     expect(src).toContain('print -r -- "$THREAD_ID" > $H/etc/thread-id');
-    expect(src).toContain('print -r -- "${MCTL_BRIDGE_VERSION:-manual}" > $H/VERSION');
+    expect(src).not.toContain("> $H/VERSION");
     for (const f of ["codex-remote-guard.sh", "bridge-updater.sh", "wake-state.sh"]) expect(src).toContain(f);
   });
 });
