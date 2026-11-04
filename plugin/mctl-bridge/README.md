@@ -118,6 +118,13 @@ bun run --silent --no-env-file src/cli.ts wakes
 bun run --silent --no-env-file src/cli.ts resolve w-... --reason "no turn in the thread"
 ```
 
+Free text (`send` payload, `reply` text, `resolve` reason) takes exactly one source,
+so that no shell has to quote it: `--text T`, `--stdin` (or `--text -`) or
+`--file PATH`. stdin and file text is UTF-8, byte-exact except that one trailing
+newline is dropped (a here-document always adds one). Zero or several sources exit 2.
+Use `reply Q --token T --stdin <<'EOF'` for anything with quotes, `$`, backticks,
+backslashes or newlines.
+
 Exit status: 0 done, 1 refused by the state machine (the JSON says why), 2 usage or
 connection error. `init` reports the server's persistence as `durable` only for
 `appendonly yes` with `appendfsync always`.

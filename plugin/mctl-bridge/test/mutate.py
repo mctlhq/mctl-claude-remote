@@ -6,7 +6,7 @@ profile) and runs `bun test`; every mutation must make at least one test fail.
 Run from plugin/mctl-bridge:  python3 test/mutate.py [name ...]
 """
 import subprocess, sys, shutil
-LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'
+LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'
 M=[
  ("fencing off", LUA, "local function fenced(s, conn, epoch)\n  return", "local function fenced(s, conn, epoch)\n  do return false end\n  return", 1),
  ("busy gate off", LUA, "if s.busy ~= '0' then return no('busy') end", "", 1),
@@ -91,6 +91,17 @@ M=[
  ("adapter accepts a grant after re-registering", CH, "|| g.uuid !== conn.uuid || this.conn !== conn) {", "|| g.uuid !== conn.uuid) {", 1),
  ("link does not retry", "src/slotlink.ts", "for (let attempt = 0; attempt < this.attempts; attempt++) {", "for (let attempt = 0; attempt < 1; attempt++) {", 1),
  ("link retries under a new request id", "src/slotlink.ts", "await this.exec.execute([\"XADD\", key.out(this.slot), \"*\", \"rid\", rid,", "await this.exec.execute([\"XADD\", key.out(this.slot), \"*\", \"rid\", attempt === 0 ? rid : newId(\"x\"),", 1),
+
+ ("cli trims stdin text", CLI, 'return stripOneNewline(fs.readFileSync(0, "utf8"));', 'return fs.readFileSync(0, "utf8").trim();', 1),
+ ("cli keeps the trailing newline", CLI, 'return stripOneNewline(fs.readFileSync(0, "utf8"));', 'return fs.readFileSync(0, "utf8");', 1),
+ ("cli ignores --file", CLI, "  if (file !== undefined) {\n    try {", "  if (false) {\n    try {", 1),
+ ("cli accepts several text sources", CLI, "if (given !== 1) throw", "if (given === 0) throw", 1),
+ ("cli resolve reason ignores stdin", CLI, 'return result(await b.resolve(id, values.as, readText(values, "reason"),', 'return result(await b.resolve(id, values.as, values.reason ?? "",', 1),
+ ("slot.sh json not escaped", SLOT, "sys.stdout.write(json.dumps(sys.argv[1]))", "sys.stdout.write('\"' + sys.argv[1] + '\"')", 1),
+ ("slot.sh hook path unquoted", SLOT, "${(qq)H}/plugin/hooks/state.py", "$H/plugin/hooks/state.py", 1),
+ ("slot.sh run.sh cd unquoted", SLOT, "cd ${(qq)repo:A}", 'cd "${repo:A}"', 1),
+ ("slot.sh run.sh settings path unquoted", SLOT, "--settings ${(qq)d}/settings.json", "--settings $d/settings.json", 1),
+ ("slot.sh run.sh PATH unquoted", SLOT, "export PATH=${(qq)HOME}/.local/bin", 'export PATH=$HOME/.local/bin', 1),
 
  ("no fsync", SUP, '"--appendfsync", "always"', '"--appendfsync", "no"', 1),
  ("no aof", SUP, '["--save", "", "--appendonly", "yes", "--appendfsync", "always"]', '["--save", "", "--appendonly", "no"]', 1),

@@ -13,7 +13,8 @@ Mode: **trusted experiment** (slice 4). Test slots only; no working repositories
 - `mctl-bridge send --slot <name> --text '<task>'`: queue a task. Prints the task id.
 - `mctl-bridge status <id>`: one task or question with its audit trail.
 - `mctl-bridge claim <question id>`: take the right to answer. Prints `claim_token`.
-- `mctl-bridge reply <question id> --token <claim_token> --text '<answer>'`: commit the answer.
+- `mctl-bridge reply <question id> --token <claim_token> --file <path>`: commit the answer
+  from a file (see "Reply text" below). `--text '<answer>'` only for a short, plain answer.
 - `mctl-bridge errors`: `delivery_unknown`, `wake_unknown` and late evidence.
 - `mctl-bridge tasks`, `mctl-bridge wakes`: everything still open.
 
@@ -26,12 +27,30 @@ The waker started this turn because a slot's question waited unanswered.
 2. Claim it. If the claim is refused, someone else is answering: stop.
 3. Reply once with the answer. Then end the turn.
 
+## Reply text
+
+Never put reply text that has more than plain words inside `--text '...'`: an
+apostrophe, double quote, backtick, `$(...)`, backslash, newline or a leading `--`
+is mangled or executed by the shell before the CLI sees it. Hand the text over
+without a shell in between:
+
+1. Preferred: write the answer to a file with your file-editing tool (not a shell
+   command), then run `mctl-bridge reply <question id> --token <claim_token> --file <path>`.
+   This is a plain command, so the command rules match it.
+2. Otherwise pipe it through a quoted here-document, with the quotes on the marker
+   so nothing inside is expanded:
+   `mctl-bridge reply <question id> --token <claim_token> --stdin <<'EOF'` ...
+   `EOF`. This form is not matched by the command rules and waits for an approval.
+
+The text is taken exactly as written, UTF-8, newlines kept; one trailing newline is
+dropped. Give exactly one of `--text`, `--stdin`, `--file`; the same flags work on
+`send` and as the reason of `resolve`.
+
 ## Rules
 
-- Run each `mctl-bridge` command on its own, with `--text` in single quotes. If the
-  text contains an apostrophe, rephrase it instead of pasting it verbatim. Pipes,
-  redirects, heredocs and shell variables stop the command rules from matching and make
-  the thread wait for an approval nobody is there to give.
+- Run each `mctl-bridge` command on its own. Pipes, redirects, heredocs and shell
+  variables stop the command rules from matching and make the thread wait for an
+  approval nobody is there to give.
 
 - A reply never grants approval, merge, deploy or lifecycle actions. Those follow the
   workspace rules and the slot's own permission prompts.

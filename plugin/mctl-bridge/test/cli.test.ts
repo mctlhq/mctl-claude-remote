@@ -2,6 +2,8 @@
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { spawnSync } from "node:child_process";
+import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -98,6 +100,90 @@ describe.skipIf(requiresValkey)("mctl-bridge CLI", () => {
     expect(cli(["resolve", wake.wake_id, "--author", "op"]).code).toBe(2); // a reason is required
     expect(cli(["resolve", wake.wake_id, "--reason", "no turn in the thread", "--author", "op"]).code).toBe(0);
     expect(cli(["wakes"]).out.wakes.map((w: any) => w.id)).not.toContain(wake.wake_id);
+  });
+
+  test("free text from stdin or a file arrives byte-exact, with no shell in between", async () => {
+    const b = new Bridge(server.client());
+    const reg = must(await b.register({ slot: "t", uuid: "u", conn_id: "kt", pid: 11, pid_start: "s", cwd: "/w" }));
+    const c = { slot: "t", conn_id: "kt", epoch: reg.epoch };
+    must(await b.heartbeat(c, false));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-text-"));
+    const marker = path.join(dir, "SHOULD_NOT_EXIST");
+    const bodies = [
+      `it's "quoted" $(touch ${marker}) \`touch ${marker}\` back\\slash \\n \${"$"}HOME`,
+      "line one\n\n  indented line\r\nline three\ttabbed\n\nlast",
+      "--looks-like-a-flag and -x",
+      "unicode: \u00e9\u4e2d\ud83d\ude00",
+    ];
+    let n = 0;
+    for (const body of bodies) {
+      for (const via of ["stdin", "file"]) {
+        const sent = must(await b.send({ slot: "t", payload: `task ${n++}` }));
+        const next = must(await b.next(c));
+        must(await b.emitted(c, sent.id));
+        const ack = must(await b.ackTask(c, sent.id, next.attempt_id));
+        const q = must(await b.ask("t", ack.admission, "which?"));
+        const claim = cli(["claim", q.question_id]);
+        // a here-document ends the text with exactly one newline: it is dropped, nothing else is
+        let r;
+        if (via === "stdin") {
+          r = cli(["reply", q.question_id, "--token", claim.out.claim_token, "--stdin"], body + "\n");
+        } else {
+          const f = path.join(dir, `body-${n}`);
+          fs.writeFileSync(f, body + "\n");
+          r = cli(["reply", q.question_id, "--token", claim.out.claim_token, "--file", f]);
+        }
+        expect(r.code).toBe(0);
+        // the text the slot is handed is the text that was typed
+        const got = must(await b.next(c));
+        expect(got).toMatchObject({ kind: "reply", id: q.question_id });
+        expect(got.payload).toBe(body);
+        must(await b.emitted(c, q.question_id));
+        must(await b.ackReply(c, q.question_id, got.reply_id));
+        must(await b.result("t", ack.admission, "completed", "ok"));
+      }
+    }
+    expect(fs.existsSync(marker)).toBe(false);
+    // only the one trailing newline is dropped: a second one survives
+    const sent = must(await b.send({ slot: "t", payload: "x" }));
+    const next = must(await b.next(c));
+    must(await b.emitted(c, sent.id));
+    const ack = must(await b.ackTask(c, sent.id, next.attempt_id));
+    const q = must(await b.ask("t", ack.admission, "again?"));
+    const claim = cli(["claim", q.question_id]);
+    cli(["reply", q.question_id, "--token", claim.out.claim_token, "--stdin"], "a\n\n");
+    expect(must(await b.next(c)).payload).toBe("a\n");
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("send takes its payload from stdin or a file, and resolve its reason", async () => {
+    const b = new Bridge(server.client());
+    must(await b.register({ slot: "t2", uuid: "u", conn_id: "k2", pid: 12, pid_start: "s", cwd: "/w" }));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "cli-text-"));
+    const body = `it's "x" $(touch ${dir}/NOPE)\nsecond line`;
+    const sent = cli(["send", "--slot", "t2", "--stdin"], body + "\n");
+    expect(sent.code).toBe(0);
+    expect(Object.values(cli(["status", sent.out.id]).out.message)).toContain(body);
+    fs.writeFileSync(path.join(dir, "p"), body);
+    const sent2 = cli(["send", "--slot", "t2", "--file", path.join(dir, "p")]);
+    expect(Object.values(cli(["status", sent2.out.id]).out.message)).toContain(body);
+    const why = `it's "late" \`ok\`\nbecause`;
+    expect(cli(["resolve", sent.out.id, "--as", "cancelled", "--stdin", "--author", "op"], why + "\n").code).toBe(0);
+    expect(JSON.stringify(cli(["status", sent.out.id]).out.audit)).toContain(JSON.stringify(why).slice(1, -1));
+    expect(fs.existsSync(path.join(dir, "NOPE"))).toBe(false);
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("zero or several text sources, or an unreadable file, exit 2", () => {
+    const args = ["reply", "q-1", "--token", "c-1"];
+    expect(cli(args).code).toBe(2);
+    expect(cli([...args, "--text", "a", "--stdin"], "b").code).toBe(2);
+    expect(cli([...args, "--text", "a", "--file", "/etc/hosts"]).code).toBe(2);
+    expect(cli([...args, "--stdin", "--file", "/etc/hosts"], "b").code).toBe(2);
+    expect(cli([...args, "--file", "/nonexistent/file"]).code).toBe(2);
+    expect(cli(["send", "--slot", "t2", "--text", "a", "--stdin"], "b").code).toBe(2);
+    expect(cli(["resolve", "t-1", "--as", "failed", "--reason", "a", "--stdin"], "b").code).toBe(2);
+    expect(cli(["resolve", "t-1", "--as", "failed", "--author", "op"]).code).toBe(2);
   });
 
   test("usage errors exit 2", () => {
