@@ -1,6 +1,6 @@
 {
   "name": "mctl-bridge",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "license": "MIT",
   "description": "Valkey-backed bridge between a ChatGPT-app orchestrator and Claude Code slots. Runs on Bun with no runtime dependencies.",

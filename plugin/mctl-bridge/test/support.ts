@@ -24,6 +24,14 @@ function which(name: string): string | null {
 
 export const VALKEY_SERVER = which("valkey-server") ?? which("redis-server");
 /** CI installs a server; without one these tests cannot say anything. */
+/** The server limits ops/install.sh writes into valkey.conf (a test keeps the two equal). */
+export const SERVER_LIMITS: Array<[string, string]> = [
+  ["proto-max-bulk-len", "1048576"],
+  ["client-query-buffer-limit", "1048576"],
+  ["maxmemory", "256mb"],
+  ["maxmemory-policy", "noeviction"],
+];
+
 export const requiresValkey = VALKEY_SERVER === null;
 
 export const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
@@ -66,7 +74,7 @@ export class ValkeyServer {
       : ["--save", "", "--appendonly", "no"];
     this.proc = spawn(
       VALKEY_SERVER!,
-      ["--port", String(this.port), "--bind", "127.0.0.1", ...persistence, "--dir", this.dir],
+      ["--port", String(this.port), "--bind", "127.0.0.1", ...persistence, ...SERVER_LIMITS.flat().map((v, i) => (i % 2 === 0 ? `--${v}` : v)), "--dir", this.dir],
       { stdio: process.env.VALKEY_LOG ? ["ignore", fs.openSync(process.env.VALKEY_LOG, "a"), "inherit"] : "ignore" },
     );
     const deadline = Date.now() + 10_000;

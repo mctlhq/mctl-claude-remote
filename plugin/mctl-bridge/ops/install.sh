@@ -55,6 +55,13 @@ aclfile $H/etc/users.acl
 appendonly yes
 appendfsync always
 save ""
+# Write volume. A slot may XADD to its own request stream, and the ACL cannot cap how
+# much. These bound ONE request (1 MiB is the floor Valkey accepts; requests are <= 40000
+# bytes) and the whole dataset; they do not stop a flood of valid-sized entries.
+proto-max-bulk-len 1048576
+client-query-buffer-limit 1048576
+maxmemory 256mb
+maxmemory-policy noeviction
 logfile $H/log/valkey.log
 CONF
 

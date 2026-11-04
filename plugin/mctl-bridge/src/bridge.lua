@@ -24,7 +24,7 @@
 -- Every function returns a JSON object: {"ok":true,...} or {"ok":false,"code":...}.
 -- Rejections are data, not errors: a fenced or stale caller is an expected event.
 
-local VERSION = '3'
+local VERSION = '4'
 local P = 'mctl:bridge:'
 local MAX_PAYLOAD = 16384
 local MAX_HOP = 4
@@ -722,12 +722,38 @@ local function ingest(keys, a)
   return ok({ applied = true })
 end
 
--- ARGV: slot, entry_id, reason. For an entry whose handling raised an error.
+-- ARGV: slot, entry_id, reason, rid, fn, args_json. For an entry whose handling raised
+-- an error. Valkey functions do not roll back writes made before the error, so the
+-- failing handler must never run again for this request id: when the id is valid and has
+-- no memo yet, the rejection becomes the stored answer (same memo as a normal one), goes
+-- to the slot's response stream, and a retry of the same request returns it. A retry that
+-- carries another request under the same id is still a rid_conflict.
 local function ingest_poison(keys, a)
   local slot, entry, reason = a[1], a[2], a[3] or 'handler_error'
+  local rid, fn, raw = a[4], a[5], a[6]
   if keys[1] ~= ORCH or not valid_slot(slot) or not valid_entry(entry) then return no('bad_request') end
   if id_cmp(entry, redis.call('GET', checkpoint_key(slot)) or '0-0') <= 0 then return ok({ skipped = true }) end
-  ingest_reject(slot, entry, nil, nil, reason, now_ms())
+  local now = now_ms()
+  if not valid_id(rid) or type(fn) ~= 'string' or type(raw) ~= 'string' or MAX_REQUEST < #raw then
+    ingest_reject(slot, entry, nil, nil, reason, now)
+    return ok()
+  end
+  local memo = P .. 'rpc:' .. slot .. ':' .. rid
+  local seen = redis.call('HMGET', memo, 'fn', 'args', 'resp')
+  if seen[3] then
+    if seen[1] ~= fn or seen[2] ~= raw then
+      ingest_reject(slot, entry, rid, fn, 'rid_conflict', now)
+    else
+      redis.call('XADD', resp_key(slot), 'MAXLEN', '~', RESP_MAXLEN, '*', 'rid', rid, 'resp', seen[3])
+      checkpoint(slot, entry)
+    end
+    return ok()
+  end
+  -- Record the entry (rejected stream and audit) without a second answer, then memoize.
+  local body = no('rejected', { reason = reason })
+  redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', body, 'entry', entry, 't', now)
+  redis.call('PEXPIRE', memo, RETAIN_MS)
+  ingest_reject(slot, entry, rid, fn, reason, now)
   return ok()
 end
 

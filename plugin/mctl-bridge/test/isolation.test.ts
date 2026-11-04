@@ -15,7 +15,7 @@ import { Bridge, key, newId, pairs, text } from "../src/store.ts";
 import type { Admission, Result } from "../src/store.ts";
 import { ValkeyError } from "../src/valkey.ts";
 import type { Connection, Reply } from "../src/valkey.ts";
-import { FakeClaude, ValkeyServer, requiresValkey, sleep } from "./support.ts";
+import { FakeClaude, SERVER_LIMITS, ValkeyServer, requiresValkey, sleep } from "./support.ts";
 
 let server: ValkeyServer;
 let b: Bridge; // the orchestrator role
@@ -300,6 +300,55 @@ describe.skipIf(requiresValkey)("slot isolation", () => {
     expect(text((await raw.execute(["GET", key.checkpoint("a")]))!)).toBe(bad);
     const rej = (await raw.execute(["XRANGE", key.rejected("a"), "-", "+"])) as Reply[];
     expect(pairs((rej[0] as Reply[])[1]!).reason).toBe("handler_error");
+  });
+
+  test("a request whose handler raises is answered once and never reruns on retry", async () => {
+    // A string where the slot hash should be makes the handler raise WRONGTYPE.
+    await raw.execute(["SET", "mctl:bridge:s:a:slot", "not a hash"]);
+    await submit(A, { rid: "x-boom", fn: "status", args: "[]" });
+    await settle();
+    const first = (await responses("a")).filter((r) => r.rid === "x-boom");
+    expect(first.length).toBe(1);
+    expect(JSON.parse(first[0]!.resp!)).toMatchObject({ ok: false, code: "rejected", reason: "handler_error" });
+    expect(text((await raw.execute(["HGET", "mctl:bridge:rpc:a:x-boom", "fn"]))!)).toBe("status");
+
+    // The fault is gone, the slot retries the same id: the stored answer comes back and
+    // the handler does not run (a rerun would now succeed).
+    await raw.execute(["DEL", "mctl:bridge:s:a:slot"]);
+    await submit(A, { rid: "x-boom", fn: "status", args: "[]" });
+    await settle();
+    const again = (await responses("a")).filter((r) => r.rid === "x-boom");
+    expect(again.length).toBe(2);
+    expect(again[1]!.resp).toBe(first[0]!.resp);
+
+    // Another request under the same id is still a conflict, and a new id works.
+    await submit(A, { rid: "x-boom", fn: "heartbeat", args: "[]" });
+    await submit(A, { rid: "x-fresh", fn: "status", args: "[]" });
+    await settle();
+    const all = await responses("a");
+    expect(JSON.parse(all.filter((r) => r.rid === "x-boom")[2]!.resp!)).toMatchObject({ code: "rejected", reason: "rid_conflict" });
+    expect(JSON.parse(all.find((r) => r.rid === "x-fresh")!.resp!)).toMatchObject({ ok: true });
+  });
+
+  test("the server refuses an oversize request from a slot and changes nothing", async () => {
+    const before = await raw.execute(["XLEN", key.out("a")]);
+    const dbsize = await raw.execute(["DBSIZE"]);
+    let refused = false;
+    try {
+      await submit(A, { rid: "x-big", fn: "status", args: JSON.stringify(["z".repeat(2 * 1024 * 1024)]) });
+    } catch {
+      refused = true; // an error reply or a closed connection: both are a refusal
+    }
+    expect(refused).toBe(true);
+    expect(await raw.execute(["XLEN", key.out("a")])).toBe(before);
+    expect(await raw.execute(["DBSIZE"])).toBe(dbsize);
+    // The server and the slot's credentials are fine afterwards.
+    must(await new SlotLink(A.client(), "a").rpc("status", []));
+  });
+
+  test("ops/install.sh writes the same server limits the tests run with", () => {
+    const conf = fs.readFileSync(path.join(import.meta.dir, "../ops/install.sh"), "utf8");
+    for (const [k, v] of SERVER_LIMITS) expect(conf).toContain(`\n${k} ${v}\n`);
   });
 });
 
