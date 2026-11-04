@@ -149,6 +149,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
     try {
       const closed = run();
       expect(closed).toContain("PASS read operator secret .codex/auth.json: DENIED");
+      expect(closed).toContain("FAIL read operator secret .codex/config.toml: ABSENT"); // unobservable is a failure, never a skip
       expect(closed).toContain("PASS signal foreign pid 1: DENIED");
       expect(closed).toContain("PASS connect Codex control socket (default path): DENIED");
       fs.chmodSync(secret, 0o644);
@@ -161,13 +162,20 @@ describe.skipIf(!usable)("launcher scripts", () => {
 
   test("the probe launcher hands every slot run a foreign pid to try to signal", () => {
     const t = setup();
-    stub(path.join(t.root, "bin", "sudo"), `echo "$@" >> "${t.record}/sudo"; exit 0`);
+    stub(path.join(t.root, "bin", "sudo"), `printf '%s\\n' "$*" >> "${t.record}/sudo"; exit 0`); // printf: dash's echo would expand the backslashes in the hostile paths
     const r = spawnSync("zsh", [path.join(OPS, "host-boundary-probe.sh"), "s1", "s2"], { env: t.env, encoding: "utf8" });
     expect(r.status).toBe(0);
     const calls = fs.readFileSync(path.join(t.record, "sudo"), "utf8").trim().split("\n");
     expect(calls.length).toBe(2);
     for (const c of calls) expect(c).toMatch(/ pid=\d+ pid=1$/);
     fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
+  test.skipIf(!usable)("the probe refuses a malformed pid argument instead of silently dropping it", () => {
+    const r = spawnSync("/usr/bin/python3", ["-I", path.join(OPS, "host-boundary-probe.py"), "/nonexistent", "/nonexistent", "x", "y", "pid=abc"], { encoding: "utf8" });
+    expect(r.status).not.toBe(0);
+    expect(r.stderr).toContain("bad argument");
+    expect(r.stdout).not.toContain("PASS");
   });
 
   test("ops/mctl-bridge passes its arguments and a hostile home path through unchanged", () => {

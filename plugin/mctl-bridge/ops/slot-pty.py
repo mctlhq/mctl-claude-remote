@@ -58,7 +58,8 @@ def serve(d, argv):
         try: done = os.waitpid(pid, os.WNOHANG)[0]
         except ChildProcessError: done = pid
         if not done: return False
-        while select.select([fd], [], [], 0)[0]:
+        for _ in range(64):  # bounded: a grandchild that keeps writing must not trap the host here
+            if not select.select([fd], [], [], 0)[0]: break
             try: data = os.read(fd, 65536)
             except OSError: break
             if not data: break
@@ -72,7 +73,7 @@ def serve(d, argv):
             except OSError: data = b""
             if data: absorb(data)
             else: reap()
-        elif alive: child_exited()
+        if alive: child_exited()  # every pass: a grandchild that keeps writing keeps fd readable
         if not alive and died_at is not None and time.time() - died_at > GRACE:
             break
         if srv not in r: continue

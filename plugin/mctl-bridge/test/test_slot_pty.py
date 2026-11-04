@@ -53,11 +53,17 @@ class PtyHost(unittest.TestCase):
         # the child prints and exits while a background grandchild still holds the pty open
         # the grandchild leaves the session (setsid), so the pty hangup that would give the host
         # an EOF never reaches it: only waitpid can tell that the child is gone
-        code = "import os,time\nprint('tail-output',flush=True)\nif os.fork()==0:\n os.setsid(); time.sleep(60); os._exit(0)\n"
+        code = "import os,time\nprint('tail-output',flush=True)\nif os.fork()==0:\n os.setsid(); time.sleep(8); os._exit(0)\n"
         run("start", self.d, sys.executable, "-c", code)
         self.assertTrue(wait_for(lambda: os.path.exists(os.path.join(self.d, "ctl.sock"))))
         self.assertTrue(wait_for(lambda: run("ping", self.d).returncode != 0), "a grandchild on the pty kept a finished slot alive")
         self.assertIn("tail-output", run("show", self.d).stdout, "output before the exit was lost")
+
+    def test_a_grandchild_that_keeps_writing_does_not_hide_the_exit(self):
+        code = "import os,time\nprint('first',flush=True)\nif os.fork()==0:\n os.setsid()\n for _ in range(200):\n  print('noise',flush=True); time.sleep(0.05)\n os._exit(0)\n"
+        run("start", self.d, sys.executable, "-c", code)
+        self.assertTrue(wait_for(lambda: os.path.exists(os.path.join(self.d, "ctl.sock"))))
+        self.assertTrue(wait_for(lambda: run("ping", self.d).returncode != 0, 6), "constant output from a grandchild hid the child's exit")
 
     def test_stop_after_the_child_exited_signals_nothing(self):
         run("start", self.d, "/bin/sh", "-c", "exit 0")

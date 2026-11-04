@@ -12,14 +12,18 @@ import glob, os, socket, sys
 
 H, OPHOME, own, *rest = sys.argv[1:]
 others = [a for a in rest if not a.startswith("pid=")]
-foreign = [int(a[4:]) for a in rest if a.startswith("pid=") and a[4:].isdigit()]
+foreign = []
+for a in rest:
+    if a.startswith("pid="):
+        if not a[4:].isdigit(): sys.exit(f"bad argument {a!r}: a pid must be a number")  # never drop it silently
+        foreign.append(int(a[4:]))
 users = {s: f"/Users/mctl-slot-{s}" for s in [own, *others]}
 rows = []
 
 def attempt(name, expect, fn):
     try:
         fn(); got = "ALLOWED"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         got = "ABSENT"
     except PermissionError:
         got = "DENIED"
@@ -68,8 +72,9 @@ else:
 # secrets in the operator home: the files are 0600 and must stay unreadable even where the
 # directory above them can be traversed (the home itself is 0711)
 for rel in [".codex/auth.json", ".codex/config.toml", ".codex/history.jsonl", ".config/gh/hosts.yml", ".config/claude-runner/secret.env", ".claude/.credentials.json", ".claude.json", ".zsh_history"]:
-    if os.path.exists(f"{OPHOME}/{rel}"):
-        attempt(f"read operator secret {rel}", "DENIED", read1(f"{OPHOME}/{rel}"))
+    # no os.path.exists here: it turns PermissionError into False and would skip the very
+    # secrets the boundary hides. A target that cannot be told apart from absent is a FAIL.
+    attempt(f"read operator secret {rel}", "DENIED", read1(f"{OPHOME}/{rel}"))
 # a process of another user must not be signalled (signal 0 only asks whether it may)
 def kill0(pid):
     def f(): os.kill(pid, 0)

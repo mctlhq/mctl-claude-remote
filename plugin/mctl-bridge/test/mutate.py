@@ -122,6 +122,8 @@ M=[
  ("probe never tries the Codex socket", "ops/host-boundary-probe.py", 'attempt("connect Codex control socket (default path)", "DENIED", connect(', 'attempt("connect Codex control socket (default path)", "DENIED", lambda: None or (', 1),
  ("probe never signals foreign pids", "ops/host-boundary-probe.py", 'attempt(f"signal foreign pid {pid}", "DENIED", kill0(pid))', 'pass', 1),
  ("probe.sh passes no foreign pids", "ops/host-boundary-probe.sh", " pid=$$ pid=1", "", 1),
+ ("probe drops a malformed pid silently", "ops/host-boundary-probe.py", 'if not a[4:].isdigit(): sys.exit(', 'if False: sys.exit(', 1),
+ ("probe skips secrets it cannot stat", "ops/host-boundary-probe.py", '    attempt(f"read operator secret {rel}", "DENIED", read1(f"{OPHOME}/{rel}"))', '    if os.path.exists(f"{OPHOME}/{rel}"): attempt(f"read operator secret {rel}", "DENIED", read1(f"{OPHOME}/{rel}"))', 1),
  ("slot.sh mcp reads the operator password", SLOT, '$(json "$d/slot.pw")', '$(json "$pw")', 1),
 
  ("poison memo off", LUA, "  redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', body, 'entry', entry, 't', now)\n  redis.call('PEXPIRE', memo, RETAIN_MS)\n  ingest_reject(slot, entry, rid, fn, reason, now)", "  ingest_reject(slot, entry, rid, fn, reason, now)", 1),
