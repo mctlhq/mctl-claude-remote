@@ -67,8 +67,8 @@ CONF
 
 # Code: only what runs. No runtime dependencies.
 rsync -a --delete --exclude node_modules --exclude test --exclude ops "$SRC/" $H/plugin/
-cp $SRC/ops/mctl-bridge $SRC/ops/slot.sh $SRC/ops/slot-pty.py $SRC/ops/host-boundary-probe.sh $SRC/ops/host-boundary-probe.py $H/
-chmod 755 $H/mctl-bridge $H/slot.sh
+cp $SRC/ops/mctl-bridge $SRC/ops/slot.sh $SRC/ops/slot-pty.py $SRC/ops/host-boundary-probe.sh $SRC/ops/host-boundary-probe.py $SRC/ops/codex-remote-guard.sh $H/
+chmod 755 $H/mctl-bridge $H/slot.sh $H/codex-remote-guard.sh
 mkdir -p $HOME/.local/bin
 ln -sfn $H/mctl-bridge $HOME/.local/bin/mctl-bridge
 
@@ -105,4 +105,12 @@ launchctl bootstrap gui/$UID_ $LA/com.mctl.bridge-ingest.plist
 launchctl kickstart gui/$UID_/com.mctl.bridge-ingest
 launchctl bootstrap gui/$UID_ $LA/com.mctl.bridge-waker.plist
 launchctl kickstart gui/$UID_/com.mctl.bridge-waker
+# Keeps the Codex app-server managed and reachable from the ChatGPT app (see the script).
+guard=com.mctl.codex-remote-guard
+render $SRC/ops/$guard.plist > $LA/$guard.plist
+chmod 644 $LA/$guard.plist
+launchctl bootout gui/$UID_/$guard 2>/dev/null || true
+for i in {1..50}; do launchctl print gui/$UID_/$guard >/dev/null 2>&1 || break; sleep 0.2; done
+launchctl bootstrap gui/$UID_ $LA/$guard.plist
+launchctl kickstart gui/$UID_/$guard
 echo "installed: valkey :$PORT, ingester, waker on thread $THREAD_ID, CLI ~/.local/bin/mctl-bridge"
