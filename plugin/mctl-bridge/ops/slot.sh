@@ -18,6 +18,9 @@ MAX=${MCTL_BRIDGE_MAX_SLOTS:-2}
 MODEL=${MCTL_BRIDGE_SLOT_MODEL:-haiku}
 cmd=${1:-}; shift || true
 
+# A JSON string literal for $1 (escapes quotes, backslashes, control characters).
+json() { /usr/bin/python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$1"; }
+
 admin() { $H/valkey/bin/valkey-cli -p ${MCTL_BRIDGE_PORT:-6390} --user bridge_admin --pass "$(cat $H/etc/admin.pw)" --no-auth-warning "$@"; }
 
 running() { screen -ls 2>/dev/null | grep -oE '[0-9]+\.bridge-slot-[a-z0-9-]+' | sed 's/.*bridge-slot-//' || true; }
@@ -42,23 +45,27 @@ case $cmd in
     admin SADD mctl:bridge:slots-allowed $s >/dev/null
     admin ACL SAVE >/dev/null
     # Credentials reach only the MCP process, through its own env block.
+    # Paths are data: every value is JSON-encoded for the JSON files and zsh-quoted
+    # (${(qq)...}: single quotes, safe for sh too) where a shell reads it.
+    bun=${BUN:-$HOME/.bun/bin/bun}; port=${MCTL_BRIDGE_PORT:-6390}
     cat > $d/mcp.json <<JSON
-{"mcpServers":{"mctl-bridge":{"command":"${BUN:-$HOME/.bun/bin/bun}","args":["run","--silent","--no-env-file","--config=$H/plugin/bunfig.toml","$H/plugin/src/channel.ts"],
- "env":{"MCTL_BRIDGE_SLOT":"$s","MCTL_BRIDGE_TRANSPORT":"rpc","MCTL_BRIDGE_VALKEY_URL":"redis://bridge_slot_$s@127.0.0.1:${MCTL_BRIDGE_PORT:-6390}/0","MCTL_BRIDGE_VALKEY_PASSWORD_FILE":"$pw"}}}}
+{"mcpServers":{"mctl-bridge":{"command":$(json "$bun"),"args":["run","--silent","--no-env-file",$(json "--config=$H/plugin/bunfig.toml"),$(json "$H/plugin/src/channel.ts")],
+ "env":{"MCTL_BRIDGE_SLOT":$(json "$s"),"MCTL_BRIDGE_TRANSPORT":"rpc","MCTL_BRIDGE_VALKEY_URL":$(json "redis://bridge_slot_$s@127.0.0.1:$port/0"),"MCTL_BRIDGE_VALKEY_PASSWORD_FILE":$(json "$pw")}}}}
 JSON
-    hook="/usr/bin/python3 $H/plugin/hooks/state.py"
+    hook=$(json "/usr/bin/python3 ${(qq)H}/plugin/hooks/state.py")
     cat > $d/settings.json <<JSON
-{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"$hook"}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":"$hook"}]}],"Stop":[{"hooks":[{"type":"command","command":"$hook"}]}]}}
+{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":$hook}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":$hook}]}],"Stop":[{"hooks":[{"type":"command","command":$hook}]}]}}
 JSON
     tools=mcp__mctl-bridge__ack_task,mcp__mctl-bridge__ack_reply,mcp__mctl-bridge__ask_orchestrator,mcp__mctl-bridge__report_result,mcp__mctl-bridge__bridge_status
+    mkdir -p $H/log
     cat > $d/run.sh <<RUN
 #!/bin/zsh
-export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
+export PATH=${(qq)HOME}/.local/bin:/usr/local/bin:/usr/bin:/bin
 export ENABLE_CLAUDEAI_MCP_SERVERS=false
-cd "${repo:A}"
-exec claude --model $MODEL --mcp-config $d/mcp.json --strict-mcp-config --settings $d/settings.json \\
+cd ${(qq)repo:A}
+exec claude --model ${(qq)MODEL} --mcp-config ${(qq)d}/mcp.json --strict-mcp-config --settings ${(qq)d}/settings.json \\
   --dangerously-load-development-channels server:mctl-bridge \\
-  --allowedTools $tools --permission-mode default 2>>$H/log/slot-$s.err
+  --allowedTools $tools --permission-mode default 2>>${(qq)H}/log/slot-$s.err
 RUN
     chmod 700 $d/run.sh
     screen -dmS bridge-slot-$s $d/run.sh

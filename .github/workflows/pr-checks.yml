@@ -25,8 +25,8 @@ jobs:
       # The Channel adapter's tests run against a real server: stream and
       # consumer-group semantics are the thing under test, so a fake would only
       # prove the fake. Ubuntu's redis-server speaks the same Streams protocol.
-      - name: Install Redis-protocol server for adapter tests
-        run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-server
+      - name: Install Redis-protocol server and zsh for adapter and launcher tests
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-server zsh
 
       - name: Inbound events adapter and PTY launcher tests
         run: python3 -m unittest discover -s events/tests -p 'test_*.py' -v

@@ -7,6 +7,6 @@ prefix_rule(
     pattern = ["mctl-bridge", ["sessions", "tasks", "status", "errors", "wakes", "claim", "renew", "reply", "send", "wait"]],
     decision = "allow",
     justification = "mctl-bridge orchestrator CLI: local Valkey as bridge_orch, no other access",
-    match = [["mctl-bridge", "status", "q-1"], ["mctl-bridge", "reply", "q-1", "--token", "c-1", "--text", "yes"]],
+    match = [["mctl-bridge", "status", "q-1"], ["mctl-bridge", "reply", "q-1", "--token", "c-1", "--text", "yes"], ["mctl-bridge", "reply", "q-1", "--token", "c-1", "--file", "/w/answer.txt"], ["mctl-bridge", "reply", "q-1", "--token", "c-1", "--stdin"]],
     not_match = [["mctl-bridge", "resolve", "t-1", "--as", "failed", "--reason", "x"], ["mctl-bridge", "init"], ["mctl-bridge-x", "status"]],
 )

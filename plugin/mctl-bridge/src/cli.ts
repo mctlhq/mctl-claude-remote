@@ -17,14 +17,17 @@ import type { Reply } from "./valkey.ts";
 const USAGE = `usage: mctl-bridge <command> [options]
 
   init                                   load the function library, report durability
-  send --slot S (--text T | --text -)    queue a task for a slot
+  send --slot S (--text T | --stdin | --file PATH)   queue a task for a slot
        [--idem KEY] [--ttl MS] [--hop N]
   wait [--timeout SEC]                   unclaimed questions and new events
   claim QID [--lease MS]                 take the right to reply
   renew QID --token T [--lease MS]
-  reply QID --token T (--text T | --text -)
-  resolve ID --as completed|failed|cancelled|closed|requeue --reason R [--author A] [--force]
-  resolve WAKE_ID --reason R [--author A]   close a wake (w-...) after looking at the thread
+  reply QID --token T (--text T | --stdin | --file PATH)
+  resolve ID --as completed|failed|cancelled|closed|requeue (--reason R | --stdin | --file PATH) [--author A] [--force]
+  resolve WAKE_ID (--reason R | --stdin | --file PATH) [--author A]   close a wake (w-...)
+
+Exactly one text source per call. Use --stdin with a quoted here-document for any
+text that is not trivially safe in a shell; one trailing newline is dropped.
   sessions                               registered slots
   tasks                                  every open message
   status ID                              one message with its audit trail and late evidence
@@ -43,9 +46,32 @@ function connect(): Connection {
   return new Connection(endpointFromUrl(url, password));
 }
 
-function readText(value: string | undefined): string {
-  if (value === undefined) throw new Usage("--text is required");
-  return value === "-" ? fs.readFileSync(0, "utf8") : value;
+// Free text comes from exactly one source, so that no shell has to quote it:
+//   --text T          inline (simple, trusted text only)
+//   --text -, --stdin the whole of stdin, UTF-8
+//   --file PATH       the whole file, UTF-8
+// stdin and file text lose exactly one trailing newline (a here-document always
+// ends in one, and `printf %s` adds none); every other byte is kept as it is. Inline
+// --text is never altered.
+function stripOneNewline(s: string): string {
+  return s.endsWith("\n") ? s.slice(0, -1) : s;
+}
+
+function readText(values: Record<string, string | boolean | undefined>, textFlag: "text" | "reason"): string {
+  const inline = values[textFlag] as string | undefined;
+  const useStdin = values.stdin === true || inline === "-";
+  const file = values.file as string | undefined;
+  const given = [inline !== undefined && inline !== "-", useStdin, file !== undefined].filter(Boolean).length;
+  if (given !== 1) throw new Usage(`exactly one of --${textFlag}, --stdin or --file is required`);
+  if (useStdin) return stripOneNewline(fs.readFileSync(0, "utf8"));
+  if (file !== undefined) {
+    try {
+      return stripOneNewline(fs.readFileSync(file, "utf8"));
+    } catch (err) {
+      throw new Usage(`cannot read --file: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return inline!;
 }
 
 function positional(args: string[], name: string): string {
@@ -88,6 +114,8 @@ export async function run(argv: string[], b: Bridge): Promise<{ code: number; ou
     options: {
       slot: { type: "string" },
       text: { type: "string" },
+      stdin: { type: "boolean" },
+      file: { type: "string" },
       idem: { type: "string" },
       ttl: { type: "string" },
       hop: { type: "string" },
@@ -113,7 +141,7 @@ export async function run(argv: string[], b: Bridge): Promise<{ code: number; ou
       if (!values.slot) throw new Usage("--slot is required");
       return result(await b.send({
         slot: values.slot,
-        payload: readText(values.text),
+        payload: readText(values, "text"),
         idempotency_key: values.idem,
         ttl_ms: num(values.ttl, 0, "--ttl"),
         hop: num(values.hop, 0, "--hop"),
@@ -143,17 +171,16 @@ export async function run(argv: string[], b: Bridge): Promise<{ code: number; ou
       return result(await b.renew(positional(positionals, "QID"), values.token, num(values.lease, 120000, "--lease")));
     case "reply":
       if (!values.token) throw new Usage("--token is required");
-      return result(await b.reply(positional(positionals, "QID"), values.token, readText(values.text)));
+      return result(await b.reply(positional(positionals, "QID"), values.token, readText(values, "text")));
     case "resolve": {
       const id = positional(positionals, "ID");
       const author = values.author || process.env.USER || "";
       if (!author) throw new Usage("--author is required when USER is not set");
       if (id.startsWith("w-")) {
-        if (!values.reason) throw new Usage("--reason is required");
-        return result(await b.wakeResolve(id, values.reason, author));
+        return result(await b.wakeResolve(id, readText(values, "reason"), author));
       }
-      if (!values.as || !values.reason) throw new Usage("--as and --reason are required");
-      return result(await b.resolve(id, values.as, values.reason, author, values.force === true));
+      if (!values.as) throw new Usage("--as is required");
+      return result(await b.resolve(id, values.as, readText(values, "reason"), author, values.force === true));
     }
     case "sessions": {
       const now = Date.now();
