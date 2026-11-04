@@ -103,6 +103,12 @@ M=[
  ("slot.sh run.sh settings path unquoted", SLOT, "--settings ${(qq)d}/settings.json", "--settings $d/settings.json", 1),
  ("slot.sh run.sh PATH unquoted", SLOT, "export PATH=${(qq)HOME}/.local/bin", 'export PATH=$HOME/.local/bin', 1),
 
+ ("poison memo off", LUA, "  redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', body, 'entry', entry, 't', now)\n  redis.call('PEXPIRE', memo, RETAIN_MS)\n  ingest_reject(slot, entry, rid, fn, reason, now)", "  ingest_reject(slot, entry, rid, fn, reason, now)", 1),
+ ("poison ingester drops the request id", "src/ingest.ts", '"handler_error", f.rid ?? "", f.fn ?? "", f.args ?? ""]', '"handler_error"]', 1),
+ ("server bulk limit off", SUP, '["proto-max-bulk-len", "1048576"]', '["proto-max-bulk-len", "536870912"]', 1),
+ ("server query buffer limit off", SUP, '["client-query-buffer-limit", "1048576"]', '["client-query-buffer-limit", "1073741824"]', 1),
+ ("install.sh bulk limit off", "ops/install.sh", "proto-max-bulk-len 1048576", "proto-max-bulk-len 536870912", 1),
+ ("install.sh maxmemory off", "ops/install.sh", "maxmemory 256mb\n", "", 1),
  ("no fsync", SUP, '"--appendfsync", "always"', '"--appendfsync", "no"', 1),
  ("no aof", SUP, '["--save", "", "--appendonly", "yes", "--appendfsync", "always"]', '["--save", "", "--appendonly", "no"]', 1),
 ]

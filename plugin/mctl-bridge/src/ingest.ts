@@ -73,7 +73,7 @@ export class Ingester {
       // block every later request from this slot: record it as a rejection and go on.
       if (!(err instanceof ValkeyError)) throw err;
       log("handler error, entry rejected", { slot, entry, error: err.message });
-      await call("bridge_ingest_poison", [slot, entry, "handler_error"]);
+      await call("bridge_ingest_poison", [slot, entry, "handler_error", f.rid ?? "", f.fn ?? "", f.args ?? ""]);
     }
     this.cursors.set(slot, entry);
   }
