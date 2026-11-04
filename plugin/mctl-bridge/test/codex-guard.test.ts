@@ -13,13 +13,13 @@ const usable = spawnSync("sh", ["-c", "command -v awk tail"]).status === 0;
 
 const MANAGED = "22468 /x/bin/codex app-server --remote-control --listen unix:// --managed-daemon";
 const UNMANAGED = "686 codex -c features.code_mode_host=true app-server --listen unix://";
-const PROXY = "690 codex app-server proxy";
+const PROXY = "690 codex app-server proxy --listen unix://";
 const w = (msg: string) => JSON.stringify({ t: "2026-11-04T21:47:54.158Z", src: "mctl-bridge-waker", msg });
 
 function run(opts: { ps: string[]; log?: string[] | null; killFails?: boolean }) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "guard-")));
   const rec = path.join(root, "rec");
-  fs.writeFileSync(path.join(root, "ps"), `#!/bin/sh\ncat <<'EOF2'\n${opts.ps.join("\n")}\nEOF2\n`, { mode: 0o755 });
+  fs.writeFileSync(path.join(root, "ps"), `#!/bin/sh\necho "$*" > "${root}/psargs"\ncat <<'EOF2'\n${opts.ps.join("\n")}\nEOF2\n`, { mode: 0o755 });
   fs.writeFileSync(path.join(root, "kill"), `#!/bin/sh\necho "kill $*" >> "${rec}"\n${opts.killFails ? "exit 1" : "exit 0"}\n`, { mode: 0o755 });
   fs.writeFileSync(path.join(root, "codex"), `#!/bin/sh\necho "codex $*" >> "${rec}"\n`, { mode: 0o755 });
   const log = path.join(root, "waker.log");
@@ -29,7 +29,9 @@ function run(opts: { ps: string[]; log?: string[] | null; killFails?: boolean })
     env: { ...process.env, MCTL_GUARD_PS: path.join(root, "ps"), MCTL_GUARD_KILL: path.join(root, "kill"), MCTL_GUARD_CODEX: path.join(root, "codex"), MCTL_GUARD_WAKER_LOG: log, MCTL_GUARD_SLEEP: "0" },
   });
   const calls = fs.existsSync(rec) ? fs.readFileSync(rec, "utf8").trim().split("\n") : [];
-  return { status: r.status, out: r.stdout, calls };
+  const psArgs = fs.readFileSync(path.join(root, "psargs"), "utf8");
+  fs.rmSync(root, { recursive: true, force: true });
+  return { status: r.status, out: r.stdout, calls, psArgs };
 }
 
 describe.skipIf(!usable)("codex-remote-guard", () => {
@@ -71,6 +73,18 @@ describe.skipIf(!usable)("codex-remote-guard", () => {
     expect(r.status).toBe(0);
     expect(r.calls).toEqual([]);
     expect(r.out).toContain("unreadable");
+  });
+
+  test("a wake stays open when the waker then logs thousands of other lines", () => {
+    const noise = Array.from({ length: 3000 }, () => w("sweep"));
+    const r = run({ ps: [UNMANAGED], log: [w("started"), w("wake intent"), w("wake started"), ...noise] });
+    expect(r.calls).toEqual([]);
+    expect(r.out).toContain("wake is in flight");
+  });
+
+  test("a long command line is read whole: ps is asked for no truncation", () => {
+    const r = run({ ps: [MANAGED], log: [w("started")] });
+    expect(r.psArgs).toMatch(/^-\w*ww\b/);
   });
 
   test("a proxy alone is a client, not a server: nothing happens", () => {

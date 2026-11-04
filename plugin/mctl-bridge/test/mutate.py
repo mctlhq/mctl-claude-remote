@@ -149,7 +149,9 @@ M=[
  ("guard restart does not clear open wake", GUARD, '  /"msg":"started"/ { s = "idle" }\n', '', 1),
  ("guard failed wake stays open", GUARD, ' || /"msg":"wake failed"/', '', 1),
  ("guard ignores kill failure", GUARD, '$KILL "$pid" || { say "could not stop pid $pid"; exit 1; }', '$KILL "$pid" || true', 1),
- ("guard never starts the daemon", GUARD, '"$CODEX" remote-control start >/dev/null 2>&1 ||', 'true ||', 1),
+ ("guard ps truncates", GUARD, '-axww -o pid=,command=', '-ax -o pid=,command=', 1),
+ ("guard wake scan is a fixed tail", GUARD, "state=$(grep -E '\"msg\":\"(wake (intent|started|completed|failed|no longer ours)|started)\"' \"$WAKER_LOG\" | tail -n 50 | awk '", "state=$(tail -n 400 \"$WAKER_LOG\" | awk '", 1),
+ ("guard never starts the daemon", GUARD, '"$CODEX" remote-control start 2>&1 ||', 'true ||', 1),
 ]
 
 def parse_shard(spec, total=None):

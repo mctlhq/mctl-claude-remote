@@ -12,16 +12,18 @@
 # control. Never kills while a wake is in flight (the turn would be lost), and never
 # touches a server that already has --remote-control.
 #
-# Test seams: MCTL_GUARD_CODEX (codex binary), MCTL_GUARD_PS (command printing
-# "pid command" lines), MCTL_GUARD_WAKER_LOG, MCTL_GUARD_KILL, MCTL_GUARD_SLEEP.
+# Test seams: MCTL_GUARD_CODEX (codex binary), MCTL_GUARD_PS (a ps
+# replacement printing "pid command" lines), MCTL_GUARD_WAKER_LOG, MCTL_GUARD_KILL, MCTL_GUARD_SLEEP.
 set -u
 CODEX=${MCTL_GUARD_CODEX:-$HOME/.local/bin/codex}
 WAKER_LOG=${MCTL_GUARD_WAKER_LOG:-${MCTL_BRIDGE_HOME:-$HOME/mctl-bridge}/log/waker.log}
 KILL=${MCTL_GUARD_KILL:-kill}
 say() { printf '%s codex-remote-guard: %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
+# -ww: BSD ps cuts the command at 80 columns when piped, which would drop a trailing
+# --remote-control and make a healthy daemon look unmanaged.
 list() {
-  if [ -n "${MCTL_GUARD_PS:-}" ]; then "$MCTL_GUARD_PS"; else ps -axo pid=,command=; fi
+  "${MCTL_GUARD_PS:-ps}" -axww -o pid=,command=
 }
 
 # Servers that listen on a unix socket. `app-server proxy` is a client, not a server.
@@ -44,7 +46,9 @@ if [ ! -r "$WAKER_LOG" ]; then
   say "waker log unreadable ($WAKER_LOG); not restarting"
   exit 0
 fi
-state=$(tail -n 400 "$WAKER_LOG" | awk '
+# Only wake and start events matter; filtering first keeps a chatty log from pushing an
+# open wake out of a fixed-size window.
+state=$(grep -E '"msg":"(wake (intent|started|completed|failed|no longer ours)|started)"' "$WAKER_LOG" | tail -n 50 | awk '
   /"msg":"wake intent"/ || /"msg":"wake started"/ { s = "open" }
   /"msg":"wake completed"/ || /"msg":"wake failed"/ || /"msg":"wake no longer ours"/ { s = "idle" }
   /"msg":"started"/ { s = "idle" }
@@ -60,5 +64,5 @@ for pid in $bad; do
 done
 sleep "${MCTL_GUARD_SLEEP:-3}"
 say "starting the managed daemon with remote control"
-"$CODEX" remote-control start >/dev/null 2>&1 || { say "codex remote-control start failed"; exit 1; }
+"$CODEX" remote-control start 2>&1 || { say "codex remote-control start failed"; exit 1; }
 say "done"
