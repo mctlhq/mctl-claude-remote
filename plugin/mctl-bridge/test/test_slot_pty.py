@@ -49,6 +49,16 @@ class PtyHost(unittest.TestCase):
         time.sleep(0.5)
         self.assertEqual(run("ping", self.d).returncode, 0, "a client hanging up killed the host")
 
+    def test_grandchild_holding_the_pty_does_not_keep_the_slot_alive(self):
+        # the child prints and exits while a background grandchild still holds the pty open
+        # the grandchild leaves the session (setsid), so the pty hangup that would give the host
+        # an EOF never reaches it: only waitpid can tell that the child is gone
+        code = "import os,time\nprint('tail-output',flush=True)\nif os.fork()==0:\n os.setsid(); time.sleep(60); os._exit(0)\n"
+        run("start", self.d, sys.executable, "-c", code)
+        self.assertTrue(wait_for(lambda: os.path.exists(os.path.join(self.d, "ctl.sock"))))
+        self.assertTrue(wait_for(lambda: run("ping", self.d).returncode != 0), "a grandchild on the pty kept a finished slot alive")
+        self.assertIn("tail-output", run("show", self.d).stdout, "output before the exit was lost")
+
     def test_stop_after_the_child_exited_signals_nothing(self):
         run("start", self.d, "/bin/sh", "-c", "exit 0")
         self.assertTrue(wait_for(lambda: os.path.exists(os.path.join(self.d, "ctl.sock"))))

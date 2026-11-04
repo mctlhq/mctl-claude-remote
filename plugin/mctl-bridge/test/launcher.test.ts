@@ -138,6 +138,38 @@ describe.skipIf(!usable)("launcher scripts", () => {
     fs.rmSync(t.root, { recursive: true, force: true });
   });
 
+  test.skipIf(!usable || process.getuid?.() === 0)("the probe really tries the operator secrets, a foreign pid and the Codex socket, and goes red when one is open", () => {
+    const root = fs.realpathSync(fs.mkdtempSync("/tmp/pr-"));
+    const op = path.join(root, "op");
+    const secret = path.join(op, ".codex", "auth.json");
+    fs.mkdirSync(path.join(op, ".codex", "app-server-control"), { recursive: true });
+    fs.writeFileSync(secret, "x", { mode: 0o000 });
+    fs.chmodSync(path.join(op, ".codex", "app-server-control"), 0o000);
+    const run = () => spawnSync("/usr/bin/python3", ["-I", path.join(OPS, "host-boundary-probe.py"), path.join(root, "H"), op, "x", "y", "pid=1"], { encoding: "utf8" }).stdout;
+    try {
+      const closed = run();
+      expect(closed).toContain("PASS read operator secret .codex/auth.json: DENIED");
+      expect(closed).toContain("PASS signal foreign pid 1: DENIED");
+      expect(closed).toContain("PASS connect Codex control socket (default path): DENIED");
+      fs.chmodSync(secret, 0o644);
+      expect(run()).toContain("FAIL read operator secret .codex/auth.json: ALLOWED");
+    } finally {
+      fs.chmodSync(path.join(op, ".codex", "app-server-control"), 0o700);
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("the probe launcher hands every slot run a foreign pid to try to signal", () => {
+    const t = setup();
+    stub(path.join(t.root, "bin", "sudo"), `echo "$@" >> "${t.record}/sudo"; exit 0`);
+    const r = spawnSync("zsh", [path.join(OPS, "host-boundary-probe.sh"), "s1", "s2"], { env: t.env, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    const calls = fs.readFileSync(path.join(t.record, "sudo"), "utf8").trim().split("\n");
+    expect(calls.length).toBe(2);
+    for (const c of calls) expect(c).toMatch(/ pid=\d+ pid=1$/);
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
   test("ops/mctl-bridge passes its arguments and a hostile home path through unchanged", () => {
     const t = setup();
     const bun = path.join(t.root, "bin", "fakebun");

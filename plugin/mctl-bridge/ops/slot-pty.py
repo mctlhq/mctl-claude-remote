@@ -41,23 +41,38 @@ def serve(d, argv):
     buf = b""; alive = True; died_at = None
     GRACE = 300  # keep serving this long after the child ends, so `show` can read the tail
     mine = os.stat(path).st_ino
-    def reap():
+    def reap(reaped=False):
         nonlocal alive, died_at
         if alive:
             alive = False; died_at = time.time()
-            try: os.waitpid(pid, 0)
-            except ChildProcessError: pass
+            if not reaped:
+                try: os.waitpid(pid, 0)
+                except ChildProcessError: pass
+    def absorb(data):
+        nonlocal buf
+        buf = (buf + data)[-200000:]
+        with open(log, "wb") as f: f.write(buf)
+    def child_exited():
+        # A grandchild may keep the pty open, so EOF never comes. Notice the exit by waitpid,
+        # but only after draining what the pty still holds, so no output is lost.
+        try: done = os.waitpid(pid, os.WNOHANG)[0]
+        except ChildProcessError: done = pid
+        if not done: return False
+        while select.select([fd], [], [], 0)[0]:
+            try: data = os.read(fd, 65536)
+            except OSError: break
+            if not data: break
+            absorb(data)
+        reap(reaped=True)
+        return True
     while True:
         r, _, _ = select.select([fd, srv] if alive else [srv], [], [], 1.0)
         if fd in r:
             try: data = os.read(fd, 65536)
             except OSError: data = b""
-            if data:
-                buf = (buf + data)[-200000:]
-                with open(log, "wb") as f: f.write(buf)
-            else:
-                reap()
-        # death is noticed on read EOF only: reaping earlier could drop output still in the pty
+            if data: absorb(data)
+            else: reap()
+        elif alive: child_exited()
         if not alive and died_at is not None and time.time() - died_at > GRACE:
             break
         if srv not in r: continue

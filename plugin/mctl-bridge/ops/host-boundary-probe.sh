@@ -13,6 +13,6 @@ for s in $slots; do
   others=(${slots:#$s})
   (( ${#others} >= 1 )) || { echo "no other slot for $s: refusing to pass" >&2; exit 1; }
   echo "== as mctl-slot-$s =="
-  sudo -n -H -u mctl-slot-$s /usr/bin/python3 -I $probe $H $HOME $s $others || rc=1
+  sudo -n -H -u mctl-slot-$s /usr/bin/python3 -I $probe $H $HOME $s $others pid=$$ pid=1 || rc=1
 done
 (( rc == 0 )) && echo "ALL BOUNDARY CHECKS PASSED" || { echo "BOUNDARY CHECK FAILED" >&2; exit 1; }
