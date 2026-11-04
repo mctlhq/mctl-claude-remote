@@ -60,8 +60,9 @@ for s in "$@"; do
   # one (random password kept in the user's own .mctl-bridge/keychain.pw, mode 600).
   sudo -n -H -u "$u" sh -c 'cd /; umask 077; K=$HOME/Library/Keychains/login.keychain-db; P=$HOME/.mctl-bridge/keychain.pw
     [ -s $P ] || openssl rand -hex 24 > $P
-    # the password goes in on stdin, never on argv, where every local user could read it
-    [ -e $K ] || { cat $P; cat $P; } | security create-keychain $K >/dev/null
+    # `security -i` reads its commands on stdin: the password stays off argv (any local user
+    # could read it with ps) and off the terminal prompt, which would read /dev/tty instead
+    [ -e $K ] || printf "create-keychain -p %s %s\n" "$(cat $P)" "$K" | security -i >/dev/null
     security default-keychain -s $K; security list-keychains -d user -s $K; security set-keychain-settings $K'
   users+=($u)
 done

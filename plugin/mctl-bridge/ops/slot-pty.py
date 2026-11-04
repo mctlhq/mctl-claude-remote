@@ -57,11 +57,8 @@ def serve(d, argv):
                 with open(log, "wb") as f: f.write(buf)
             else:
                 reap()
-        if alive:
-            try:
-                if os.waitpid(pid, os.WNOHANG)[0]: alive = False; died_at = time.time()
-            except ChildProcessError: alive = False; died_at = time.time()
-        elif died_at is not None and time.time() - died_at > GRACE:
+        # death is noticed on read EOF only: reaping earlier could drop output still in the pty
+        if not alive and died_at is not None and time.time() - died_at > GRACE:
             break
         if srv not in r: continue
         c, _ = srv.accept()

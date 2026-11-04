@@ -100,13 +100,16 @@ JSON
 {"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":$hook}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":$hook}]}],"Stop":[{"hooks":[{"type":"command","command":$hook}]}]}}
 JSON
     tools=mcp__mctl-bridge__ack_task,mcp__mctl-bridge__ack_reply,mcp__mctl-bridge__ask_orchestrator,mcp__mctl-bridge__report_result,mcp__mctl-bridge__bridge_status
+    # In run.sh below the unlock goes through security's interactive mode on stdin: the password
+    # never reaches argv, and without -p a plain unlock would read /dev/tty (the session's pty)
+    # and wedge the slot. (No backticks in the heredoc: it is expanded when written.)
     put $d/run.sh 700 <<RUN
 #!/bin/zsh
 export PATH=${(qq)sh_home}/.local/bin:/usr/local/bin:/usr/bin:/bin
 export ENABLE_CLAUDEAI_MCP_SERVERS=false
 # Claude Code keeps its login in the user's login keychain: unlock it for this session.
 kc=${(qq)d}/keychain.pw
-[[ -r \$kc ]] && security unlock-keychain ${(qq)sh_home}/Library/Keychains/login.keychain-db < \$kc >/dev/null 2>&1
+[[ -r \$kc ]] && printf 'unlock-keychain -p %s %s\\n' "\$(<\$kc)" ${(qq)sh_home}/Library/Keychains/login.keychain-db | security -i >/dev/null 2>&1
 cd ${(qq)repo:A}
 exec claude --model ${(qq)MODEL} --mcp-config ${(qq)d}/mcp.json --strict-mcp-config --settings ${(qq)d}/settings.json \\
   --dangerously-load-development-channels server:mctl-bridge \\
