@@ -111,7 +111,12 @@ M=[
  ("slot.sh hook path unquoted", SLOT, "${(qq)H}/plugin/hooks/state.py", "$H/plugin/hooks/state.py", 1),
  ("slot.sh run.sh cd unquoted", SLOT, "cd ${(qq)repo:A}", 'cd "${repo:A}"', 1),
  ("slot.sh run.sh settings path unquoted", SLOT, "--settings ${(qq)d}/settings.json", "--settings $d/settings.json", 1),
- ("slot.sh run.sh PATH unquoted", SLOT, "export PATH=${(qq)HOME}/.local/bin", 'export PATH=$HOME/.local/bin', 1),
+ ("slot.sh run.sh PATH unquoted", SLOT, "export PATH=${(qq)sh_home}/.local/bin", 'export PATH=$sh_home/.local/bin', 1),
+ ("slot.sh runs without the slot user", SLOT, "elif [[ ${MCTL_BRIDGE_TRUSTED_EXPERIMENT:-0} == 1 ]]; then", "elif true; then", 1),
+ ("slot.sh password copy world-readable", SLOT, "put $d/slot.pw 600 < $pw", "put $d/slot.pw 644 < $pw", 1),
+ ("slot.sh sudo without -H", SLOT, 'sudo -n -H -u "$U" "$@"', 'sudo -n -u "$U" "$@"', 1),
+ ("slot.sh screen as the operator", SLOT, "( cd /; as_ env HOME=$sh_home screen -dmS", "( cd /; env HOME=$sh_home screen -dmS", 1),
+ ("slot.sh mcp reads the operator password", SLOT, '$(json "$d/slot.pw")', '$(json "$pw")', 1),
 
  ("poison memo off", LUA, "  redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', body, 'entry', entry, 't', now)\n  redis.call('PEXPIRE', memo, RETAIN_MS)\n  ingest_reject(slot, entry, rid, fn, reason, now)", "  ingest_reject(slot, entry, rid, fn, reason, now)", 1),
  ("poison ingester drops the request id", "src/ingest.ts", '"handler_error", f.rid ?? "", f.fn ?? "", f.args ?? ""]', '"handler_error"]', 1),

@@ -1,0 +1,61 @@
+#!/bin/zsh
+# Host boundary for slice 4b: one macOS user per slot, so that slot A's shell cannot read
+# slot B's credentials, the orchestrator's credentials or the Codex control socket.
+#
+#   sudo zsh ops/host-boundary.sh <operator user> <slot> [<slot> ...]
+#   e.g. sudo zsh ops/host-boundary.sh dmitriimashkov a b
+#
+# Needs root, run it yourself. It does exactly this and nothing else:
+#   1. creates a hidden, non-admin macOS user `mctl-slot-<slot>` per slot with dscl (no
+#      password at all: nobody logs in as it, the operator reaches it with sudo -u);
+#   2. creates /Users/mctl-slot-<slot>/.mctl-bridge/ (mode 700, owned by that user) for the
+#      slot's Valkey password file;
+#   3. writes /etc/sudoers.d/mctl-bridge allowing <operator> to run commands AS those slot
+#      users only, without a password (never as root), validated with visudo before install.
+# Re-running is safe. It does not touch the operator's files, Valkey or launchd.
+set -euo pipefail
+[[ $EUID -eq 0 ]] || { echo "run as root: sudo zsh $0 ..." >&2; exit 1; }
+OP=${1:?operator user}; shift
+(( $# > 0 )) || { echo "give at least one slot name" >&2; exit 2; }
+id -u "$OP" >/dev/null 2>&1 || { echo "no such user $OP" >&2; exit 2; }
+[[ $OP != root ]] || { echo "operator must not be root" >&2; exit 2; }
+
+users=()
+for s in "$@"; do
+  [[ $s =~ '^[a-z0-9][a-z0-9-]{0,30}$' ]] || { echo "bad slot name: $s" >&2; exit 2; }
+  u=mctl-slot-$s
+  if ! id -u $u >/dev/null 2>&1; then
+    # dscl needs no secure token and never prompts. Password `*` = no password at all:
+    # nobody can log in as this user, the operator reaches it with sudo -u only.
+    uid=600
+    while dscl . -list /Users UniqueID | awk '{print $2}' | grep -qx $uid; do uid=$((uid + 1)); done
+    dscl . -create /Users/$u
+    dscl . -create /Users/$u UserShell /bin/zsh
+    dscl . -create /Users/$u RealName "mctl bridge slot $s"
+    dscl . -create /Users/$u UniqueID $uid
+    dscl . -create /Users/$u PrimaryGroupID 20
+    dscl . -create /Users/$u NFSHomeDirectory /Users/$u
+    dscl . -create /Users/$u Password '*'
+    dscl . -create /Users/$u IsHidden 1
+    echo "created user $u (uid $uid)"
+  fi
+  id -u $u >/dev/null 2>&1 || { echo "could not create $u" >&2; exit 1; }
+  # Nobody is an admin: make sure of it.
+  dseditgroup -o edit -d $u -t user admin >/dev/null 2>&1 || true
+  # Always (re)set the owner: an earlier interrupted run may have left the directory root-owned.
+  mkdir -p "/Users/${u}"
+  chown "${u}:staff" "/Users/${u}"
+  chmod 700 "/Users/${u}"
+  install -d -m 700 -o "$u" -g staff "/Users/${u}/.mctl-bridge"
+  chown -R "${u}:staff" "/Users/${u}/.mctl-bridge"
+  users+=($u)
+done
+
+rule="$OP ALL=(${(j:,:)users}) NOPASSWD: ALL"
+tmp=$(mktemp /etc/sudoers.d/.mctl-bridge.XXXXXX)
+print -r -- "# written by ops/host-boundary.sh: the operator may act as the bridge slot users, never as root" > $tmp
+print -r -- "$rule" >> $tmp
+chmod 440 $tmp
+visudo -cf $tmp >/dev/null || { rm -f $tmp; echo "sudoers check failed, nothing installed" >&2; exit 1; }
+mv $tmp /etc/sudoers.d/mctl-bridge
+echo "done: $rule"
