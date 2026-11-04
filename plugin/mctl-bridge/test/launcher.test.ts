@@ -33,11 +33,12 @@ function setup() {
   fs.writeFileSync(path.join(H, "etc", "admin.pw"), "adminpw");
   stub(path.join(H, "valkey", "bin", "valkey-cli"), "exit 0");
   stub(path.join(bin, "openssl"), "echo deadbeefdeadbeef");
-  stub(path.join(bin, "screen"), `[ "$1" = -ls ] && exit 0\nfor a in "$@"; do printf '%s\\n' "$a"; done > "${record}/screen"`);
+  // the pty host is not started in tests: record how it was asked to start
+  stub(path.join(bin, "fakepython"), `[ "$3" = ping ] && exit 1\nfor a in "$@"; do printf '%s\\n' "$a"; done > "${record}/screen"`);
   // claude: one argv per line is ambiguous for odd args, so write NUL-separated.
   stub(path.join(home, ".local", "bin", "claude"), `pwd -P > "${record}/cwd"\nprintf '%s\\0' "$@" > "${record}/argv"`);
   fs.writeFileSync(path.join(H, "plugin", "hooks", "state.py"), `import pathlib\npathlib.Path(${JSON.stringify(path.join(record, "hook"))}).write_text("ran")\n`);
-  const env = { ...process.env, HOME: home, MCTL_BRIDGE_HOME: H, BUN: "/opt/my bun/bin/bun", PATH: `${bin}:${process.env.PATH}` };
+  const env = { ...process.env, HOME: home, MCTL_BRIDGE_HOME: H, BUN: "/opt/my bun/bin/bun", MCTL_BRIDGE_TRUSTED_EXPERIMENT: "1", MCTL_BRIDGE_PYTHON: path.join(root, "bin", "fakepython"), PATH: `${bin}:${process.env.PATH}` };
   return { root, home, H, repo, record, env };
 }
 
@@ -52,7 +53,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
     const srv = mcp.mcpServers["mctl-bridge"];
     expect(srv.command).toBe("/opt/my bun/bin/bun");
     expect(srv.args).toEqual(["run", "--silent", "--no-env-file", `--config=${t.H}/plugin/bunfig.toml`, `${t.H}/plugin/src/channel.ts`]);
-    expect(srv.env.MCTL_BRIDGE_VALKEY_PASSWORD_FILE).toBe(path.join(t.H, "etc", "slot-s1.pw"));
+    expect(srv.env.MCTL_BRIDGE_VALKEY_PASSWORD_FILE).toBe(path.join(d, "slot.pw"));
     expect(srv.env.MCTL_BRIDGE_VALKEY_URL).toBe("redis://bridge_slot_s1@127.0.0.1:6390/0");
 
     // the hook command is run by a shell: it must run state.py from the odd path
@@ -77,7 +78,51 @@ describe.skipIf(!usable)("launcher scripts", () => {
     // no $(...) in any path was executed
     expect(fs.existsSync(path.join(t.root, "MARKER"))).toBe(false);
     expect(fs.existsSync(path.join(t.repo, "MARKER"))).toBe(false);
-    expect(fs.existsSync(path.join(t.H, "log", "slot-s1.err"))).toBe(true);
+    expect(fs.existsSync(path.join(d, "log", "slot-s1.err"))).toBe(true);
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
+  test("without the slot user, start refuses unless the trusted experiment is asked for", () => {
+    const t = setup();
+    stub(path.join(t.root, "bin", "id"), "exit 1");
+    const env = { ...t.env, MCTL_BRIDGE_TRUSTED_EXPERIMENT: "0" };
+    const r = spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo], { env, encoding: "utf8" });
+    expect(r.status).toBe(2);
+    expect(r.stderr).toContain("host-boundary.sh");
+    expect(fs.existsSync(path.join(t.H, "slots"))).toBe(false);
+    expect(fs.existsSync(path.join(t.record, "screen"))).toBe(false);
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
+  test("with the slot user, every file and the screen session host go through sudo -n -H -u and land in the slot home", () => {
+    const t = setup();
+    const homes = path.join(t.root, "homes");
+    fs.mkdirSync(path.join(homes, "mctl-slot-s1"), { recursive: true });
+    stub(path.join(t.root, "bin", "id"), "exit 0");
+    // sudo stub: records who it was asked to become, then runs the command as ourselves
+    stub(path.join(t.root, "bin", "sudo"), `printf '%s\\n' "$*" >> "${t.record}/sudo"\n[ "$1 $2 $3" = "-n -H -u" ] || exit 99\nshift 4\nexec "$@"`);
+    const env = { ...t.env, MCTL_BRIDGE_TRUSTED_EXPERIMENT: "0", MCTL_BRIDGE_SLOT_HOME_ROOT: homes };
+    const r = spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo], { env, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    const d = path.join(homes, "mctl-slot-s1", ".mctl-bridge");
+    for (const f of ["mcp.json", "settings.json", "run.sh", "slot.pw"]) expect(fs.existsSync(path.join(d, f))).toBe(true);
+    // password copied into the slot's home with mode 600; the operator copy is not what the MCP reads
+    expect(fs.readFileSync(path.join(d, "slot.pw"), "utf8").trim()).toBe("deadbeefdeadbeef");
+    expect((fs.statSync(path.join(d, "slot.pw")).mode & 0o777).toString(8)).toBe("600");
+    expect((fs.statSync(path.join(d, "run.sh")).mode & 0o777).toString(8)).toBe("700");
+    expect((fs.statSync(d).mode & 0o777).toString(8)).toBe("700");
+    const mcp = JSON.parse(fs.readFileSync(path.join(d, "mcp.json"), "utf8"));
+    expect(mcp.mcpServers["mctl-bridge"].env.MCTL_BRIDGE_VALKEY_PASSWORD_FILE).toBe(path.join(d, "slot.pw"));
+    expect(fs.readFileSync(path.join(d, "run.sh"), "utf8")).toContain(`2>>'${d}'/log/slot-s1.err`);
+    // the keychain password never goes on a command line (visible to every local user in ps)
+    const runsh = fs.readFileSync(path.join(d, "run.sh"), "utf8");
+    expect(runsh).not.toMatch(/security\s+(unlock|create)-keychain/); // would take the password from argv or /dev/tty
+    expect(runsh).toMatch(/\|\s*security -i\b/);
+    // nothing was written to the operator-side slots dir, and the screen was started via sudo as the slot user
+    expect(fs.existsSync(path.join(t.H, "slots"))).toBe(false);
+    const sudo = fs.readFileSync(path.join(t.record, "sudo"), "utf8");
+    expect(sudo).toContain("-n -H -u mctl-slot-s1");
+    expect(sudo).toMatch(/fakepython -I .*slot-pty\.py start /);
     fs.rmSync(t.root, { recursive: true, force: true });
   });
 
