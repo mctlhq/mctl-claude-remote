@@ -58,7 +58,7 @@ for s in "$@"; do
   chown -R "${u}:staff" "/Users/${u}/.mctl-bridge"
   # Claude Code stores its login in the login keychain, and a hidden user has none: create
   # one (random password kept in the user's own .mctl-bridge/keychain.pw, mode 600).
-  sudo -n -H -u "$u" sh -c 'cd /; umask 077; K=$HOME/Library/Keychains/login.keychain-db; P=$HOME/.mctl-bridge/keychain.pw
+  sudo -n -H -u "$u" sh -c 'cd /; umask 077; mkdir -p -m 700 "$HOME/Library/Keychains"; K=$HOME/Library/Keychains/login.keychain-db; P=$HOME/.mctl-bridge/keychain.pw
     [ -s $P ] || openssl rand -hex 24 > $P
     # `security -i` reads its commands on stdin: the password stays off argv (any local user
     # could read it with ps) and off the terminal prompt, which would read /dev/tty instead
@@ -69,6 +69,7 @@ done
 
 users=(${(u)users:#})
 rule="$OP ALL=(${(j:,:)users}) NOPASSWD: ALL"
+install -d -m 755 /etc/sudoers.d   # absent on a stock macOS
 tmp=$(mktemp /etc/sudoers.d/.mctl-bridge.XXXXXX)
 print -r -- "# written by ops/host-boundary.sh: the operator may act as the bridge slot users, never as root" > $tmp
 print -r -- "$rule" >> $tmp
