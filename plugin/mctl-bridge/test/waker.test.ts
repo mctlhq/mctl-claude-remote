@@ -106,6 +106,8 @@ describe.skipIf(requiresValkey)("waker", () => {
     const text = app.starts[0].input[0].text as string;
     expect(text).toContain(marker(wake.id!));
     expect(text).toContain(`mctl-bridge claim ${qid}`);
+    expect(text).toContain(`mctl-bridge reply ${qid} --token <claim_token> --text "<your answer>"`);
+    expect(text).toContain("no pipes, redirects, heredocs or shell variables"); // so the command rules can match
     expect(text).not.toContain("SECRET-PAYLOAD"); // slot input stays out of the turn text
     expect((await b.message(qid)).state).toBe("asked"); // the waker never answers
     expect(await server.client().execute(["EXISTS", key.wakelock(app.threadId)])).toBe(0);

@@ -25,7 +25,7 @@ UID_=$(id -u)
 [[ -x $BUN ]] || { echo "no bun at $BUN" >&2; exit 1; }
 
 umask 077
-mkdir -p $H/etc $H/valkey/data $H/log $H/slots $H/plugin
+mkdir -p $LA $H/etc $H/valkey/data $H/log $H/slots $H/plugin
 for u in admin orch slot; do
   [[ -s $H/etc/$u.pw ]] || openssl rand -hex 24 > $H/etc/$u.pw
 done
@@ -83,6 +83,8 @@ for i in {1..50}; do
   $V/valkey-cli -p $PORT --user bridge_admin --pass "$(cat $H/etc/admin.pw)" --no-auth-warning PING >/dev/null 2>&1 && break
   sleep 0.2
 done
+$V/valkey-cli -p $PORT --user bridge_admin --pass "$(cat $H/etc/admin.pw)" --no-auth-warning PING >/dev/null 2>&1 \
+  || { echo "valkey did not become ready on :$PORT (see $H/log/valkey.err)" >&2; exit 1; }
 
 MCTL_BRIDGE_VALKEY_URL=redis://bridge_admin@127.0.0.1:$PORT/0 MCTL_BRIDGE_VALKEY_PASSWORD_FILE=$H/etc/admin.pw \
   $BUN run --silent --no-env-file --config=$H/plugin/bunfig.toml $H/plugin/src/cli.ts init

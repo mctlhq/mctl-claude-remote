@@ -22,7 +22,7 @@ running() { screen -ls 2>/dev/null | grep -oE '[0-9]+\.bridge-slot-[a-z0-9-]+' |
 case $cmd in
   start)
     s=${1:?slot}; repo=${2:?repo dir}
-    [[ $s =~ '^[a-z0-9][a-z0-9-]{0,30}$' ]] || { echo "bad slot name" >&2; exit 2; }
+    [[ $s =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || { echo "bad slot name" >&2; exit 2; }
     [[ -d $repo ]] || { echo "no such dir $repo" >&2; exit 2; }
     if running | grep -qx "$s"; then echo "slot $s already running" >&2; exit 1; fi
     n=$(running | grep -c . || true)
@@ -31,7 +31,7 @@ case $cmd in
     mkdir -p $d
     # Credentials reach only the MCP process, through its own env block.
     cat > $d/mcp.json <<JSON
-{"mcpServers":{"mctl-bridge":{"command":"$HOME/.bun/bin/bun","args":["run","--silent","--no-env-file","--config=$H/plugin/bunfig.toml","$H/plugin/src/channel.ts"],
+{"mcpServers":{"mctl-bridge":{"command":"${BUN:-$HOME/.bun/bin/bun}","args":["run","--silent","--no-env-file","--config=$H/plugin/bunfig.toml","$H/plugin/src/channel.ts"],
  "env":{"MCTL_BRIDGE_SLOT":"$s","MCTL_BRIDGE_VALKEY_URL":"redis://bridge_slot@127.0.0.1:${MCTL_BRIDGE_PORT:-6390}/0","MCTL_BRIDGE_VALKEY_PASSWORD_FILE":"$H/etc/slot.pw"}}}}
 JSON
     hook="/usr/bin/python3 $H/plugin/hooks/state.py"
@@ -43,7 +43,7 @@ JSON
 #!/bin/zsh
 export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin"
 export ENABLE_CLAUDEAI_MCP_SERVERS=false
-cd ${repo:A}
+cd "${repo:A}"
 exec claude --model $MODEL --mcp-config $d/mcp.json --strict-mcp-config --settings $d/settings.json \\
   --dangerously-load-development-channels server:mctl-bridge \\
   --allowedTools $tools --permission-mode default 2>>$H/log/slot-$s.err
@@ -66,7 +66,7 @@ RUN
     LC_ALL=C tr -cd '[:print:]\n' < $f | grep -v '^\s*$' | tail -${2:-20}
     ;;
   keys)
-    s=${1:?slot}; screen -S bridge-slot-$s -p 0 -X stuff "$(printf "${2:?string}")"
+    s=${1:?slot}; screen -S bridge-slot-$s -p 0 -X stuff "$(printf '%b' "${2:?string}")"
     ;;
   list) running ;;
   *) sed -n '2,10p' $0; exit 2 ;;
