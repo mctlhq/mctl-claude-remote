@@ -116,6 +116,7 @@ M=[
  ("slot.sh password copy world-readable", SLOT, "put $d/slot.pw 600 < $pw", "put $d/slot.pw 644 < $pw", 1),
  ("slot.sh sudo without -H", SLOT, 'sudo -n -H -u "$U" "$@"', 'sudo -n -u "$U" "$@"', 1),
  ("slot.sh session host as the operator", SLOT, "( cd /; as_ $PY -I $PTY start $d $d/run.sh )", "( cd /; $PY -I $PTY start $d $d/run.sh )", 1),
+ ("slot.sh keychain password on argv", SLOT, "security unlock-keychain ${(qq)sh_home}/Library/Keychains/login.keychain-db < \\$kc >/dev/null 2>&1", 'security unlock-keychain -p "\\$(cat \\$kc)" ${(qq)sh_home}/Library/Keychains/login.keychain-db', 1),
  ("slot.sh mcp reads the operator password", SLOT, '$(json "$d/slot.pw")', '$(json "$pw")', 1),
 
  ("poison memo off", LUA, "  redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', body, 'entry', entry, 't', now)\n  redis.call('PEXPIRE', memo, RETAIN_MS)\n  ingest_reject(slot, entry, rid, fn, reason, now)", "  ingest_reject(slot, entry, rid, fn, reason, now)", 1),

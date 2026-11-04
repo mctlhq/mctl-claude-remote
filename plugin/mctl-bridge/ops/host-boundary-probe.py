@@ -49,7 +49,7 @@ for o in others:
 for pw in ["admin.pw", "orch.pw", f"slot-{own}.pw"] + [f"slot-{o}.pw" for o in others]:
     attempt(f"read operator-side etc/{pw}", "DENIED", read1(f"{H}/etc/{pw}"))
 attempt("list operator-side etc/", "DENIED", listdir(f"{H}/etc"))
-for rel in ["slot.sh", "mctl-bridge", "host-boundary-probe.py", "plugin/src/channel.ts", "plugin/src/ingest.ts", "plugin/hooks/state.py"]:
+for rel in ["slot.sh", "slot-pty.py", "mctl-bridge", "host-boundary-probe.py", "host-boundary-probe.sh", "plugin/src/channel.ts", "plugin/src/ingest.ts", "plugin/hooks/state.py"]:
     attempt(f"write trusted file {rel}", "DENIED", append(f"{H}/{rel}"))
 attempt("read Valkey data dir", "DENIED", listdir(f"{H}/valkey/data"))
 socks = glob.glob(f"{OPHOME}/.codex/app-server-control/*.sock")

@@ -114,6 +114,8 @@ describe.skipIf(!usable)("launcher scripts", () => {
     const mcp = JSON.parse(fs.readFileSync(path.join(d, "mcp.json"), "utf8"));
     expect(mcp.mcpServers["mctl-bridge"].env.MCTL_BRIDGE_VALKEY_PASSWORD_FILE).toBe(path.join(d, "slot.pw"));
     expect(fs.readFileSync(path.join(d, "run.sh"), "utf8")).toContain(`2>>'${d}'/log/slot-s1.err`);
+    // the keychain password never goes on a command line (visible to every local user in ps)
+    expect(fs.readFileSync(path.join(d, "run.sh"), "utf8")).not.toMatch(/unlock-keychain\s+-p\s/);
     // nothing was written to the operator-side slots dir, and the screen was started via sudo as the slot user
     expect(fs.existsSync(path.join(t.H, "slots"))).toBe(false);
     const sudo = fs.readFileSync(path.join(t.record, "sudo"), "utf8");

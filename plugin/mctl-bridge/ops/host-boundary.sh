@@ -13,7 +13,11 @@
 #      and a login keychain for it (Claude Code keeps its login there);
 #   3. writes /etc/sudoers.d/mctl-bridge allowing <operator> to run commands AS those slot
 #      users only, without a password (never as root), validated with visudo before install.
-# Re-running is safe. It does not touch the operator's files, Valkey or launchd.
+# All slot users share the primary group `staff`: isolation rests on every path being mode
+# 700/600 (the probe, ops/host-boundary-probe.sh, checks exactly that). A group per slot would
+# remove that dependency; it is not done here because macOS group creation needs more dscl
+# state for no gain while every directory is already owner-only.
+# Re-running is safe: existing mctl-slot-* users keep their sudo rule. It does not touch the operator's files, Valkey or launchd.
 set -euo pipefail
 [[ $EUID -eq 0 ]] || { echo "run as root: sudo zsh $0 ..." >&2; exit 1; }
 OP=${1:?operator user}; shift
@@ -21,9 +25,12 @@ OP=${1:?operator user}; shift
 id -u "$OP" >/dev/null 2>&1 || { echo "no such user $OP" >&2; exit 2; }
 [[ $OP != root ]] || { echo "operator must not be root" >&2; exit 2; }
 
-users=()
+# Slot users that already exist keep their sudo rule: the file is rebuilt from the union of
+# these and the slots named on this run, so a re-run with a different list drops nobody.
+users=(${(f)"$(dscl . -list /Users | grep -E '^mctl-slot-[a-z0-9-]+$' || true)"})
+slot_re='^[a-z0-9][a-z0-9-]{0,30}$'
 for s in "$@"; do
-  [[ $s =~ '^[a-z0-9][a-z0-9-]{0,30}$' ]] || { echo "bad slot name: $s" >&2; exit 2; }
+  [[ $s =~ $slot_re ]] || { echo "bad slot name: $s" >&2; exit 2; }
   u=mctl-slot-$s
   if ! id -u $u >/dev/null 2>&1; then
     # dscl needs no secure token and never prompts. Password `*` = no password at all:
@@ -53,11 +60,13 @@ for s in "$@"; do
   # one (random password kept in the user's own .mctl-bridge/keychain.pw, mode 600).
   sudo -n -H -u "$u" sh -c 'cd /; umask 077; K=$HOME/Library/Keychains/login.keychain-db; P=$HOME/.mctl-bridge/keychain.pw
     [ -s $P ] || openssl rand -hex 24 > $P
-    [ -e $K ] || security create-keychain -p "$(cat $P)" $K
+    # the password goes in on stdin, never on argv, where every local user could read it
+    [ -e $K ] || { cat $P; cat $P; } | security create-keychain $K >/dev/null
     security default-keychain -s $K; security list-keychains -d user -s $K; security set-keychain-settings $K'
   users+=($u)
 done
 
+users=(${(u)users:#})
 rule="$OP ALL=(${(j:,:)users}) NOPASSWD: ALL"
 tmp=$(mktemp /etc/sudoers.d/.mctl-bridge.XXXXXX)
 print -r -- "# written by ops/host-boundary.sh: the operator may act as the bridge slot users, never as root" > $tmp

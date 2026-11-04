@@ -37,5 +37,24 @@ class PtyHost(unittest.TestCase):
         self.assertTrue(wait_for(lambda: run("ping", self.d).returncode != 0), "a finished child must not read as alive")
         self.assertIn("bye", run("show", self.d).stdout)
 
+    def test_client_disconnect_does_not_kill_the_session(self):
+        import socket
+        run("start", self.d, "/bin/cat")
+        self.assertTrue(wait_for(lambda: run("ping", self.d).returncode == 0))
+        run("keys", self.d, "x" * 3000 + "\\r")
+        time.sleep(0.3)
+        for _ in range(5):  # ask for the buffer and hang up before reading the reply
+            s = socket.socket(socket.AF_UNIX); s.connect(os.path.join(self.d, "ctl.sock"))
+            s.sendall(b"S"); s.shutdown(socket.SHUT_WR); s.close()
+        time.sleep(0.5)
+        self.assertEqual(run("ping", self.d).returncode, 0, "a client hanging up killed the host")
+
+    def test_stop_after_the_child_exited_signals_nothing(self):
+        run("start", self.d, "/bin/sh", "-c", "exit 0")
+        self.assertTrue(wait_for(lambda: os.path.exists(os.path.join(self.d, "ctl.sock"))))
+        self.assertTrue(wait_for(lambda: run("ping", self.d).returncode != 0))
+        self.assertEqual(run("stop", self.d).returncode, 0)
+        self.assertTrue(wait_for(lambda: not os.path.exists(os.path.join(self.d, "ctl.sock"))), "host did not exit on stop")
+
 if __name__ == "__main__":
     unittest.main()

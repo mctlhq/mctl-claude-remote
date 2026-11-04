@@ -38,7 +38,15 @@ def serve(d, argv):
     except FileNotFoundError: pass
     srv = socket.socket(socket.AF_UNIX); old = os.umask(0o177); srv.bind(path); os.umask(old)
     srv.listen(4)
-    buf = b""; alive = True; status = None
+    buf = b""; alive = True; died_at = None
+    GRACE = 300  # keep serving this long after the child ends, so `show` can read the tail
+    mine = os.stat(path).st_ino
+    def reap():
+        nonlocal alive, died_at
+        if alive:
+            alive = False; died_at = time.time()
+            try: os.waitpid(pid, 0)
+            except ChildProcessError: pass
     while True:
         r, _, _ = select.select([fd, srv] if alive else [srv], [], [], 1.0)
         if fd in r:
@@ -48,12 +56,17 @@ def serve(d, argv):
                 buf = (buf + data)[-200000:]
                 with open(log, "wb") as f: f.write(buf)
             else:
-                alive = False
-                try: _, status = os.waitpid(pid, 0)
-                except ChildProcessError: pass
-        if srv in r:
-            c, _ = srv.accept(); req = b""
-            c.settimeout(2)
+                reap()
+        if alive:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0]: alive = False; died_at = time.time()
+            except ChildProcessError: alive = False; died_at = time.time()
+        elif died_at is not None and time.time() - died_at > GRACE:
+            break
+        if srv not in r: continue
+        c, _ = srv.accept()
+        try:
+            req = b""; c.settimeout(2)
             try:
                 while True:
                     x = c.recv(65536)
@@ -62,29 +75,32 @@ def serve(d, argv):
             except socket.timeout: pass
             cmd, arg = req[:1], req[1:]
             if cmd == b"K" and alive: os.write(fd, arg); c.sendall(b"ok")
+            elif cmd == b"K": c.sendall(b"dead")
             elif cmd == b"P": c.sendall(b"alive" if alive else b"dead")
-            elif cmd == b"S":
-                c.sendall(buf)
+            elif cmd == b"S": c.sendall(buf)
             elif cmd == b"Q":
                 c.sendall(b"ok")
-                try: os.kill(pid, signal.SIGTERM)
-                except ProcessLookupError: pass
-                t = time.time()
-                while alive and time.time() - t < 5:
-                    try:
-                        p, _ = os.waitpid(pid, os.WNOHANG)
-                        if p: alive = False
-                    except ChildProcessError: alive = False
-                    time.sleep(0.1)
-                if alive:
-                    try: os.kill(pid, signal.SIGKILL)
+                if alive:  # never signal a pid that was already reaped: it may be reused
+                    try: os.kill(pid, signal.SIGTERM)
                     except ProcessLookupError: pass
-                c.close(); break
+                    end_t = time.time() + 5
+                    while alive and time.time() < end_t:
+                        try:
+                            if os.waitpid(pid, os.WNOHANG)[0]: alive = False
+                        except ChildProcessError: alive = False
+                        time.sleep(0.1)
+                    if alive:
+                        try: os.kill(pid, signal.SIGKILL)
+                        except ProcessLookupError: pass
+                        reap()
+                break
+        except OSError:
+            pass  # one client going away must never take the session down
+        finally:
             c.close()
-        if not alive and status is not None and not select.select([srv], [], [], 0)[0]:
-            # keep serving so `show` can read the last output; a later stop removes the socket
-            pass
-    try: os.unlink(path)
+    # remove our own socket only: a newer host may have replaced it
+    try:
+        if os.stat(path).st_ino == mine: os.unlink(path)
     except FileNotFoundError: pass
 
 def main():

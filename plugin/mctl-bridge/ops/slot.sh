@@ -106,7 +106,7 @@ export PATH=${(qq)sh_home}/.local/bin:/usr/local/bin:/usr/bin:/bin
 export ENABLE_CLAUDEAI_MCP_SERVERS=false
 # Claude Code keeps its login in the user's login keychain: unlock it for this session.
 kc=${(qq)d}/keychain.pw
-[[ -r \$kc ]] && security unlock-keychain -p "\$(cat -- \$kc)" ${(qq)sh_home}/Library/Keychains/login.keychain-db
+[[ -r \$kc ]] && security unlock-keychain ${(qq)sh_home}/Library/Keychains/login.keychain-db < \$kc >/dev/null 2>&1
 cd ${(qq)repo:A}
 exec claude --model ${(qq)MODEL} --mcp-config ${(qq)d}/mcp.json --strict-mcp-config --settings ${(qq)d}/settings.json \\
   --dangerously-load-development-channels server:mctl-bridge \\
