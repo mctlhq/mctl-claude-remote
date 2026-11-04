@@ -8,7 +8,7 @@ on:
       - main
 
 jobs:
-  validate:
+  checks:
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -65,9 +65,54 @@ jobs:
         working-directory: plugin/mctl-bridge
         run: bun test
 
-      - name: Bridge mutation check
+      # Pure python: proves the mutation shards below partition the list
+      # exactly (disjoint, union is everything, an empty shard is an error).
+      - name: Bridge mutation shard partition
         working-directory: plugin/mctl-bridge
-        run: python3 test/mutate.py
+        run: python3 -m unittest discover -s test -p 'test_*.py' -v
+
+  # The mutation run reverts each guarantee in turn and fails if any revert
+  # leaves the tests green. Every shard runs the full `bun test` per mutation;
+  # sharding only splits which mutations a runner handles. Each matrix job has
+  # its own checkout, so the in-place edits mutate.py makes never meet.
+  bridge-mutation:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # The bridge tests run against a real Redis-protocol server.
+      - name: Install Redis-protocol server for bridge tests
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-server
+
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: 1.3.14
+
+      - name: Bridge plugin dev dependencies
+        working-directory: plugin/mctl-bridge
+        run: bun install --frozen-lockfile
+
+      - name: Bridge mutation check (shard ${{ matrix.shard }}/4)
+        working-directory: plugin/mctl-bridge
+        run: python3 test/mutate.py --shard ${{ matrix.shard }}/4
+
+  # Built only when every check and every mutation shard passed, as before,
+  # when it was the last step of the single job.
+  docker:
+    needs: [checks, bridge-mutation]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v7
 
       - name: Docker build
         uses: docker/build-push-action@v6
@@ -75,3 +120,22 @@ jobs:
           context: .
           push: false
           tags: mctl-claude-remote:ci
+
+  # The required status check on main is exactly `validate`. It is the
+  # aggregate gate: it runs even when a needed job failed, was cancelled or
+  # was skipped, and passes only if every one of them is exactly `success`.
+  validate:
+    needs: [checks, bridge-mutation, docker]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions: {}
+
+    steps:
+      - name: Require every gated job to have succeeded
+        env:
+          CHECKS: ${{ needs.checks.result }}
+          MUTATION: ${{ needs.bridge-mutation.result }}
+          DOCKER: ${{ needs.docker.result }}
+        run: |
+          echo "checks=$CHECKS bridge-mutation=$MUTATION docker=$DOCKER"
+          [ "$CHECKS" = success ] && [ "$MUTATION" = success ] && [ "$DOCKER" = success ]

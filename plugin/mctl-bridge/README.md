@@ -160,3 +160,11 @@ bunx tsc --noEmit
 bun test                 # needs valkey-server or redis-server on PATH
 python3 test/mutate.py   # every guarantee reverted in turn must fail a test
 ```
+
+In CI the mutation run is split into 4 parallel jobs (`python3 test/mutate.py
+--shard I/4`, round-robin over the list). Each shard still runs the full
+`bun test` per mutation and checks the patterns of the whole list first; a
+shard fails if a mutation survives, a run crashes, or it runs a different
+number of mutations than its partition. `test/test_shards.py` proves the shards
+are disjoint and cover the list, and the `validate` job (the required check)
+passes only when the other jobs, every shard included, succeeded.
