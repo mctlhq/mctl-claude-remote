@@ -3,20 +3,27 @@
 slot shell could try and checks each result against what the host boundary promises. It never
 prints file contents: only the uid, the attempt and ALLOWED/DENIED/ABSENT.
 
-  host-boundary-probe.py <bridge home> <operator home> <own slot> <other slot> ...
+  host-boundary-probe.py <bridge home> <operator home> <own slot> <other slot> ... [pid=N ...]
+(pid=N: a process of another user that must not be signalled)
 Exit status 0 only if every attempt matched its expectation. ABSENT (the target does not
 exist) is never a pass for a DENIED expectation: a probe that cannot observe proves nothing.
 """
 import glob, os, socket, sys
 
-H, OPHOME, own, *others = sys.argv[1:]
+H, OPHOME, own, *rest = sys.argv[1:]
+others = [a for a in rest if not a.startswith("pid=")]
+foreign = []
+for a in rest:
+    if a.startswith("pid="):
+        if not a[4:].isdigit(): sys.exit(f"bad argument {a!r}: a pid must be a number")  # never drop it silently
+        foreign.append(int(a[4:]))
 users = {s: f"/Users/mctl-slot-{s}" for s in [own, *others]}
 rows = []
 
 def attempt(name, expect, fn):
     try:
         fn(); got = "ALLOWED"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         got = "ABSENT"
     except PermissionError:
         got = "DENIED"
@@ -62,5 +69,19 @@ else:
         print(f"uid={os.getuid()} PASS Codex socket directory is not listable: DENIED"); rows.append(True)
     except FileNotFoundError:
         print(f"uid={os.getuid()} FAIL Codex socket directory absent, nothing observed"); rows.append(False)
+# secrets in the operator home: the files are 0600 and must stay unreadable even where the
+# directory above them can be traversed (the home itself is 0711)
+for rel in [".codex/auth.json", ".codex/config.toml", ".codex/history.jsonl", ".config/gh/hosts.yml", ".config/claude-runner/secret.env", ".claude/.credentials.json", ".claude.json", ".zsh_history"]:
+    # no os.path.exists here: it turns PermissionError into False and would skip the very
+    # secrets the boundary hides. A target that cannot be told apart from absent is a FAIL.
+    attempt(f"read operator secret {rel}", "DENIED", read1(f"{OPHOME}/{rel}"))
+# a process of another user must not be signalled (signal 0 only asks whether it may)
+def kill0(pid):
+    def f(): os.kill(pid, 0)
+    return f
+for pid in foreign:
+    attempt(f"signal foreign pid {pid}", "DENIED", kill0(pid))
+# the fixed default path, whether or not the directory can be listed: a real connect attempt
+attempt("connect Codex control socket (default path)", "DENIED", connect(f"{OPHOME}/.codex/app-server-control/app-server-control.sock"))
 attempt("write operator home", "DENIED", append(f"{OPHOME}/.mctl-probe-{os.getpid()}"))
 sys.exit(0 if all(rows) else 1)
