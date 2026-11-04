@@ -654,17 +654,92 @@ Findings:
 
 ### Slice 4b: security boundary
 
-Required before any working slot connects. Key prefixes do not isolate slots: Valkey
-checks every command and key inside a function against the caller's ACL, so a slot that
-may call its own functions can also write any other `mctl:bridge:*` key. Options: a
-broker that checks the slot's OS identity; a per-slot keyspace where a slot writes only
-its own area and the orchestrator applies confirmed events; or a separate OS user for
-slots. Tests for 4b:
+Give each adapter a distinct Valkey ACL user. Deliver tasks and replies through an
+orchestrator-written, slot-readable inbox. Allow the adapter to append observations
+only to its own outbox under `s:<slot>:*`. Use explicit command and key allowlists.
+Only the orchestrator writes authoritative registrations, epochs, inflight state,
+tasks, claims, replies, results and audit records. Admin credentials are for setup.
 
-- scenario 8 shows a refusal for all three attempts;
-- an operation refused by ACL must not change state and must not raise `epoch`: check
-  rights before changing state, or make the transition atomic;
-- a slot cannot change another task's authoritative state.
+Derive slot identity from the configured outbox, never from the event body. Treat
+every event as untrusted. Before applying it, validate the assigned slot and task,
+epoch, conn_id, attempt, admission and legal transition. Commit the transition,
+deduplication record and audit together before acknowledging the event. Resume from
+durable state after a crash. Preserve late results as reconciliation evidence.
+
+**Admission and delivery protocol**
+
+- Carry a stable request_id across retries. For ack_task, the orchestrator commits
+  the admission and its decision before responding. Bind the decision to request_id,
+  slot, task_id, epoch, conn_id and attempt_id. The adapter may return MCP success
+  only for a matching committed grant on its current registration. A queued
+  request, timeout, rejection or response for an earlier session grants no right
+  to start work. A retry retrieves the same decision, never a second grant.
+- When assigning a task or committing a reply, atomically record its payload and
+  a delivery intent alongside the canonical transition. Give the intent a stable
+  delivery_id and retain it until acknowledged or explicitly reconciled. A
+  publisher may retry publication under that ID; consumers deduplicate before
+  admission. Once execution might have started, reconcile an unknown outcome
+  instead of automatically executing the task again.
+- Treat the slot outbox as untrusted staging. Raw XADD permits MAXLEN/MINID.
+  Keep pending submissions for retry under the same request_id until a canonical
+  receipt exists. Report success for questions/results only after the orchestrator
+  owns the durable payload, decision and receipt in keys the slot cannot trim.
+- For an invalid event, atomically record its rejection and advance the consumer
+  checkpoint (or durably record the rejection before acknowledging). Deduplicate
+  rejection by source slot and stream entry ID; a forged request_id must not
+  suppress a later valid request. Resume other entries and slots after restart.
+
+A Valkey namespace alone cannot protect files and sockets owned by the same macOS
+user. Before admitting working slots, document and exercise a host boundary (for
+example separate OS identities) that protects credentials, adapter configuration,
+orchestrator code and the Codex control socket from the slot process. Host changes
+requiring elevated privileges are a separate operator step.
+
+**Acceptance on the isolated Valkey and Mac mini:**
+
+- [ ] Run two adversarial slots. A can read its inbox and append its own observations.
+  Direct commands and FCALL cannot read or modify B's keys, change canonical state,
+  forge an inbox delivery, or run privileged commands. A forged B identity in A's
+  outbox cannot change B's state.
+- [ ] Inject a forbidden access after a would-be epoch increment. Compare before and
+  after: epoch, registration, inflight, task, claim and reply state are unchanged.
+  Check permissions before mutation; a Lua error does not roll back earlier writes.
+- [ ] From the actual slot OS context, attempts to read admin, orchestrator or peer
+  credentials, overwrite trusted launch/config files, or connect to the Codex socket
+  fail. Record the OS identity, Valkey role, attempted operation and outcome without
+  logging secrets. All three bypasses from scenario 8 must now be refused.
+- [ ] Replay duplicate, stale and misaddressed events, and kill the consumer between
+  commit and acknowledgement. No second transition or execution occurs. A stale
+  result remains visible in audit. Repeat scenarios 2 and 7: only the intended slot
+  resumes the same attempt; recovery does not start a second turn.
+- [ ] Delay an ack_task request across an epoch change and separately replay an
+  old grant to the new adapter. Neither permits work. Lose a valid response and
+  retry its request_id: the same grant is recovered, with one side effect at most.
+- [ ] For both a task and a reply, kill the publisher after the canonical commit
+  but before publication, and again after publication but before recording progress.
+  Recovery uses the same delivery_id and attempt_id. The task is not stranded in
+  inflight, the reply reaches its asking slot, and no side effect runs twice.
+- [ ] With real slot credentials, submit an event and attempt XADD MAXLEN 0 and
+  XADD MINID against its outbox before ingestion and after a receipt. A lost staged
+  event has no success receipt and is retried. Every acknowledged payload remains
+  recoverable by request_id even if the staging entry is gone.
+- [ ] Enqueue an invalid event followed by a valid one with the same claimed
+  request_id, then restart the consumer at the rejection/ack boundary. Verify one
+  rejection in audit, one valid transition, and continued progress for the other slot.
+- [ ] Kill Valkey and waker separately on the isolated setup. Record automatic
+  restart without manual kickstart, intact task and audit history, and no duplicate
+  wake. Test the launchd domain on the host before selecting it.
+- [ ] Use a structured reply tool that passes the answer as data without shell
+  interpolation. With the client disconnected, deliver an apostrophe, a literal
+  command substitution and a newline via a real waker turn. Verify the receiving
+  slot acknowledges the exact text and no command runs or waits for approval.
+- [ ] The launcher treats repo and config paths as data: spaces and literal shell
+  metacharacters reach the intended process without splitting or execution.
+  Capture the launched process's argv and use a harmless substitution marker;
+  assert exact argument boundaries and that the marker was never created.
+
+Working slots require the above evidence and owner approval. Cluster ACL rollout
+remains in slice 5.
 
 ### Slice 5: cluster Valkey
 
