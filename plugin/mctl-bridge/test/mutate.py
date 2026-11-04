@@ -127,6 +127,11 @@ M=[
  ("slot.sh drops Remote Control", SLOT, "exec claude ${rc}--model", "exec claude --model", 1),
  ("slot.sh Remote Control ignores the opt-out", SLOT, "[[ ${MCTL_BRIDGE_REMOTE_CONTROL:-1} == 0 ]] || rc=", "rc=", 1),
  ("slot.sh Remote Control name not per slot", SLOT, "rcname=${MCTL_BRIDGE_RC_PREFIX:-mctl-slot-}${(U)s}", "rcname=${MCTL_BRIDGE_RC_PREFIX:-mctl-slot-}x", 1),
+ ("waitReady does not wait for LOADING", "src/store.ts", '(err instanceof Error && /\\bLOADING\\b/.test(msg)) || ', '', 1),
+ ("waitReady waits for a missing library too", "src/store.ts", "        if (!unknown) throw err;", "        if (false) throw err;", 1),
+ ("waitReady gives up silently", "src/store.ts", "throw new Error(`valkey not ready before the deadline: ${msg}`);", "return;", 1),
+ ("ingest dies on LOADING", "src/ingest.ts", "  await bridge.waitReady({ onWait: (r) => log(\"waiting for valkey\", { reason: r }) });", "  await bridge.checkVersion();", 1),
+ ("waker dies on LOADING", "src/waker.ts", "  await bridge.waitReady({ onWait: (r) => log(\"waiting for valkey\", { reason: r }) });", "  await bridge.checkVersion();", 1),
  ("slot.sh mcp reads the operator password", SLOT, '$(json "$d/slot.pw")', '$(json "$pw")', 1),
 
  ("poison memo off", LUA, "  redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', body, 'entry', entry, 't', now)\n  redis.call('PEXPIRE', memo, RETAIN_MS)\n  ingest_reject(slot, entry, rid, fn, reason, now)", "  ingest_reject(slot, entry, rid, fn, reason, now)", 1),
