@@ -8,14 +8,23 @@
 -- authoritative.
 --
 -- Roles. Orchestrator functions declare `mctl:bridge:orch` as their first key; slot
--- functions declare that slot's `mctl:bridge:s:<slot>:slot`. A Valkey ACL can then
--- keep each role to its own functions' keys (slice 5). Keys are derived inside the
--- functions, so the library targets a standalone Valkey, not a Cluster.
+-- functions declare that slot's `mctl:bridge:s:<slot>:slot`. Keys are derived inside
+-- the functions, so the library targets a standalone Valkey, not a Cluster.
+--
+-- Slot isolation (slice 4b). Valkey checks every key a function touches against the
+-- caller's ACL, so a slot allowed to FCALL its own functions could write any other
+-- key too. Slots therefore get no FCALL at all: a slot XADDs a request to its own
+-- `s:<slot>:out` stream and reads the answer from `s:<slot>:resp`, which only the
+-- orchestrator writes. `bridge_ingest` (orchestrator role) takes one request, takes
+-- the slot's identity from the stream the request was read from, never from its
+-- body, runs the slot function, and in the same call stores the answer under the
+-- request id, appends it to the response stream and advances the slot's checkpoint.
+-- A retried request id gets the stored answer, so nothing is applied twice.
 --
 -- Every function returns a JSON object: {"ok":true,...} or {"ok":false,"code":...}.
 -- Rejections are data, not errors: a fenced or stale caller is an expected event.
 
-local VERSION = '2'
+local VERSION = '3'
 local P = 'mctl:bridge:'
 local MAX_PAYLOAD = 16384
 local MAX_HOP = 4
@@ -463,6 +472,15 @@ local function ask(keys, a)
   return ok({ question_id = qid })
 end
 
+-- ARGV: slot. The slot's own registration, as the adapter's bridge_status shows it.
+local function slot_status(keys, a)
+  local slot = a[1]
+  if not valid_slot(slot) or keys[1] ~= skey(slot) then return no('bad_request') end
+  local s = hgetall(skey(slot))
+  return ok({ epoch = s.epoch or '', conn_id = s.conn_id or '', uuid = s.uuid or '',
+    inflight = s.inflight or '', inflight_attempt = s.inflight_attempt or '', busy = s.busy or '' })
+end
+
 ---------------------------------------------------------------------------------
 -- Orchestrator functions (first key: mctl:bridge:orch)
 ---------------------------------------------------------------------------------
@@ -611,6 +629,106 @@ local function resolve(keys, a)
   end
   if m.kind == 'question' then redis.call('DEL', P .. 'claim:' .. id) end
   return ok({ id = id, state = target })
+end
+
+---------------------------------------------------------------------------------
+-- Ingest (orchestrator role): the only way a slot's request changes state.
+---------------------------------------------------------------------------------
+
+local MAX_REQUEST = 40000
+local MAX_ARGS = 16
+local RESP_MAXLEN = 10000
+local SLOT_FN = {
+  register = register, heartbeat = heartbeat, unregister = unregister, next = next_message,
+  emitted = mark_emitted, emit_lost = emit_lost, ack_task = ack_task, ack_reply = ack_reply,
+  result = report_result, ask = ask, status = slot_status,
+}
+
+local function out_key(slot) return P .. 's:' .. slot .. ':out' end
+local function resp_key(slot) return P .. 's:' .. slot .. ':resp' end
+local function checkpoint_key(slot) return P .. 'ingest:' .. slot end
+
+-- Stream ids are '<ms>-<seq>'; -1, 0, 1.
+local function id_cmp(x, y)
+  local xm, xs = x:match('^(%d+)%-(%d+)$')
+  local ym, ys = y:match('^(%d+)%-(%d+)$')
+  xm, xs, ym, ys = tonumber(xm), tonumber(xs), tonumber(ym), tonumber(ys)
+  if xm ~= ym then return xm < ym and -1 or 1 end
+  if xs ~= ys then return xs < ys and -1 or 1 end
+  return 0
+end
+
+local function valid_entry(s) return type(s) == 'string' and s:match('^%d+%-%d+$') ~= nil end
+
+-- Done with an entry: advance the checkpoint and drop what is behind it.
+local function checkpoint(slot, entry)
+  redis.call('SET', checkpoint_key(slot), entry)
+  redis.call('XTRIM', out_key(slot), 'MINID', entry)
+  redis.call('XDEL', out_key(slot), entry)
+end
+
+-- An entry that cannot be applied is recorded once, keyed by slot and entry id, and
+-- skipped. Its request id is not remembered: a forged id must not stand in the way of
+-- a later valid request that carries the same one.
+local function ingest_reject(slot, entry, rid, fn, reason, now)
+  redis.call('XADD', P .. 'rejected:' .. slot, 'MAXLEN', '~', 1000, '*',
+    'entry', entry, 'rid', rid or '', 'fn', fn or '', 'reason', reason, 't', now)
+  redis.call('XADD', AUDIT, 'MAXLEN', '~', AUDIT_MAXLEN, '*',
+    'id', 'ingest:' .. slot, 'from', '', 'to', 'rejected', 'actor', 'slot:' .. slot,
+    'reason', reason .. ':' .. entry, 't', now)
+  local body = no('rejected', { reason = reason })
+  if valid_id(rid) then
+    redis.call('XADD', resp_key(slot), 'MAXLEN', '~', RESP_MAXLEN, '*', 'rid', rid, 'resp', body)
+  end
+  checkpoint(slot, entry)
+  return body
+end
+
+-- ARGV: slot, entry_id, rid, fn, args_json
+local function ingest(keys, a)
+  local slot, entry, rid, fn, raw = a[1], a[2], a[3], a[4], a[5]
+  if keys[1] ~= ORCH or not valid_slot(slot) or not valid_entry(entry) then return no('bad_request') end
+  local now = now_ms()
+  if id_cmp(entry, redis.call('GET', checkpoint_key(slot)) or '0-0') <= 0 then
+    return ok({ skipped = true })
+  end
+  if not valid_id(rid) then return ingest_reject(slot, entry, nil, fn, 'bad_rid', now) end
+  if type(raw) ~= 'string' or #raw > MAX_REQUEST then return ingest_reject(slot, entry, rid, fn, 'too_large', now) end
+  local memo = P .. 'rpc:' .. slot .. ':' .. rid
+  local seen = redis.call('HMGET', memo, 'fn', 'args', 'resp')
+  local resp
+  if seen[3] then
+    -- A retry returns the stored answer. The same id for another request is refused.
+    if seen[1] ~= fn or seen[2] ~= raw then return ingest_reject(slot, entry, rid, fn, 'rid_conflict', now) end
+    resp = seen[3]
+  else
+    local handler = SLOT_FN[fn]
+    if handler == nil then return ingest_reject(slot, entry, rid, fn, 'unknown_fn', now) end
+    local okd, args = pcall(cjson.decode, raw)
+    if not okd or type(args) ~= 'table' or #args > MAX_ARGS then
+      return ingest_reject(slot, entry, rid, fn, 'bad_args', now)
+    end
+    local call = { slot }
+    for i = 1, #args do
+      if type(args[i]) ~= 'string' then return ingest_reject(slot, entry, rid, fn, 'bad_args', now) end
+      call[#call + 1] = args[i]
+    end
+    resp = handler({ skey(slot) }, call)
+    redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', resp, 'entry', entry, 't', now)
+    redis.call('PEXPIRE', memo, RETAIN_MS)
+  end
+  redis.call('XADD', resp_key(slot), 'MAXLEN', '~', RESP_MAXLEN, '*', 'rid', rid, 'resp', resp)
+  checkpoint(slot, entry)
+  return ok({ applied = true })
+end
+
+-- ARGV: slot, entry_id, reason. For an entry whose handling raised an error.
+local function ingest_poison(keys, a)
+  local slot, entry, reason = a[1], a[2], a[3] or 'handler_error'
+  if keys[1] ~= ORCH or not valid_slot(slot) or not valid_entry(entry) then return no('bad_request') end
+  if id_cmp(entry, redis.call('GET', checkpoint_key(slot)) or '0-0') <= 0 then return ok({ skipped = true }) end
+  ingest_reject(slot, entry, nil, nil, reason, now_ms())
+  return ok()
 end
 
 ---------------------------------------------------------------------------------
@@ -834,6 +952,8 @@ reg('bridge_ack_task', ack_task)
 reg('bridge_ack_reply', ack_reply)
 reg('bridge_result', report_result)
 reg('bridge_ask', ask)
+reg('bridge_ingest', ingest)
+reg('bridge_ingest_poison', ingest_poison)
 reg('bridge_send', send)
 reg('bridge_claim', claim)
 reg('bridge_renew', renew)
