@@ -67,6 +67,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(run.status).toBe(0);
     expect(fs.readFileSync(path.join(t.record, "cwd"), "utf8").trim()).toBe(t.repo);
     expect(fs.readFileSync(path.join(t.record, "argv"), "utf8").split("\0").slice(0, -1)).toEqual([
+      "--remote-control", "mctl-slot-S1",
       "--model", "haiku",
       "--mcp-config", path.join(d, "mcp.json"),
       "--strict-mcp-config",
@@ -80,6 +81,20 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(fs.existsSync(path.join(t.repo, "MARKER"))).toBe(false);
     expect(fs.existsSync(path.join(d, "log", "slot-s1.err"))).toBe(true);
     fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
+  test("Remote Control is on by default, named per slot, and can be turned off", () => {
+    const on = setup();
+    expect(spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "ab-2", on.repo], { env: on.env, encoding: "utf8" }).status).toBe(0);
+    const runOn = fs.readFileSync(path.join(on.H, "slots", "ab-2", "run.sh"), "utf8");
+    expect(runOn).toContain("--remote-control 'mctl-slot-AB-2' --model");
+    fs.rmSync(on.root, { recursive: true, force: true });
+
+    const off = setup();
+    const r = spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "ab-2", off.repo], { env: { ...off.env, MCTL_BRIDGE_REMOTE_CONTROL: "0" }, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    expect(fs.readFileSync(path.join(off.H, "slots", "ab-2", "run.sh"), "utf8")).not.toContain("--remote-control");
+    fs.rmSync(off.root, { recursive: true, force: true });
   });
 
   test("without the slot user, start refuses unless the trusted experiment is asked for", () => {

@@ -124,6 +124,9 @@ M=[
  ("probe.sh passes no foreign pids", "ops/host-boundary-probe.sh", " pid=$$ pid=1", "", 1),
  ("probe drops a malformed pid silently", "ops/host-boundary-probe.py", 'if not a[4:].isdigit(): sys.exit(', 'if False: sys.exit(', 1),
  ("probe skips secrets it cannot stat", "ops/host-boundary-probe.py", '    attempt(f"read operator secret {rel}", "DENIED", read1(f"{OPHOME}/{rel}"))', '    if os.path.exists(f"{OPHOME}/{rel}"): attempt(f"read operator secret {rel}", "DENIED", read1(f"{OPHOME}/{rel}"))', 1),
+ ("slot.sh drops Remote Control", SLOT, "exec claude ${rc}--model", "exec claude --model", 1),
+ ("slot.sh Remote Control ignores the opt-out", SLOT, "[[ ${MCTL_BRIDGE_REMOTE_CONTROL:-1} == 0 ]] || rc=", "rc=", 1),
+ ("slot.sh Remote Control name not per slot", SLOT, "rcname=${MCTL_BRIDGE_RC_PREFIX:-mctl-slot-}${(U)s}", "rcname=${MCTL_BRIDGE_RC_PREFIX:-mctl-slot-}x", 1),
  ("slot.sh mcp reads the operator password", SLOT, '$(json "$d/slot.pw")', '$(json "$pw")', 1),
 
  ("poison memo off", LUA, "  redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', body, 'entry', entry, 't', now)\n  redis.call('PEXPIRE', memo, RETAIN_MS)\n  ingest_reject(slot, entry, rid, fn, reason, now)", "  ingest_reject(slot, entry, rid, fn, reason, now)", 1),
