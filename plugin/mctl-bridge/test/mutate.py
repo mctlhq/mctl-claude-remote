@@ -4,6 +4,16 @@
 Each entry reverts one guarantee in src/bridge.lua (or the durable test
 profile) and runs `bun test`; every mutation must make at least one test fail.
 Run from plugin/mctl-bridge:  python3 test/mutate.py [name ...]
+
+Sharding (CI runs 4 jobs in parallel):
+  python3 test/mutate.py --shard I/N        run shard I of N (1-based)
+  python3 test/mutate.py --list-shard I/N   print the names in that shard
+The partition is round-robin over the full list by index (index % N == I-1),
+so it is a pure function of the list. Every shard still validates the patterns
+of the WHOLE list before touching a file and runs the FULL `bun test` per
+mutation. A shard fails if a mutation survived, a run crashed or timed out, an
+empty shard was requested, or it ran a different number of mutations than its
+partition says. test/test_shards.py proves the partition is exact.
 """
 import subprocess, sys, shutil
 LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'
@@ -112,25 +122,72 @@ M=[
  ("no fsync", SUP, '"--appendfsync", "always"', '"--appendfsync", "no"', 1),
  ("no aof", SUP, '["--save", "", "--appendonly", "yes", "--appendfsync", "always"]', '["--save", "", "--appendonly", "no"]', 1),
 ]
-only=sys.argv[1:]
-# Every pattern must match exactly where intended before any file is touched.
-ambiguous=[(name, open(f).read().count(old)) for name,f,old,new,n in M if open(f).read().count(old)!=n]
-if ambiguous:
-    sys.exit(f"mutation patterns do not match as declared: {ambiguous}")
-survived=[]
-for name,f,old,new,n in M:
-    if only and name not in only: continue
-    src=open(f).read()
-    assert src.count(old)==n, (name, src.count(old))
-    shutil.copy(f,f+'.bak')
-    open(f,'w').write(src.replace(old,new))
+
+def parse_shard(spec, total=None):
+    """'I/N' -> (I, N); anything malformed or out of range is an error."""
     try:
-        r=subprocess.run(['bun','test'],capture_output=True,text=True,timeout=300)
-    finally:
-        shutil.move(f+'.bak',f)
-    out=r.stdout+r.stderr
-    fails=[l.strip() for l in out.splitlines() if l.strip().startswith('(fail)')]
-    print(('KILLED ' if r.returncode else 'SURVIVED ')+name, '|', '; '.join(fails)[:200])
-    if not r.returncode: survived.append(name)
-if survived:
-    sys.exit('survived: ' + ', '.join(survived))
+        i, n = (int(x) for x in spec.split('/'))
+    except ValueError:
+        raise SystemExit(f"bad shard spec {spec!r}, want I/N")
+    if n < 1 or not 1 <= i <= n:
+        raise SystemExit(f"bad shard spec {spec!r}: need 1 <= I <= N")
+    return i, n
+
+def shard_of(entries, i, n):
+    """Round-robin partition by index; deterministic from the list alone."""
+    return [e for k, e in enumerate(entries) if k % n == i - 1]
+
+def main(argv):
+    shard = None; list_only = False; only = []
+    args = list(argv)
+    while args:
+        a = args.pop(0)
+        if a in ('--shard', '--list-shard'):
+            if not args: sys.exit(f"{a} needs I/N")
+            shard = parse_shard(args.pop(0)); list_only = a == '--list-shard'
+        else:
+            only.append(a)
+    if shard and only:
+        sys.exit("--shard and explicit names are mutually exclusive")
+    names = [e[0] for e in M]
+    if len(set(names)) != len(names):
+        sys.exit("duplicate mutation names")
+    # Every pattern must match exactly where intended before any file is touched,
+    # in every shard, so a stale pattern fails all of them.
+    ambiguous=[(name, open(f).read().count(old)) for name,f,old,new,n in M if open(f).read().count(old)!=n]
+    if ambiguous:
+        sys.exit(f"mutation patterns do not match as declared: {ambiguous}")
+    if shard:
+        todo = shard_of(M, *shard)
+        if not todo:
+            sys.exit(f"shard {shard[0]}/{shard[1]}: empty shard ({len(M)} total), refusing to pass")
+        if list_only:
+            print('\n'.join(e[0] for e in todo)); return
+    else:
+        unknown = [o for o in only if o not in names]
+        if unknown: sys.exit(f"unknown mutation names: {unknown}")
+        todo = [e for e in M if not only or e[0] in only]
+    survived=[]; ran=0
+    for name,f,old,new,n in todo:
+        src=open(f).read()
+        assert src.count(old)==n, (name, src.count(old))
+        shutil.copy(f,f+'.bak')
+        open(f,'w').write(src.replace(old,new))
+        try:
+            r=subprocess.run(['bun','test'],capture_output=True,text=True,timeout=300)
+        finally:
+            shutil.move(f+'.bak',f)
+        ran += 1
+        out=r.stdout+r.stderr
+        fails=[l.strip() for l in out.splitlines() if l.strip().startswith('(fail)')]
+        print(('KILLED ' if r.returncode else 'SURVIVED ')+name, '|', '; '.join(fails)[:200], flush=True)
+        if not r.returncode: survived.append(name)
+    label = f"shard {shard[0]}/{shard[1]}" if shard else "run"
+    print(f"{label}: ran {ran} of {len(todo)} expected, {len(M)} total", flush=True)
+    if ran != len(todo):
+        sys.exit(f"{label}: ran {ran} mutations, expected {len(todo)}")
+    if survived:
+        sys.exit('survived: ' + ', '.join(survived))
+
+if __name__ == '__main__':
+    main(sys.argv[1:])
