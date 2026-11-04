@@ -16,7 +16,7 @@ empty shard was requested, or it ran a different number of mutations than its
 partition says. test/test_shards.py proves the partition is exact.
 """
 import subprocess, sys, shutil
-LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'
+LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'; GUARD='ops/codex-remote-guard.sh'
 M=[
  ("fencing off", LUA, "local function fenced(s, conn, epoch)\n  return", "local function fenced(s, conn, epoch)\n  do return false end\n  return", 1),
  ("busy gate off", LUA, "if s.busy ~= '0' then return no('busy') end", "", 1),
@@ -142,6 +142,16 @@ M=[
  ("install.sh maxmemory off", "ops/install.sh", "maxmemory 256mb\n", "", 1),
  ("no fsync", SUP, '"--appendfsync", "always"', '"--appendfsync", "no"', 1),
  ("no aof", SUP, '["--save", "", "--appendonly", "yes", "--appendfsync", "always"]', '["--save", "", "--appendonly", "no"]', 1),
+ ("guard ignores remote-control flag", GUARD, "!/--remote-control/ { print $1 }", "{ print $1 }", 1),
+ ("guard counts proxy as server", GUARD, "&& !/ proxy/ {", "{", 1),
+ ("guard kills during wake", GUARD, 'if [ "$state" = open ]; then', 'if false; then', 1),
+ ("guard unreadable log is idle", GUARD, 'if [ ! -r "$WAKER_LOG" ]; then', 'if false; then', 1),
+ ("guard restart does not clear open wake", GUARD, '  /"msg":"started"/ { s = "idle" }\n', '', 1),
+ ("guard failed wake stays open", GUARD, ' || /"msg":"wake failed"/', '', 1),
+ ("guard ignores kill failure", GUARD, '$KILL "$pid" || { say "could not stop pid $pid"; exit 1; }', '$KILL "$pid" || true', 1),
+ ("guard ps truncates", GUARD, '-axww -o pid=,command=', '-ax -o pid=,command=', 1),
+ ("guard wake scan is a fixed tail", GUARD, "state=$(grep -E '\"msg\":\"(wake (intent|started|completed|failed|no longer ours)|started)\"' \"$WAKER_LOG\" | tail -n 50 | awk '", "state=$(tail -n 400 \"$WAKER_LOG\" | awk '", 1),
+ ("guard never starts the daemon", GUARD, '"$CODEX" remote-control start 2>&1 ||', 'true ||', 1),
 ]
 
 def parse_shard(spec, total=None):
