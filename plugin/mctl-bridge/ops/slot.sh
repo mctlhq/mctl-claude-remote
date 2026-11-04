@@ -17,6 +17,9 @@
 # `sudo -n -H -u` (-H: the slot user's HOME, not the operator's). The slot's files, logs and
 # hook state live in that user's home. If the user does not exist, start refuses, unless
 # MCTL_BRIDGE_TRUSTED_EXPERIMENT=1 runs the slot under the operator's uid (no isolation).
+# Each slot also starts with Remote Control, named mctl-slot-<SLOT> (upper case), so it shows up
+# in the Claude app on a phone and its permission prompts can be answered there. Needs a
+# claude.ai login in the slot user. MCTL_BRIDGE_REMOTE_CONTROL=0 turns it off.
 set -euo pipefail
 H=${MCTL_BRIDGE_HOME:-$HOME/mctl-bridge}
 MAX=${MCTL_BRIDGE_MAX_SLOTS:-2}
@@ -99,6 +102,10 @@ JSON
     put $d/settings.json 600 <<JSON
 {"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":$hook}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":$hook}]}],"Stop":[{"hooks":[{"type":"command","command":$hook}]}]}}
 JSON
+    # Remote Control name (a flag with a value, or nothing). The slot name is already restricted
+    # to [a-z0-9-], and the name is zsh-quoted anyway.
+    rc=; rcname=${MCTL_BRIDGE_RC_PREFIX:-mctl-slot-}${(U)s}
+    [[ ${MCTL_BRIDGE_REMOTE_CONTROL:-1} == 0 ]] || rc="--remote-control ${(qq)rcname} "
     tools=mcp__mctl-bridge__ack_task,mcp__mctl-bridge__ack_reply,mcp__mctl-bridge__ask_orchestrator,mcp__mctl-bridge__report_result,mcp__mctl-bridge__bridge_status
     # In run.sh below the unlock goes through security's interactive mode on stdin: the password
     # never reaches argv, and without -p a plain unlock would read /dev/tty (the session's pty)
@@ -111,7 +118,7 @@ export ENABLE_CLAUDEAI_MCP_SERVERS=false
 kc=${(qq)d}/keychain.pw
 [[ -r \$kc ]] && printf 'unlock-keychain -p %s %s\\n' "\$(<\$kc)" ${(qq)sh_home}/Library/Keychains/login.keychain-db | security -i >/dev/null 2>&1
 cd ${(qq)repo:A}
-exec claude --model ${(qq)MODEL} --mcp-config ${(qq)d}/mcp.json --strict-mcp-config --settings ${(qq)d}/settings.json \\
+exec claude ${rc}--model ${(qq)MODEL} --mcp-config ${(qq)d}/mcp.json --strict-mcp-config --settings ${(qq)d}/settings.json \\
   --dangerously-load-development-channels server:mctl-bridge \\
   --allowedTools $tools --permission-mode default 2>>${(qq)d}/log/slot-$s.err
 RUN
