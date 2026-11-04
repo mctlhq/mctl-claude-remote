@@ -34,6 +34,36 @@ and the trusted tooling). `ack_task` returns a grant only if its `task_id`, `att
 and no work starts. `ops/slot.sh start` creates `bridge_slot_<name>`, its password file
 and the allow-list entry (`mctl:bridge:slots-allowed`).
 
+A request whose handler raises a script error (Valkey does not roll back the writes made
+before the error) is answered once: the ingester passes the request id, function and
+arguments to `bridge_ingest_poison`, which stores the rejection (`rejected` /
+`handler_error`) as the memo and the answer. A retry of the same id gets that answer and
+the handler is not run again; the same id with another request is a `rid_conflict`. An
+entry with no valid id can only be recorded and skipped.
+
+### Write volume (what is bounded, what is not)
+
+The ACL limits which keys a slot writes, not how much. `ops/install.sh` therefore sets,
+in `valkey.conf`: `proto-max-bulk-len` and `client-query-buffer-limit` at 1 MiB (the lowest
+value Valkey accepts; requests are at most 40000 bytes, enforced by the ingester), and
+`maxmemory 256mb` with `maxmemory-policy noeviction`. The test server runs with the same
+values and a test proves that a 2 MiB `XADD` from a slot credential is refused and changes
+nothing (another test keeps `install.sh` and the test profile equal).
+
+What this does not do:
+
+- A slot can still append entries up to 1 MiB each as fast as the server accepts them,
+  so a single request is bounded to 1 MiB but the stream is not. The ingester removes an
+  entry only when it gets to it.
+- `noeviction` never discards state, so when memory reaches the cap every write command
+  fails with `OOM`, **including the orchestrator's and the ingester's** (they are
+  `FCALL`s). A flooding slot can therefore stall the whole bridge until memory is freed
+  by an operator (stop the slot, `XTRIM` its `:out` stream as `bridge_admin`). Nothing is
+  lost and no wrong answer is given (a slot reports success only after reading an
+  answer), but availability is not protected. Watch `used_memory` against `maxmemory`.
+- Bounding the staging stream from the ingester side (trimming a lagging slot's stream)
+  is not done: it cannot be bounded in bytes, and a flooder outpaces a drain loop.
+
 Not done by this slice: A and B still run under one OS account. Separate uids, protected
 credential files and the Codex socket are an operator step (needs sudo); until then the
 credential files of A and B are readable from either.
