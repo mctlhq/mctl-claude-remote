@@ -85,6 +85,27 @@ credential files of A and B are readable from either.
   (WebSocket over a Unix socket, JSON-RPC).
 - `src/valkey.ts`: a byte-identical copy of the `mctl-events` client (a test enforces it).
 
+## Deploying to the Mac mini (declarative)
+
+`com.mctl.bridge-updater` (`ops/bridge-updater.sh`, every 10 minutes) keeps the mini on the
+release the repository declares, so nothing is copied by hand.
+
+- **Desired state:** the highest `MAJOR.MINOR.PATCH` tag (no `v`) whose commit is an ancestor
+  of `main`. A tag on any other commit never deploys. Releases come from release-please, so
+  merging the release PR is the deploy decision.
+- **Hold or roll back:** put a tag in `~/mctl-bridge/etc/pin` (it must also be on `main`).
+  Delete the file to follow releases again.
+- **Installed state:** `~/mctl-bridge/VERSION` (`<tag> <commit>`); on a difference the tagged
+  tree is exported and its `ops/install.sh` runs. Log: `~/mctl-bridge/log/bridge-updater.log`.
+- **Safe by default:** a failed fetch, an unreadable waker log or a missing
+  `etc/thread-id` is reported and nothing is installed; no install while a wake is in flight;
+  a release that failed to install is not retried until a newer release or a pin appears
+  (`etc/updater-failed`).
+- **Bootstrap once by hand:** `ops/install.sh <thread id>` (also writes `etc/thread-id`).
+  After that the updater takes over. A new updater plist takes effect the next time the
+  job is loaded, because the updater cannot boot itself out mid-install.
+- `com.mctl.codex-remote-guard` is installed by the same script (see `ops/codex-remote-guard.sh`).
+
 ## Running a slot
 
 The adapter takes its configuration from its own environment, set in the slot's

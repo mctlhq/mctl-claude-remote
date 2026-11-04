@@ -18,6 +18,8 @@ set -u
 CODEX=${MCTL_GUARD_CODEX:-$HOME/.local/bin/codex}
 WAKER_LOG=${MCTL_GUARD_WAKER_LOG:-${MCTL_BRIDGE_HOME:-$HOME/mctl-bridge}/log/waker.log}
 KILL=${MCTL_GUARD_KILL:-kill}
+HERE=$(dirname "$0")
+. "$HERE/wake-state.sh" || { echo "codex-remote-guard: cannot read $HERE/wake-state.sh" >&2; exit 1; }
 say() { printf '%s codex-remote-guard: %s\n' "$(date -u +%FT%TZ)" "$*"; }
 
 # -ww: BSD ps cuts the command at 80 columns when piped, which would drop a trailing
@@ -46,13 +48,7 @@ if [ ! -r "$WAKER_LOG" ]; then
   say "waker log unreadable ($WAKER_LOG); not restarting"
   exit 0
 fi
-# Only wake and start events matter; filtering first keeps a chatty log from pushing an
-# open wake out of a fixed-size window.
-state=$(grep -E '"msg":"(wake (intent|started|completed|failed|no longer ours)|started)"' "$WAKER_LOG" | tail -n 50 | awk '
-  /"msg":"wake intent"/ || /"msg":"wake started"/ { s = "open" }
-  /"msg":"wake completed"/ || /"msg":"wake failed"/ || /"msg":"wake no longer ours"/ { s = "idle" }
-  /"msg":"started"/ { s = "idle" }
-  END { print (s == "" ? "idle" : s) }')
+state=$(waker_state "$WAKER_LOG")
 if [ "$state" = open ]; then
   say "unmanaged app-server found but a wake is in flight; will retry next run"
   exit 0
