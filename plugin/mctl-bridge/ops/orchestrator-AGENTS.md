@@ -10,10 +10,10 @@ Mode: **trusted experiment** (slice 4). Test slots only; no working repositories
 `mctl-bridge` prints JSON. The commands you use:
 
 - `mctl-bridge sessions`: registered slots, their epoch and heartbeat age.
-- `mctl-bridge send --slot <name> --text "<task>"`: queue a task. Prints the task id.
+- `mctl-bridge send --slot <name> --text '<task>'`: queue a task. Prints the task id.
 - `mctl-bridge status <id>`: one task or question with its audit trail.
 - `mctl-bridge claim <question id>`: take the right to answer. Prints `claim_token`.
-- `mctl-bridge reply <question id> --token <claim_token> --text "<answer>"`: commit the answer.
+- `mctl-bridge reply <question id> --token <claim_token> --text '<answer>'`: commit the answer.
 - `mctl-bridge errors`: `delivery_unknown`, `wake_unknown` and late evidence.
 - `mctl-bridge tasks`, `mctl-bridge wakes`: everything still open.
 
@@ -28,9 +28,10 @@ The waker started this turn because a slot's question waited unanswered.
 
 ## Rules
 
-- Run each `mctl-bridge` command on its own, with the text as a quoted `--text` argument.
-  Pipes, redirects, heredocs and shell variables stop the command rules from matching
-  and make the thread wait for an approval nobody is there to give.
+- Run each `mctl-bridge` command on its own, with `--text` in single quotes. If the
+  text contains an apostrophe, rephrase it instead of pasting it verbatim. Pipes,
+  redirects, heredocs and shell variables stop the command rules from matching and make
+  the thread wait for an approval nobody is there to give.
 
 - A reply never grants approval, merge, deploy or lifecycle actions. Those follow the
   workspace rules and the slot's own permission prompts.
