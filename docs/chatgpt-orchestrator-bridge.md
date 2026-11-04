@@ -619,6 +619,53 @@ Scenarios:
 
 Then measure two active slots with the Codex app server and the waker.
 
+#### Slice 4 results (2026-11-04, trusted experiment)
+
+Run on the Mac mini against the isolated Valkey 8.1.11 (`appendfsync always`), two
+Haiku slots, the Codex daemon 0.163.0 and the waker 0.3.1. Mode: **trusted
+experiment**. All processes share one macOS user, so scenario 8 records bypasses, not
+isolation. Working slots stay blocked until slice 4b.
+
+| # | Result |
+|---|--------|
+| 1 | Passed. A's task never reached B. |
+| 2 | Passed. Question → wake → claim → reply → same slot, visible in the Codex thread. |
+| 3 | Passed in part: the claim token allowed one committed reply. |
+| 4 | Passed. `/clear` and an adapter kill gave `delivery_unknown` with reason `epoch_changed` or `heartbeat_lost`, no resend. |
+| 5 | Passed with a component-wise restart instead of a reboot (the mini also hosts prod services). SIGKILL of Valkey: task, 5 audit entries and dedup (`dedup:true` on a repeated idempotency key) intact; slots reconnected on their own; the waker logged `ECONNREFUSED` and retried. Waker SIGKILL: recovered, see 7. Mini reboot: **not run**. |
+| 6 | Passed. A task sent during a running tool waited for idle. |
+| 7 | Passed. Waker killed while the wake was `started`. The turn kept running in the Codex daemon, the orchestrator claimed and replied, slot B acknowledged the reply and reported its result on the same `attempt_id`. After the waker restart `recover()` settled the wake as `wake_completed`; no second `turn/start`. A got nothing. |
+| 8 | **Bypass recorded, as expected in this mode.** From the slot's user: `orch.pw`, `slot.pw` and `admin.pw` are readable (0600, same owner); `bridge_slot` and `bridge_orch` can both `HSET`/`DEL` any `mctl:bridge:*` key directly; the Codex control socket accepts a connection. `CONFIG SET` is refused for both roles (`NOPERM`). |
+
+Measured with both slots live: 38% memory free, swap 2.46 GB of 4 GB (the 2.4 GB it
+had before), load 1.6. Each Claude slot is about 300 MB; the Codex daemon 150 MB.
+
+Findings:
+
+- **launchd did not respawn a SIGKILLed job.** `com.mctl.bridge-valkey` and
+  `com.mctl.bridge-waker` have `KeepAlive` true, yet after `kill -9` and
+  `launchctl kill KILL` they stayed `not running` ("pended nondemand spawn =
+  inefficient") until `launchctl kickstart`. Do not rely on KeepAlive for recovery on
+  this host; a supervisor check or an explicit restart is needed.
+- A question has no default TTL (`expires_ms` 0), and a question whose wakes are
+  exhausted stays `asked` forever. Slice 4b or a later slice needs a bound.
+- `init` needs the admin user (`function|load` is not granted to `bridge_orch`); this is
+  intended.
+
+### Slice 4b: security boundary
+
+Required before any working slot connects. Key prefixes do not isolate slots: Valkey
+checks every command and key inside a function against the caller's ACL, so a slot that
+may call its own functions can also write any other `mctl:bridge:*` key. Options: a
+broker that checks the slot's OS identity; a per-slot keyspace where a slot writes only
+its own area and the orchestrator applies confirmed events; or a separate OS user for
+slots. Tests for 4b:
+
+- scenario 8 shows a refusal for all three attempts;
+- an operation refused by ACL must not change state and must not raise `epoch`: check
+  rights before changing state, or make the transition atomic;
+- a slot cannot change another task's authoritative state.
+
 ### Slice 5: cluster Valkey
 
 A PR in mctl-gitops adds the users from the permission boundary (`bridge_orch`,

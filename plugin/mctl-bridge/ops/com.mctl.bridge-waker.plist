@@ -1,0 +1,29 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.mctl.bridge-waker</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>@BUN@</string>
+    <string>run</string>
+    <string>--silent</string>
+    <string>--no-env-file</string>
+    <string>--config=@H@/plugin/bunfig.toml</string>
+    <string>@H@/plugin/src/waker.ts</string>
+  </array>
+  <key>WorkingDirectory</key><string>@H@</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>MCTL_BRIDGE_VALKEY_URL</key><string>redis://bridge_orch@127.0.0.1:@PORT@/0</string>
+    <key>MCTL_BRIDGE_VALKEY_PASSWORD_FILE</key><string>@H@/etc/orch.pw</string>
+    <key>MCTL_BRIDGE_THREAD_ID</key><string>@THREAD@</string>
+    <key>MCTL_BRIDGE_CODEX_SOCKET</key><string>@HOME@/.codex/app-server-control/app-server-control.sock</string>
+  </dict>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>@H@/log/waker.log</string>
+  <key>StandardErrorPath</key><string>@H@/log/waker.log</string>
+</dict>
+</plist>
