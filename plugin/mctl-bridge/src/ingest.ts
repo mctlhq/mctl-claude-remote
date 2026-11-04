@@ -103,7 +103,7 @@ export async function main(): Promise<number> {
   const pwFile = process.env.MCTL_BRIDGE_VALKEY_PASSWORD_FILE;
   const password = pwFile ? fs.readFileSync(pwFile, "utf8").replace(/[\r\n]+$/, "") : null;
   const bridge = new Bridge(new Connection(endpointFromUrl(url, password)));
-  await bridge.checkVersion();
+  await bridge.waitReady({ onWait: (r) => log("waiting for valkey", { reason: r }) });
   const ingester = new Ingester(bridge);
   process.on("SIGTERM", () => ingester.stop());
   process.on("SIGINT", () => ingester.stop());

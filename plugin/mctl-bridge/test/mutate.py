@@ -124,6 +124,11 @@ M=[
  ("probe.sh passes no foreign pids", "ops/host-boundary-probe.sh", " pid=$$ pid=1", "", 1),
  ("probe drops a malformed pid silently", "ops/host-boundary-probe.py", 'if not a[4:].isdigit(): sys.exit(', 'if False: sys.exit(', 1),
  ("probe skips secrets it cannot stat", "ops/host-boundary-probe.py", '    attempt(f"read operator secret {rel}", "DENIED", read1(f"{OPHOME}/{rel}"))', '    if os.path.exists(f"{OPHOME}/{rel}"): attempt(f"read operator secret {rel}", "DENIED", read1(f"{OPHOME}/{rel}"))', 1),
+ ("waitReady does not wait for LOADING", "src/store.ts", '(err instanceof Error && /\\bLOADING\\b/.test(msg)) || ', '', 1),
+ ("waitReady waits for a missing library too", "src/store.ts", "        if (!unknown) throw err;", "        if (false) throw err;", 1),
+ ("waitReady gives up silently", "src/store.ts", "throw new Error(`valkey not ready before the deadline: ${msg}`);", "return;", 1),
+ ("ingest dies on LOADING", "src/ingest.ts", "  await bridge.waitReady({ onWait: (r) => log(\"waiting for valkey\", { reason: r }) });", "  await bridge.checkVersion();", 1),
+ ("waker dies on LOADING", "src/waker.ts", "  await bridge.waitReady({ onWait: (r) => log(\"waiting for valkey\", { reason: r }) });", "  await bridge.checkVersion();", 1),
  ("slot.sh mcp reads the operator password", SLOT, '$(json "$d/slot.pw")', '$(json "$pw")', 1),
 
  ("poison memo off", LUA, "  redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', body, 'entry', entry, 't', now)\n  redis.call('PEXPIRE', memo, RETAIN_MS)\n  ingest_reject(slot, entry, rid, fn, reason, now)", "  ingest_reject(slot, entry, rid, fn, reason, now)", 1),

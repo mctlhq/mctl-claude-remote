@@ -399,7 +399,7 @@ export async function main(): Promise<number> {
   };
   const sweepMs = intEnv("MCTL_BRIDGE_SWEEP_MS", 5000);
   // Fail loudly on a missing or mismatched library, then keep retrying on transport errors.
-  await bridge.checkVersion();
+  await bridge.waitReady({ onWait: (r) => log("waiting for valkey", { reason: r }) });
   const waker = new Waker(bridge, cfg);
   let stopped = false;
   const stop = (): void => {
