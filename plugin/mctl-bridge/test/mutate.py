@@ -117,6 +117,7 @@ M=[
  ("slot.sh sudo without -H", SLOT, 'sudo -n -H -u "$U" "$@"', 'sudo -n -u "$U" "$@"', 1),
  ("slot.sh session host as the operator", SLOT, "( cd /; as_ $PY -I $PTY start $d $d/run.sh )", "( cd /; $PY -I $PTY start $d $d/run.sh )", 1),
  ("slot.sh keychain password on argv", SLOT, "printf 'unlock-keychain -p %s %s\\\\n' \"\\$(<\\$kc)\" ${(qq)sh_home}/Library/Keychains/login.keychain-db | security -i >/dev/null 2>&1", 'security unlock-keychain -p "\\$(<\\$kc)" ${(qq)sh_home}/Library/Keychains/login.keychain-db', 1),
+ ("probe accepts duplicate slots", "ops/host-boundary-probe.sh", "slots=(${(u)@})", "slots=($@)", 1),
  ("slot.sh mcp reads the operator password", SLOT, '$(json "$d/slot.pw")', '$(json "$pw")', 1),
 
  ("poison memo off", LUA, "  redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', body, 'entry', entry, 't', now)\n  redis.call('PEXPIRE', memo, RETAIN_MS)\n  ingest_reject(slot, entry, rid, fn, reason, now)", "  ingest_reject(slot, entry, rid, fn, reason, now)", 1),

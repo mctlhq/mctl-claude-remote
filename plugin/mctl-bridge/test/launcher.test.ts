@@ -126,6 +126,18 @@ describe.skipIf(!usable)("launcher scripts", () => {
     fs.rmSync(t.root, { recursive: true, force: true });
   });
 
+  test("the boundary probe refuses duplicate or single slots instead of passing with nothing to check", () => {
+    const t = setup();
+    stub(path.join(t.root, "bin", "sudo"), `echo called >> "${t.record}/sudo"; exit 0`);
+    for (const args of [["s1"], ["s1", "s1"]]) {
+      const r = spawnSync("zsh", [path.join(OPS, "host-boundary-probe.sh"), ...args], { env: t.env, encoding: "utf8" });
+      expect(r.status).toBe(2);
+      expect(r.stdout).not.toContain("PASSED");
+    }
+    expect(fs.existsSync(path.join(t.record, "sudo"))).toBe(false); // nothing was run as a slot
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
   test("ops/mctl-bridge passes its arguments and a hostile home path through unchanged", () => {
     const t = setup();
     const bun = path.join(t.root, "bin", "fakebun");
