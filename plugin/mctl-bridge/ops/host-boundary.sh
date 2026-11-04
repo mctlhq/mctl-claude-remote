@@ -10,6 +10,7 @@
 #      password at all: nobody logs in as it, the operator reaches it with sudo -u);
 #   2. creates /Users/mctl-slot-<slot>/.mctl-bridge/ (mode 700, owned by that user) for the
 #      slot's Valkey password file;
+#      and a login keychain for it (Claude Code keeps its login there);
 #   3. writes /etc/sudoers.d/mctl-bridge allowing <operator> to run commands AS those slot
 #      users only, without a password (never as root), validated with visudo before install.
 # Re-running is safe. It does not touch the operator's files, Valkey or launchd.
@@ -48,6 +49,12 @@ for s in "$@"; do
   chmod 700 "/Users/${u}"
   install -d -m 700 -o "$u" -g staff "/Users/${u}/.mctl-bridge"
   chown -R "${u}:staff" "/Users/${u}/.mctl-bridge"
+  # Claude Code stores its login in the login keychain, and a hidden user has none: create
+  # one (random password kept in the user's own .mctl-bridge/keychain.pw, mode 600).
+  sudo -n -H -u "$u" sh -c 'cd /; umask 077; K=$HOME/Library/Keychains/login.keychain-db; P=$HOME/.mctl-bridge/keychain.pw
+    [ -s $P ] || openssl rand -hex 24 > $P
+    [ -e $K ] || security create-keychain -p "$(cat $P)" $K
+    security default-keychain -s $K; security list-keychains -d user -s $K; security set-keychain-settings $K'
   users+=($u)
 done
 

@@ -1,5 +1,5 @@
 #!/bin/zsh
-# Test slots for the end-to-end run: interactive Claude Code in GNU screen.
+# Test slots for the end-to-end run: interactive Claude Code on a pty (ops/slot-pty.py).
 #
 #   slot.sh start <slot> <repo dir>   start slot (at most MCTL_BRIDGE_MAX_SLOTS, default 2)
 #   slot.sh stop <slot>               end the session (the adapter unregisters)
@@ -26,6 +26,8 @@ cmd=${1:-}; shift || true
 # A JSON string literal for $1 (escapes quotes, backslashes, control characters).
 json() { /usr/bin/python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.argv[1]))' "$1"; }
 
+PY=${MCTL_BRIDGE_PYTHON:-/usr/bin/python3}
+PTY=${0:A:h}/slot-pty.py
 SLOT_USER_PREFIX=${MCTL_BRIDGE_SLOT_USER_PREFIX:-mctl-slot-}
 HOME_ROOT=${MCTL_BRIDGE_SLOT_HOME_ROOT:-/Users}
 # Slot context. Sets U (slot user or empty), D (slot dir) and as_ (run a command as the slot).
@@ -49,12 +51,12 @@ put() { as_ sh -c 'umask 077; cat > "$1" && chmod "$2" "$1"' sh "$1" "${2:-600}"
 
 admin() { $H/valkey/bin/valkey-cli -p ${MCTL_BRIDGE_PORT:-6390} --user bridge_admin --pass "$(cat $H/etc/admin.pw)" --no-auth-warning "$@"; }
 
-# Screen sessions are per user, so ask each known slot's own user.
+# Sessions are per user, so ask each known slot's own user.
 running() {
   local f s
   for f in $H/etc/slot-*.pw(N); do
     s=${${f:t}#slot-}; s=${s%.pw}
-    ( slotctx $s 2>/dev/null && as_ screen -ls 2>/dev/null | grep -q "\.bridge-slot-$s\b" && echo $s ) || true
+    ( slotctx $s 2>/dev/null && as_ $PY -I $PTY ping $D 2>/dev/null && echo $s ) || true
   done
 }
 
@@ -72,6 +74,7 @@ case $cmd in
     as_ mkdir -p -m 700 "$d" "$d/log"
     # The slot user reads the plugin code; it must not be able to change it (operator-owned).
     chmod -R go-w,a+rX $H/plugin
+    chmod go-w,a+rx $PTY
     # Own Valkey user. Request stream: write only. Response stream and inbox: read only.
     # No FCALL, no scripting: the ingester applies requests as the orchestrator.
     pw=$H/etc/slot-$s.pw
@@ -101,31 +104,32 @@ JSON
 #!/bin/zsh
 export PATH=${(qq)sh_home}/.local/bin:/usr/local/bin:/usr/bin:/bin
 export ENABLE_CLAUDEAI_MCP_SERVERS=false
+# Claude Code keeps its login in the user's login keychain: unlock it for this session.
+kc=${(qq)d}/keychain.pw
+[[ -r \$kc ]] && security unlock-keychain -p "\$(cat -- \$kc)" ${(qq)sh_home}/Library/Keychains/login.keychain-db
 cd ${(qq)repo:A}
 exec claude --model ${(qq)MODEL} --mcp-config ${(qq)d}/mcp.json --strict-mcp-config --settings ${(qq)d}/settings.json \\
   --dangerously-load-development-channels server:mctl-bridge \\
   --allowedTools $tools --permission-mode default 2>>${(qq)d}/log/slot-$s.err
 RUN
-    # cd to the slot's home first: screen starts in the operator's cwd, which the slot user
+    # cd to the slot's home first: the host starts in the operator's cwd, which the slot user
     # may not be allowed to enter.
-    ( cd /; as_ env HOME=$sh_home screen -dmS bridge-slot-$s $d/run.sh )
-    echo "started slot $s in ${repo:A} (screen bridge-slot-$s); accept the channels prompt with: slot.sh keys $s '\\r'"
+    ( cd /; as_ $PY -I $PTY start $d $d/run.sh )
+    echo "started slot $s in ${repo:A} (pty session in $d); accept the channels prompt with: slot.sh keys $s '\\r'"
     ;;
   stop)
     s=${1:?slot}; slotctx $s
-    as_ screen -S bridge-slot-$s -p 0 -X stuff $'/exit\r' 2>/dev/null || true
+    as_ $PY -I $PTY keys $D '/exit\r' >/dev/null 2>&1 || true
     sleep 3
-    as_ screen -S bridge-slot-$s -X quit 2>/dev/null || true
+    as_ $PY -I $PTY stop $D 2>/dev/null || true
     echo "stopped slot $s"
     ;;
   show)
-    s=${1:?slot}; slotctx $s; f=$D/log/slot-$s.hardcopy
-    as_ screen -S bridge-slot-$s -p 0 -X hardcopy -h $f
-    sleep 0.5
-    as_ cat $f | LC_ALL=C tr -cd '[:print:]\n' | grep -v '^\s*$' | tail -${2:-20}
+    s=${1:?slot}; slotctx $s
+    as_ $PY -I $PTY show $D ${2:-20}
     ;;
   keys)
-    s=${1:?slot}; slotctx $s; as_ screen -S bridge-slot-$s -p 0 -X stuff "$(printf '%b' "${2:?string}")"
+    s=${1:?slot}; slotctx $s; as_ $PY -I $PTY keys $D "${2:?string}"
     ;;
   list) running ;;
   uid)  # report the uid that actually owns the slot's claude process (for the isolation proof)

@@ -33,11 +33,12 @@ function setup() {
   fs.writeFileSync(path.join(H, "etc", "admin.pw"), "adminpw");
   stub(path.join(H, "valkey", "bin", "valkey-cli"), "exit 0");
   stub(path.join(bin, "openssl"), "echo deadbeefdeadbeef");
-  stub(path.join(bin, "screen"), `[ "$1" = -ls ] && exit 0\nfor a in "$@"; do printf '%s\\n' "$a"; done > "${record}/screen"`);
+  // the pty host is not started in tests: record how it was asked to start
+  stub(path.join(bin, "fakepython"), `[ "$3" = ping ] && exit 1\nfor a in "$@"; do printf '%s\\n' "$a"; done > "${record}/screen"`);
   // claude: one argv per line is ambiguous for odd args, so write NUL-separated.
   stub(path.join(home, ".local", "bin", "claude"), `pwd -P > "${record}/cwd"\nprintf '%s\\0' "$@" > "${record}/argv"`);
   fs.writeFileSync(path.join(H, "plugin", "hooks", "state.py"), `import pathlib\npathlib.Path(${JSON.stringify(path.join(record, "hook"))}).write_text("ran")\n`);
-  const env = { ...process.env, HOME: home, MCTL_BRIDGE_HOME: H, BUN: "/opt/my bun/bin/bun", MCTL_BRIDGE_TRUSTED_EXPERIMENT: "1", PATH: `${bin}:${process.env.PATH}` };
+  const env = { ...process.env, HOME: home, MCTL_BRIDGE_HOME: H, BUN: "/opt/my bun/bin/bun", MCTL_BRIDGE_TRUSTED_EXPERIMENT: "1", MCTL_BRIDGE_PYTHON: path.join(root, "bin", "fakepython"), PATH: `${bin}:${process.env.PATH}` };
   return { root, home, H, repo, record, env };
 }
 
@@ -93,7 +94,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
     fs.rmSync(t.root, { recursive: true, force: true });
   });
 
-  test("with the slot user, every file and the screen session go through sudo -n -H -u and land in the slot home", () => {
+  test("with the slot user, every file and the screen session host go through sudo -n -H -u and land in the slot home", () => {
     const t = setup();
     const homes = path.join(t.root, "homes");
     fs.mkdirSync(path.join(homes, "mctl-slot-s1"), { recursive: true });
@@ -117,7 +118,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(fs.existsSync(path.join(t.H, "slots"))).toBe(false);
     const sudo = fs.readFileSync(path.join(t.record, "sudo"), "utf8");
     expect(sudo).toContain("-n -H -u mctl-slot-s1");
-    expect(sudo).toMatch(/screen -dmS bridge-slot-s1/);
+    expect(sudo).toMatch(/fakepython -I .*slot-pty\.py start /);
     fs.rmSync(t.root, { recursive: true, force: true });
   });
 

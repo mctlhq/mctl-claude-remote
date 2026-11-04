@@ -67,7 +67,7 @@ CONF
 
 # Code: only what runs. No runtime dependencies.
 rsync -a --delete --exclude node_modules --exclude test --exclude ops "$SRC/" $H/plugin/
-cp $SRC/ops/mctl-bridge $SRC/ops/slot.sh $SRC/ops/host-boundary-probe.sh $SRC/ops/host-boundary-probe.py $H/
+cp $SRC/ops/mctl-bridge $SRC/ops/slot.sh $SRC/ops/slot-pty.py $SRC/ops/host-boundary-probe.sh $SRC/ops/host-boundary-probe.py $H/
 chmod 755 $H/mctl-bridge $H/slot.sh
 mkdir -p $HOME/.local/bin
 ln -sfn $H/mctl-bridge $HOME/.local/bin/mctl-bridge
