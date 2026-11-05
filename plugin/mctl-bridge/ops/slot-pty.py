@@ -45,6 +45,7 @@ class Screen:
         self.grid = [[" "] * cols for _ in range(rows)]
         self.back = []
         self.r = self.c = 0
+        self.saved = (0, 0)
         self.state = "text"; self.param = ""
         self.dec = codecs.getincrementaldecoder("utf-8")("replace")
 
@@ -76,7 +77,10 @@ class Screen:
                 if ch == "[": self.state = "csi"; self.param = ""
                 elif ch == "]": self.state = "osc"
                 elif ch in "()": self.state = "skip1"
-                else: self.state = "text"
+                else:
+                    if ch == "7": self.saved = (self.r, self.c)
+                    elif ch == "8": self.r, self.c = self.saved
+                    self.state = "text"
             elif self.state == "skip1":
                 self.state = "text"
             elif self.state == "osc":
@@ -91,7 +95,7 @@ class Screen:
                     self.param += ch
 
     def _csi(self, f, p):
-        if p[:1] in "?><=!": return  # private modes, cursor style, keyboard protocol: no layout effect
+        if p and p[0] in "?><=!": return  # private modes, cursor style, keyboard protocol: no layout effect
         a = [int(x) if x.isdigit() else 0 for x in p.split(";")] if p else []
         n = a[0] if a and a[0] else 1
         if f == "A": self.r = max(0, self.r - n)

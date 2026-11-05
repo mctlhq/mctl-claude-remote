@@ -103,6 +103,12 @@ if mode == "permission":
 elif mode == "dialog":
     W(" Quick safety check: is this a project you trust?\r\n")
     W(" \u276f No, exit\r\n   Yes, I trust this folder\r\n Enter to confirm \u00b7 Esc to cancel\r\n")
+elif mode == "bare":
+    # sequences with NO parameter, which a real TUI sends most (ESC[K, ESC[A, ESC[H, ESC 7 / ESC 8)
+    W("old text here\r\x1b[Knew\r\n")                      # erase to end of line, then rewrite
+    W("first\r\nsecond\x1b[A\x1b[3C-up\r\n\n")             # cursor up one line, no count
+    W("mark\x1b7\r\nlower\x1b8-back\r\n")                   # save / restore cursor
+    W("\x1b[Hhome-wrote\r\n")                               # home, overwrite line one
 else:
     W("Working on it\r\n")
 sys.stdout.flush()
@@ -130,6 +136,16 @@ class RenderedScreen(unittest.TestCase):
         self.assertIn("git checkout -b docs/bridge-readme-manual-tags && git branch --show-current", shown)
         self.assertNotIn("gitcheckout", shown)
         self.assertEqual(shown.count("Tempering"), 0, "spinner frames drawn in place must not accumulate")
+
+    def test_sequences_without_parameters_are_applied_not_ignored(self):
+        # a real Claude Code stream is mostly these; ignoring them left old text under new text
+        self.start("bare")
+        self.assertTrue(wait_for(lambda: "mark" in run("show", self.d, "50").stdout))
+        shown = run("show", self.d, "50").stdout.split("\n")
+        self.assertNotIn("old text here", "\n".join(shown), "ESC[K must erase the old text")
+        self.assertTrue(any(l.startswith("home-wrote") for l in shown), shown)
+        self.assertIn("mark-back", "\n".join(shown), "ESC 7 / ESC 8 must save and restore the cursor")
+        self.assertTrue(any(l.startswith("first") and l.endswith("-up") for l in shown), "ESC[A without a count must move up one line")
 
     def test_a_waiting_permission_prompt_is_reported_whole(self):
         self.start("permission")
