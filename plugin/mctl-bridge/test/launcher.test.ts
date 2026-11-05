@@ -126,6 +126,8 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(r.status).toBe(0);
     const d = path.join(t.H, "slots", "s1");
     expect(spawnSync("zsh", ["-n", path.join(d, "run.sh")]).status).toBe(0);
+    // the id is zsh-quoted in the generated script like every other value
+    expect(fs.readFileSync(path.join(d, "run.sh"), "utf8")).toContain(`--model 'haiku' --resume '${SID}' --mcp-config`);
     const base = BASE_ARGV(d);
     expect(argvOf(t)).toEqual([...base.slice(0, 4), "--resume", SID, ...base.slice(4)]);
     fs.rmSync(t.root, { recursive: true, force: true });
