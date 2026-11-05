@@ -8,6 +8,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { INSTRUCTIONS } from "../src/channel.ts";
 
 const OPS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "ops");
 const have = (bin: string) => spawnSync("sh", ["-c", `command -v ${bin}`]).status === 0;
@@ -67,9 +68,13 @@ describe.skipIf(!usable)("launcher scripts", () => {
     for (const r of ["Bash(git fetch origin:*)", "Bash(git checkout:*)", "Bash(git commit:*)", "Bash(python3 -m unittest:*)"]) expect(allow).toContain(r);
     for (const r of ["Bash(git push:*)", "Bash(gh:*)", "Bash(curl:*)", "Bash(sudo:*)", "Bash(git remote:*)", "Bash(git config:*)"]) expect(deny).toContain(r);
     expect(allow.filter((r) => deny.includes(r))).toEqual([]);
-    // a Read deny does not bind a Bash subprocess, so no Bash reader may be pre-allowed
-    for (const reader of ["cat", "head", "tail", "grep", "rg", "sed", "jq", "diff", "less", "more", "awk", "sort"])
+    // a Read deny does not bind a Bash subprocess, so no general Bash reader may be pre-allowed
+    for (const reader of ["cat", "grep", "rg", "sed", "jq", "diff", "less", "more", "awk", "sort", "uniq"])
       expect(allow.some((a) => a.startsWith(`Bash(${reader}`))).toBe(false);
+    // pipe filters are allowed so a compound command does not prompt on its last stage
+    for (const f of ["head", "tail", "wc", "cut"]) expect(allow).toContain(`Bash(${f}:*)`);
+    // ...and every credential path is denied by command text, since a filter can read a file
+    for (const frag of [".ssh", ".config/gh", ".aws", ".git-credentials", ".pw", "keychain"]) expect(deny).toContain(`Bash(*${frag}*)`);
     for (const r of ["Bash(rm -fr:*)", "Bash(rm -r -f:*)"]) expect(deny).toContain(r);
     // an allow rule must never cover a denied command family by prefix
     for (const a of allow) for (const bad of ["git push", "gh ", "curl", "wget", "ssh", "sudo", "security"]) expect(a.startsWith(`Bash(${bad}`)).toBe(false);
@@ -218,5 +223,12 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(got.slice(6)).toEqual(args);
     expect(fs.existsSync(path.join(t.root, "MARKER"))).toBe(false);
     fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
+  test("channel instructions tell slots to stay at the repo root and use the Read tools", () => {
+    expect(INSTRUCTIONS).toContain("Work from the repository root and never cd");
+    expect(INSTRUCTIONS).toContain("Read, Grep and Glob tools, not cat, grep or sed in Bash");
+    expect(INSTRUCTIONS).toContain("Edit files with the built-in Edit or Write tools, never with a script run through python3, sed -i,");
+    expect(INSTRUCTIONS).toContain("Run syntax checks (sh -n, bash -n) as separate short commands.");
   });
 });
