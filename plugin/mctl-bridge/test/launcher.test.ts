@@ -62,6 +62,18 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(spawnSync("sh", ["-c", hook], { cwd: t.root }).status).toBe(0);
     expect(fs.readFileSync(path.join(t.record, "hook"), "utf8")).toBe("ran");
 
+    // permission rules: local work allowed, remote writes and credentials denied, no overlap
+    const { allow, deny } = settings.permissions as { allow: string[]; deny: string[] };
+    for (const r of ["Bash(git fetch origin:*)", "Bash(git checkout:*)", "Bash(git commit:*)", "Bash(python3 -m unittest:*)"]) expect(allow).toContain(r);
+    for (const r of ["Bash(git push:*)", "Bash(gh:*)", "Bash(curl:*)", "Bash(sudo:*)", "Bash(git remote:*)", "Bash(git config:*)"]) expect(deny).toContain(r);
+    expect(allow.filter((r) => deny.includes(r))).toEqual([]);
+    // a Read deny does not bind a Bash subprocess, so no Bash reader may be pre-allowed
+    for (const reader of ["cat", "head", "tail", "grep", "rg", "sed", "jq", "diff", "less", "more", "awk", "sort"])
+      expect(allow.some((a) => a.startsWith(`Bash(${reader}`))).toBe(false);
+    for (const r of ["Bash(rm -fr:*)", "Bash(rm -r -f:*)"]) expect(deny).toContain(r);
+    // an allow rule must never cover a denied command family by prefix
+    for (const a of allow) for (const bad of ["git push", "gh ", "curl", "wget", "ssh", "sudo", "security"]) expect(a.startsWith(`Bash(${bad}`)).toBe(false);
+
     expect(spawnSync("zsh", ["-n", path.join(d, "run.sh")]).status).toBe(0);
     const run = spawnSync(path.join(d, "run.sh"), [], { env: t.env, cwd: t.root, encoding: "utf8" });
     expect(run.status).toBe(0);
