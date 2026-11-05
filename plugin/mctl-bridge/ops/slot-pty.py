@@ -16,7 +16,7 @@ session and read its output:
   slot-pty.py stop  <dir>                   ask the child to end (SIGTERM), then SIGKILL
 The socket is only reachable by the slot user (and root); nothing here reads credentials.
 """
-import codecs, fcntl, json, os, pty, re, select, signal, socket, struct, sys, termios, time
+import codecs, fcntl, json, os, pty, re, select, signal, socket, struct, sys, termios, time, unicodedata
 
 def sock_path(d): return os.path.join(d, "ctl.sock")
 
@@ -30,6 +30,24 @@ def call(d, payload, timeout=5):
         out += c
 
 
+
+def query(d, tag):
+    """Ask the host for its screen (R), visible grid (V) or state (A).
+
+    A host that cannot be read is an error, never an empty screen: the screen replies always carry
+    at least the grid's own line breaks, so an empty reply means the host does not know the
+    command (it was started before the upgrade and still runs the old code) or went away. Reading
+    that as "nothing on screen" would report a slot that waits on a permission prompt as not
+    waiting.
+    """
+    try:
+        reply = call(d, tag)
+    except OSError as e:
+        sys.exit(f"slot host unreachable ({e}): cannot observe this slot")
+    if not reply:
+        sys.exit("slot host sent no answer: it probably started before the upgrade and runs the old "
+                 "code. Restart the slot to observe it (stop, then start); its prompt state is UNKNOWN")
+    return reply
 
 class Screen:
     """A small terminal emulator, enough to read what a TUI shows right now.
@@ -59,9 +77,15 @@ class Screen:
         else: self.r += 1
 
     def _put(self, ch):
-        if self.c >= self.cols:
+        if unicodedata.combining(ch) or unicodedata.category(ch) in ("Mn", "Me", "Cf"):
+            if self.c > 0: self.grid[self.r][self.c - 1] += ch  # takes no column of its own
+            return
+        w = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
+        if self.c + w > self.cols:
             self.c = 0; self._lf()
-        self.grid[self.r][self.c] = ch; self.c += 1
+        self.grid[self.r][self.c] = ch
+        if w == 2: self.grid[self.r][self.c + 1] = ""  # the second column belongs to the glyph
+        self.c += w
 
     def feed(self, data):
         for ch in self.dec.decode(data):
@@ -285,15 +309,15 @@ def main():
         text = sys.argv[3].encode().decode("unicode_escape").encode("latin-1")
         sys.stdout.write(call(sys.argv[2], b"K" + text).decode() + "\n")
     elif cmd == "show":
-        lines = [l for l in call(sys.argv[2], b"R").decode("utf-8", "replace").split("\n") if l.strip()]
+        lines = [l for l in query(sys.argv[2], b"R").decode("utf-8", "replace").split("\n") if l.strip()]
         n = int(sys.argv[3]) if len(sys.argv) > 3 else 20
         print("\n".join(lines[-n:]))
     elif cmd == "prompt":
-        p = find_prompt(call(sys.argv[2], b"V").decode("utf-8", "replace").split("\n"))
+        p = find_prompt(query(sys.argv[2], b"V").decode("utf-8", "replace").split("\n"))
         print(json.dumps({"pending": p is not None, "prompt": p}, ensure_ascii=False))
     elif cmd == "state":
-        st = json.loads(call(sys.argv[2], b"A"))
-        p = find_prompt(call(sys.argv[2], b"V").decode("utf-8", "replace").split("\n"))
+        st = json.loads(query(sys.argv[2], b"A"))
+        p = find_prompt(query(sys.argv[2], b"V").decode("utf-8", "replace").split("\n"))
         # What the adapter reports (heartbeat, busy) only says its own process is alive. Progress
         # of the Claude session is: output on the screen (idle_s) or a prompt waiting for a decision.
         print(json.dumps({**st, "prompt_pending": p is not None, "prompt": p}, ensure_ascii=False))

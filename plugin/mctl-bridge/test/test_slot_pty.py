@@ -109,6 +109,9 @@ elif mode == "bare":
     W("first\r\nsecond\x1b[A\x1b[3C-up\r\n\n")             # cursor up one line, no count
     W("mark\x1b7\r\nlower\x1b8-back\r\n")                   # save / restore cursor
     W("\x1b[Hhome-wrote\r\n")                               # home, overwrite line one
+elif mode == "wide":
+    W("\u65e5\u672cx\x1b[7GZ\r\n")                          # two double-width glyphs, then column 7
+    W("e\u0301!\r\n")                                      # a combining accent takes no column
 else:
     W("Working on it\r\n")
 sys.stdout.flush()
@@ -146,6 +149,40 @@ class RenderedScreen(unittest.TestCase):
         self.assertTrue(any(l.startswith("home-wrote") for l in shown), shown)
         self.assertIn("mark-back", "\n".join(shown), "ESC 7 / ESC 8 must save and restore the cursor")
         self.assertTrue(any(l.startswith("first") and l.endswith("-up") for l in shown), "ESC[A without a count must move up one line")
+
+    def test_double_width_glyphs_keep_later_columns_aligned(self):
+        self.start("wide")
+        self.assertTrue(wait_for(lambda: "Z" in run("show", self.d, "50").stdout))
+        shown = run("show", self.d, "50").stdout
+        # 日本 fills columns 1-4, x is 5, column 6 is blank, Z lands in 7 (one cell off if glyphs count as 1)
+        self.assertIn("\u65e5\u672cx Z", shown)
+        self.assertIn("e\u0301!", shown)
+
+    def test_a_host_that_cannot_answer_is_an_error_not_an_empty_screen(self):
+        # a slot host started before the upgrade closes the socket on commands it does not know
+        import socket, threading
+        path = os.path.join(self.d, "ctl.sock")
+        srv = socket.socket(socket.AF_UNIX); srv.bind(path); srv.listen(8)
+        stop = threading.Event()
+        def serve():
+            srv.settimeout(0.2)
+            while not stop.is_set():
+                try: c, _ = srv.accept()
+                except OSError: continue
+                c.close()
+        t = threading.Thread(target=serve, daemon=True); t.start()
+        self.addCleanup(lambda: (stop.set(), t.join(2), srv.close()))
+        for cmd in ("prompt", "state", "show"):
+            r = run(cmd, self.d)
+            self.assertNotEqual(r.returncode, 0, cmd + " must fail when the host gives no answer")
+            self.assertIn("UNKNOWN", r.stderr)
+            self.assertNotIn("pending", r.stdout, cmd + " must not report a state it could not read")
+
+    def test_an_unreachable_host_is_an_error(self):
+        r = run("prompt", self.d)  # no host was ever started in this directory
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("unreachable", r.stderr)
+        self.assertEqual(r.stdout, "")
 
     def test_a_waiting_permission_prompt_is_reported_whole(self):
         self.start("permission")

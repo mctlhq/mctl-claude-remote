@@ -117,6 +117,22 @@ describe.skipIf(requiresValkey)("observe and watch", () => {
     expect(unknown.stdout).toContain("cli refused: unknown");
   }, 20000);
 
+  test("a hung reading ends as a printed error, never as silence", () => {
+    const hung = fakeCli("hung", "sleep 30");
+    const r = spawnSync("/bin/sh", [WATCH, "t-1", "1", "60"], {
+      env: { ...process.env, MCTL_BRIDGE_CLI: hung, MCTL_BRIDGE_READING_TIMEOUT: "1" },
+      encoding: "utf8",
+      timeout: 40000,
+    });
+    expect(r.status).toBe(3);
+    expect(r.stdout).toContain("WATCH-ERROR: no answer within 1s");
+  }, 30000);
+
+  test("text with backslashes is printed as it is", () => {
+    const cli = fakeCli("bs", `cat <<'EOF'\n{"ok":true,"id":"t-1","kind":"task","state":"completed","reason":"a\\\\nb\\\\c","terminal":true,"needs_operator":false}\nEOF`);
+    expect(watch(cli, "t-1").stdout).toBe("task t-1 completed reason=a\\nb\\c\n");
+  });
+
   test("a reading with no state is an error, not a blank state", () => {
     const r = watch(fakeCli("nostate", `echo '{"ok":true,"id":"t-1"}'`), "t-1", "30");
     expect(r.code).toBe(3);
