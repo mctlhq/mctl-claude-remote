@@ -49,6 +49,18 @@ describe("startup wait for the server", () => {
     expect(calls()).toBe(1);
   });
 
+  test("waitServing waits out LOADING with no library loaded yet", async () => {
+    const { b, calls } = scripted([loading(), loading(), "PONG"]);
+    await b.waitServing({ intervalMs: 5, timeoutMs: 5000 });
+    expect(calls()).toBe(3);
+  });
+
+  test("waitServing does not take a refusal for readiness", async () => {
+    const { b, calls } = scripted([new ValkeyError("NOAUTH Authentication required")]);
+    await expect(b.waitServing({ intervalMs: 5, timeoutMs: 5000 })).rejects.toThrow(/NOAUTH/);
+    expect(calls()).toBe(1);
+  });
+
   test("giving up is an error that names the last unknown state", async () => {
     const { b } = scripted([loading()]);
     await expect(b.waitReady({ intervalMs: 20, timeoutMs: 60 })).rejects.toThrow(/not ready before the deadline: .*LOADING/);
@@ -101,3 +113,61 @@ for (const daemon of ["ingest.ts", "waker.ts"]) {
     }
   }, 30_000);
 }
+
+// `init` is what install.sh runs right after it restarts the server. valkey-cli PING exits 0 on a
+// LOADING reply, so the shell cannot tell; the command itself has to wait. Against a real server
+// behind a proxy that answers LOADING to the first commands, `init` must wait and then succeed.
+import { afterAll, beforeAll } from "bun:test";
+import { ValkeyServer, requiresValkey } from "./support.ts";
+
+describe.skipIf(requiresValkey)("init against a server that is still loading", () => {
+  let server: ValkeyServer;
+  beforeAll(async () => {
+    server = await ValkeyServer.start();
+  });
+  afterAll(async () => {
+    await server.stop();
+  });
+
+  test("init waits for LOADING to pass, then loads the library", async () => {
+    let seen = 0;
+    const proxy = net.createServer((sock) => {
+      const up = net.connect(server.port, "127.0.0.1");
+      up.on("data", (d) => sock.write(d));
+      up.on("error", () => sock.destroy());
+      sock.on("data", (d) => {
+        seen++;
+        if (seen <= 3) sock.write("-LOADING Valkey is loading the dataset in memory\r\n");
+        else up.write(d);
+      });
+      sock.on("error", () => up.destroy());
+      sock.on("close", () => up.destroy());
+    });
+    await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", () => r()));
+    const port = (proxy.address() as net.AddressInfo).port;
+    try {
+      const proc = spawn(process.execPath, ["run", "--silent", "--no-env-file", path.join(SRC, "cli.ts"), "init"], {
+        env: { PATH: process.env.PATH ?? "", MCTL_BRIDGE_VALKEY_URL: `redis://127.0.0.1:${port}/0` },
+      });
+      let out = "";
+      let err = "";
+      proc.stdout.on("data", (d) => (out += d));
+      proc.stderr.on("data", (d) => (err += d));
+      const code = await new Promise<number | null>((resolve) => {
+        const t = setTimeout(() => {
+          proc.kill("SIGKILL");
+          resolve(null);
+        }, 30_000);
+        proc.on("close", (c) => {
+          clearTimeout(t);
+          resolve(c);
+        });
+      });
+      expect(err).toContain("waiting for valkey");
+      expect(code).toBe(0);
+      expect(JSON.parse(out.trim().split("\n").at(-1)!)).toMatchObject({ ok: true });
+    } finally {
+      proxy.close();
+    }
+  }, 40_000);
+});

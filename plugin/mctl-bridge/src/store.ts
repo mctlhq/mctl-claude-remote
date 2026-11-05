@@ -101,6 +101,26 @@ export async function loadLibrary(exec: Executor): Promise<void> {
   await exec.execute(["FUNCTION", "LOAD", "REPLACE", fs.readFileSync(LIBRARY_PATH, "utf8")]);
 }
 
+export type WaitOpts = { timeoutMs?: number; intervalMs?: number; onWait?: (reason: string) => void };
+
+async function retryWhileUnknown(attempt: () => Promise<void>, opts: WaitOpts): Promise<void> {
+  const deadline = Date.now() + (opts.timeoutMs ?? 120_000);
+  const interval = opts.intervalMs ?? 1000;
+  for (;;) {
+    try {
+      await attempt();
+      return;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const unknown = err instanceof ValkeyConnectionError || (err instanceof Error && /\bLOADING\b/.test(msg)) || /ECONNREFUSED|ECONNRESET|connection closed/.test(msg);
+      if (!unknown) throw err;
+      if (Date.now() + interval > deadline) throw new Error(`valkey not ready before the deadline: ${msg}`);
+      opts.onWait?.(msg);
+      await new Promise((r) => setTimeout(r, interval));
+    }
+  }
+}
+
 export class Bridge implements SlotApi {
   readonly exec: Executor;
 
@@ -138,22 +158,21 @@ export class Bridge implements SlotApi {
    * or mismatched library is a definite answer and fails at once; so does running out of time
    * (with the last unknown state in the message) rather than starting on a guess.
    */
-  async waitReady(opts: { timeoutMs?: number; intervalMs?: number; onWait?: (reason: string) => void } = {}): Promise<void> {
-    const deadline = Date.now() + (opts.timeoutMs ?? 120_000);
-    const interval = opts.intervalMs ?? 1000;
-    for (;;) {
-      try {
-        await this.checkVersion();
-        return;
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        const unknown = err instanceof ValkeyConnectionError || (err instanceof Error && /\bLOADING\b/.test(msg)) || /ECONNREFUSED|ECONNRESET|connection closed/.test(msg);
-        if (!unknown) throw err;
-        if (Date.now() + interval > deadline) throw new Error(`valkey not ready before the deadline: ${msg}`);
-        opts.onWait?.(msg);
-        await new Promise((r) => setTimeout(r, interval));
-      }
-    }
+  async waitReady(opts: WaitOpts = {}): Promise<void> {
+    await retryWhileUnknown(() => this.checkVersion(), opts);
+  }
+
+  /**
+   * Like waitReady, but only for "the server answers commands": used before the library exists
+   * (a fresh install or a restart that comes straight after `init`), where a missing library is
+   * expected. A server that is loading its dataset refuses everything with LOADING, `valkey-cli
+   * PING` included with exit status 0, so readiness has to be read from the reply.
+   */
+  async waitServing(opts: WaitOpts = {}): Promise<void> {
+    await retryWhileUnknown(async () => {
+      const r = await this.exec.execute(["PING"]);
+      if (String(r) !== "PONG") throw new Error(`unexpected PING reply: ${String(r)}`);
+    }, opts);
   }
 
   /**
