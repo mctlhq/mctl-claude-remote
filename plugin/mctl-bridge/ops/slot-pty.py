@@ -43,7 +43,7 @@ def query(d, tag):
     try:
         reply = call(d, tag)
     except OSError as e:
-        sys.exit(f"slot host unreachable ({e}): cannot observe this slot")
+        sys.exit(f"slot host unreachable ({e}): cannot observe this slot, its prompt state is UNKNOWN")
     if not reply:
         sys.exit("slot host sent no answer: it probably started before the upgrade and runs the old "
                  "code. Restart the slot to observe it (stop, then start); its prompt state is UNKNOWN")
@@ -83,6 +83,9 @@ class Screen:
         w = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1
         if self.c + w > self.cols:
             self.c = 0; self._lf()
+        row = self.grid[self.r]
+        if row[self.c] == "" and self.c > 0: row[self.c - 1] = " "  # overwriting the second half of a wide glyph
+        if w == 1 and self.c + 1 < self.cols and row[self.c + 1] == "": row[self.c + 1] = " "  # or its first half
         self.grid[self.r][self.c] = ch
         if w == 2: self.grid[self.r][self.c + 1] = ""  # the second column belongs to the glyph
         self.c += w
