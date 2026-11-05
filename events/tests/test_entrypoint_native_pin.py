@@ -76,13 +76,17 @@ class NativePinTest(unittest.TestCase):
             esac
             """))
 
-    def run_block(self, install: str = "ok", version: str = "ok") -> tuple[str, str, str]:
+    def run_block(self, install: str = "ok", version: str = "ok", timeout_env: str = "2") -> tuple[str, str, str]:
         self.tmp = self.root / "tmp"
         self.tmp.mkdir(exist_ok=True)
         script = block().replace("/workspace", str(self.ws)).replace("/tmp/claude-install.", f"{self.tmp}/claude-install.")
+        # Fail closed: if the script text changes and a substitution stops
+        # matching, the block would touch the real /workspace and /tmp.
+        self.assertNotIn("/workspace", script)
+        self.assertIn(f"{self.tmp}/claude-install.", script)
         probe = 'printf "\\nPATH=%s\\n" "$PATH"'
         env = {**os.environ, "PATH": f"{self.root / 'bin'}:{os.environ['PATH']}",
-               "FAKE_INSTALL": install, "FAKE_VERSION": version, "NATIVE_INSTALL_TIMEOUT": "2"}
+               "FAKE_INSTALL": install, "FAKE_VERSION": version, "NATIVE_INSTALL_TIMEOUT": timeout_env}
         proc = subprocess.run(["/bin/sh", "-e", "-c", script + probe], env=env,
                               capture_output=True, text=True, timeout=30)
         self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
@@ -113,6 +117,27 @@ class NativePinTest(unittest.TestCase):
         self.assertIn("using npm-global claude", out)
         self.assertEqual("2.1.274 (Claude Code)", native)
         self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_invalid_install_timeout_falls_back_to_the_default(self) -> None:
+        """`0` would disable the bound and a non-number makes `timeout` exit
+        125 before the installer runs; both must become the 600s default."""
+
+        # A recording `timeout` in front of the real one: logs its duration
+        # argument, then runs the command unbounded (the fake install is quick).
+        executable(self.root / "bin/timeout", '#!/bin/sh\necho "$1" >> "' + str(self.root / "timeout-args") + '"\nshift\nexec "$@"\n')
+        args = self.root / "timeout-args"
+        for value in ("0", "abc", "-5", "1.5", ""):
+            with self.subTest(value=value):
+                args.unlink(missing_ok=True)
+                shutil.rmtree(self.ws / ".local", ignore_errors=True)
+                out, _, native = self.run_block(timeout_env=value)
+                self.assertEqual(["600"], args.read_text().split(), value)
+                self.assertIn("native claude replaced with versions/2.1.280", out)
+                self.assertEqual(PIN, native)
+        args.unlink(missing_ok=True)
+        shutil.rmtree(self.ws / ".local", ignore_errors=True)
+        self.run_block(timeout_env="7")
+        self.assertEqual(["7"], args.read_text().split())  # a valid value is kept
 
     def test_blank_version_line_counts_as_no_pin(self) -> None:
         """A whitespace-only version line has no first field: every branch

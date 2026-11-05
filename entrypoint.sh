@@ -507,7 +507,11 @@ else
   # PID 1, and a stalled connection would otherwise park the entrypoint
   # here forever while an npm-global claude sat ready in /usr/local/bin.
   # A timeout is a non-zero status and lands on the same WARN and fallback.
-  if timeout "${NATIVE_INSTALL_TIMEOUT:-600}" claude install "${TARGET_VER:-latest}" --force >"$_install_log" 2>&1; then
+  # Same normalisation as STEWARD_TICK_TIMEOUT: `0` would disable the bound
+  # and a non-number makes `timeout` exit 125 before the installer runs.
+  NATIVE_INSTALL_TIMEOUT="${NATIVE_INSTALL_TIMEOUT:-600}"
+  printf '%s' "$NATIVE_INSTALL_TIMEOUT" | grep -qE '^[1-9][0-9]*$' || NATIVE_INSTALL_TIMEOUT=600
+  if timeout "$NATIVE_INSTALL_TIMEOUT" claude install "${TARGET_VER:-latest}" --force >"$_install_log" 2>&1; then
     _installed=ok
     tail -n 8 "$_install_log" || true
   else
