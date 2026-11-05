@@ -228,5 +228,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
   test("channel instructions tell slots to stay at the repo root and use the Read tools", () => {
     expect(INSTRUCTIONS).toContain("Work from the repository root and never cd");
     expect(INSTRUCTIONS).toContain("Read, Grep and Glob tools, not cat, grep or sed in Bash");
+    expect(INSTRUCTIONS).toContain("Edit files with the built-in Edit or Write tools, never with a script run through python3, sed -i,");
+    expect(INSTRUCTIONS).toContain("Run syntax checks (sh -n, bash -n) as separate short commands.");
   });
 });

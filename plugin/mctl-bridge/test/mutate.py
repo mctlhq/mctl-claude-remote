@@ -142,6 +142,7 @@ M=[
  ("slot.sh allows a general Bash reader", SLOT, '"Bash(wc:*)","Bash(cut:*)",', '"Bash(wc:*)","Bash(cut:*)","Bash(cat:*)",', 1),
  ("slot.sh drops the pipe filters", SLOT, '"Bash(head:*)","Bash(tail:*)",', "", 1),
  ("channel instructions drop the no-cd rule", CH, "Work from the repository root and never cd", "Work from anywhere", 1),
+ ("channel instructions drop the edit-tools rule", CH, "Edit files with the built-in Edit or Write tools, never with a script", "Edit files however you like, including with a script", 1),
  ("slot.sh mcp reads the operator password", SLOT, '$(json "$d/slot.pw")', '$(json "$pw")', 1),
 
  ("poison memo off", LUA, "  redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', body, 'entry', entry, 't', now)\n  redis.call('PEXPIRE', memo, RETAIN_MS)\n  ingest_reject(slot, entry, rid, fn, reason, now)", "  ingest_reject(slot, entry, rid, fn, reason, now)", 1),
