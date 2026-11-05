@@ -88,6 +88,9 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Test the relevance script
+        run: sh .github/scripts/test-bridge-mutation-relevant.sh
+
       - name: Decide whether bridge mutation is relevant
         id: scope
         env:
@@ -97,7 +100,9 @@ jobs:
         run: |
           run=true
           if [ "$EVENT" = pull_request ]; then
-            if files=$(git diff --name-only "$BASE_SHA...$HEAD_SHA"); then
+            # --no-renames: a file moved out of an input directory must show
+            # up under its old path too. quotepath=false keeps paths literal.
+            if files=$(git -c core.quotepath=false diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA"); then
               echo "changed files:"; echo "$files"
               if printf '%s\n' "$files" | sh .github/scripts/bridge-mutation-relevant.sh; then
                 run=true
