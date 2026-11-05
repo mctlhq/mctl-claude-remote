@@ -67,8 +67,16 @@ CONF
 
 # Code: only what runs. No runtime dependencies.
 rsync -a --delete --exclude node_modules --exclude test --exclude ops "$SRC/" $H/plugin/
-cp $SRC/ops/mctl-bridge $SRC/ops/slot.sh $SRC/ops/slot-pty.py $SRC/ops/host-boundary-probe.sh $SRC/ops/host-boundary-probe.py $SRC/ops/codex-remote-guard.sh $H/
-chmod 755 $H/mctl-bridge $H/slot.sh $H/codex-remote-guard.sh
+cp $SRC/ops/mctl-bridge $SRC/ops/slot.sh $SRC/ops/slot-pty.py $SRC/ops/host-boundary-probe.sh $SRC/ops/host-boundary-probe.py $H/
+chmod 755 $H/mctl-bridge $H/slot.sh
+# Scripts launchd runs on a timer: swap by rename, never overwrite in place, so a run that
+# is executing right now (the updater runs this very script) keeps its old file intact.
+for f in codex-remote-guard.sh bridge-updater.sh wake-state.sh; do
+  cp $SRC/ops/$f $H/$f.new && chmod 755 $H/$f.new && mv -f $H/$f.new $H/$f
+done
+# What the updater needs: the thread to wake. It records the installed release in
+# $H/VERSION itself, only after this script exits 0.
+print -r -- "$THREAD_ID" > $H/etc/thread-id
 mkdir -p $HOME/.local/bin
 ln -sfn $H/mctl-bridge $HOME/.local/bin/mctl-bridge
 
@@ -113,4 +121,16 @@ launchctl bootout gui/$UID_/$guard 2>/dev/null || true
 for i in {1..50}; do launchctl print gui/$UID_/$guard >/dev/null 2>&1 || break; sleep 0.2; done
 launchctl bootstrap gui/$UID_ $LA/$guard.plist
 launchctl kickstart gui/$UID_/$guard
+# Pulls the release the repository declares (see the script). When this install was started
+# BY the updater, do not bootout its job: launchd would kill the install half way. The new
+# plist takes effect the next time the job is loaded.
+upd=com.mctl.bridge-updater
+render $SRC/ops/$upd.plist > $LA/$upd.plist
+chmod 644 $LA/$upd.plist
+if [[ -z ${MCTL_BRIDGE_FROM_UPDATER:-} ]]; then
+  launchctl bootout gui/$UID_/$upd 2>/dev/null || true
+  for i in {1..50}; do launchctl print gui/$UID_/$upd >/dev/null 2>&1 || break; sleep 0.2; done
+  launchctl bootstrap gui/$UID_ $LA/$upd.plist
+  launchctl kickstart gui/$UID_/$upd
+fi
 echo "installed: valkey :$PORT, ingester, waker on thread $THREAD_ID, CLI ~/.local/bin/mctl-bridge"

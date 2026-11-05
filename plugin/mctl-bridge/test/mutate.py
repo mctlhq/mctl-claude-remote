@@ -16,7 +16,7 @@ empty shard was requested, or it ran a different number of mutations than its
 partition says. test/test_shards.py proves the partition is exact.
 """
 import subprocess, sys, shutil
-LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'; GUARD='ops/codex-remote-guard.sh'
+LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'; GUARD='ops/codex-remote-guard.sh'; WAKE='ops/wake-state.sh'; UPD='ops/bridge-updater.sh'; INSTALL='ops/install.sh'
 M=[
  ("fencing off", LUA, "local function fenced(s, conn, epoch)\n  return", "local function fenced(s, conn, epoch)\n  do return false end\n  return", 1),
  ("busy gate off", LUA, "if s.busy ~= '0' then return no('busy') end", "", 1),
@@ -146,12 +146,37 @@ M=[
  ("guard counts proxy as server", GUARD, "&& !/ proxy/ {", "{", 1),
  ("guard kills during wake", GUARD, 'if [ "$state" = open ]; then', 'if false; then', 1),
  ("guard unreadable log is idle", GUARD, 'if [ ! -r "$WAKER_LOG" ]; then', 'if false; then', 1),
- ("guard restart does not clear open wake", GUARD, '  /"msg":"started"/ { s = "idle" }\n', '', 1),
- ("guard failed wake stays open", GUARD, ' || /"msg":"wake failed"/', '', 1),
+ ("guard restart does not clear open wake", WAKE, '  /"msg":"started"/ { s = "idle" }\n', '', 1),
+ ("guard failed wake stays open", WAKE, ' || /"msg":"wake failed"/', '', 1),
  ("guard ignores kill failure", GUARD, '$KILL "$pid" || { say "could not stop pid $pid"; exit 1; }', '$KILL "$pid" || true', 1),
  ("guard ps truncates", GUARD, '-axww -o pid=,command=', '-ax -o pid=,command=', 1),
- ("guard wake scan is a fixed tail", GUARD, "state=$(grep -E '\"msg\":\"(wake (intent|started|completed|failed|no longer ours)|started)\"' \"$WAKER_LOG\" | tail -n 50 | awk '", "state=$(tail -n 400 \"$WAKER_LOG\" | awk '", 1),
+  ("guard wake scan is a fixed tail", WAKE, "grep -E '\"msg\":\"(wake (intent|started|completed|failed|no longer ours)|started)\"' \"$1\" | tail -n 50 | awk '", "tail -n 400 \"$1\" | awk '", 1),
  ("guard never starts the daemon", GUARD, '"$CODEX" remote-control start 2>&1 ||', 'true ||', 1),
+ ("updater ancestor check off", UPD, 'g merge-base --is-ancestor "$c" refs/heads/main', 'true', 1),
+ ("updater lexical tag sort", UPD, "$(g tag -l | sort -t. -k1,1nr -k2,2nr -k3,3nr)", "$(g tag -l | sort -r)", 1),
+ ("updater accepts any tag name", UPD, "''|*[!0-9.]*|.*|*.|*..*) return 1", "'') return 1", 1),
+ ("updater dot count off", UPD, "[ \"$(printf '%s' \"$1\" | tr -cd . | wc -c | tr -d ' ')\" = 2 ] || return 1", "true", 1),
+ ("updater compares tag name only", UPD, '[ "$have" = "$want $sha" ]', '[ "${have%% *}" = "$want" ]', 1),
+ ("updater fetch failure ignored", UPD, 'say "could not fetch $REPO; not updating (unknown is not up to date)"\n    return 1', 'say "could not fetch $REPO; not updating (unknown is not up to date)"\n    :', 1),
+ ("updater ignores wake in flight", UPD, 'if [ "$(waker_state "$log")" = open ]; then', 'if false; then', 1),
+ ("updater unreadable log is idle", UPD, 'if [ ! -r "$log" ]; then', 'if false; then', 1),
+ ("updater retries a failed release", UPD, 'if [ "$(cat "$H/etc/updater-failed" 2>/dev/null || true)" = "$want $sha" ] \\', 'if false \\', 1),
+ ("updater forgets a failed install", UPD, '  echo "$want $sha" > "$H/etc/updater-failed"\n  say "install of', '  say "install of', 1),
+ ("updater failed install reports success", UPD, "unchanged ('${have:-none}')\"\n  return 1", "unchanged ('${have:-none}')\"\n  return 0", 1),
+ ("updater pin not checked", UPD, 'releasable "$pin" ||', 'true ||', 1),
+ ("updater no thread check", UPD, 'if [ -z "$thread" ]; then', 'if false; then', 1),
+ ("updater live lock ignored", UPD, 'kill -0 "$other" 2>/dev/null', 'false', 1),
+ ("updater lock not released", UPD, "trap 'rm -rf \"$lock\" \"$tmp\"' EXIT\n", "trap 'rm -rf \"$tmp\"' EXIT\n", 1),
+ ("updater hides its own run from install", UPD, "MCTL_BRIDGE_FROM_UPDATER=1 ", "", 1),
+ ("updater never records the version", UPD, 'printf \'%s\\n\' "$want $sha" > "$H/VERSION" ||', ': ||', 1),
+ ("updater records version before install", UPD, '  if MCTL_BRIDGE_HOME=$H MCTL_BRIDGE_FROM_UPDATER=1 \\\n', '  printf \'%s\\n\' "$want $sha" > "$H/VERSION"\n  if MCTL_BRIDGE_HOME=$H MCTL_BRIDGE_FROM_UPDATER=1 \\\n', 1),
+ ("updater goes backwards", UPD, 'if [ "${have%% *}" != "$want" ] && [ "$top" = "${have%% *}" ]; then', 'if false; then', 1),
+ ("updater pin never retries a failed release", UPD, '&& ! { [ -n "$pin" ] && [ "$H/etc/pin" -nt "$H/etc/updater-failed" ]; }; then', '; then', 1),
+ ("updater pin retries a failed release every run", UPD, '[ "$H/etc/pin" -nt "$H/etc/updater-failed" ]', 'true', 1),
+ ("updater downgrade check ignores pin", UPD, 'if [ -z "$pin" ] && [ -n "$have" ]; then', 'if [ -n "$have" ]; then', 1),
+ ("install boots out the updater from the updater", INSTALL, "if [[ -z ${MCTL_BRIDGE_FROM_UPDATER:-} ]]; then", "if true; then", 1),
+ ("install overwrites scripts in place", INSTALL, "mv -f $H/$f.new $H/$f", "cp $H/$f.new $H/$f", 1),
+ ("install forgets the thread id", INSTALL, 'print -r -- "$THREAD_ID" > $H/etc/thread-id', ':', 1),
 ]
 
 def parse_shard(spec, total=None):
