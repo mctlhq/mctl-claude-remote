@@ -99,15 +99,27 @@ done
 launchctl bootstrap gui/$UID_ $LA/com.mctl.bridge-valkey.plist
 # RunAtLoad does not fire for a job bootstrapped from an ssh session: start it.
 launchctl kickstart gui/$UID_/com.mctl.bridge-valkey
-for i in {1..50}; do
-  $V/valkey-cli -p $PORT --user bridge_admin --pass "$(cat $H/etc/admin.pw)" --no-auth-warning PING >/dev/null 2>&1 && break
-  sleep 0.2
-done
-$V/valkey-cli -p $PORT --user bridge_admin --pass "$(cat $H/etc/admin.pw)" --no-auth-warning PING >/dev/null 2>&1 \
-  || { echo "valkey did not become ready on :$PORT (see $H/log/valkey.err)" >&2; exit 1; }
-
-MCTL_BRIDGE_VALKEY_URL=redis://bridge_admin@127.0.0.1:$PORT/0 MCTL_BRIDGE_VALKEY_PASSWORD_FILE=$H/etc/admin.pw \
-  $BUN run --silent --no-env-file --config=$H/plugin/bunfig.toml $H/plugin/src/cli.ts init
+# valkey-cli exits 0 on an error reply too (a loading server answers PING with -LOADING), so
+# readiness is the PONG itself, never the exit status.
+cli() { $V/valkey-cli -p $PORT --user bridge_admin --pass "$(cat $H/etc/admin.pw)" --no-auth-warning "$@"; }
+valkey_up() {
+  local i
+  for i in {1..${MCTL_BRIDGE_READY_TRIES:-100}}; do
+    [[ $(cli PING 2>/dev/null) == PONG ]] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+# From here on the old daemons are already booted out. A failure below must not leave the
+# bridge half installed and silent: remember it, still bring every job back up (ingest and
+# waker wait for the server on their own and launchd keeps restarting them), and end with a
+# loud non-zero exit so the updater records the release as failed.
+fail=""
+if ! valkey_up; then
+  fail="valkey did not become ready on :$PORT (see $H/log/valkey.err)"
+elif ! MCTL_BRIDGE_VALKEY_URL=redis://bridge_admin@127.0.0.1:$PORT/0 MCTL_BRIDGE_VALKEY_PASSWORD_FILE=$H/etc/admin.pw     $BUN run --silent --no-env-file --config=$H/plugin/bunfig.toml $H/plugin/src/cli.ts init; then
+  fail="mctl-bridge init failed: the function library is not loaded"
+fi
 
 launchctl bootstrap gui/$UID_ $LA/com.mctl.bridge-ingest.plist
 launchctl kickstart gui/$UID_/com.mctl.bridge-ingest
@@ -132,5 +144,9 @@ if [[ -z ${MCTL_BRIDGE_FROM_UPDATER:-} ]]; then
   for i in {1..50}; do launchctl print gui/$UID_/$upd >/dev/null 2>&1 || break; sleep 0.2; done
   launchctl bootstrap gui/$UID_ $LA/$upd.plist
   launchctl kickstart gui/$UID_/$upd
+fi
+if [[ -n $fail ]]; then
+  echo "INSTALL FAILED: $fail. Ingester and waker were started anyway and keep retrying; see $H/log." >&2
+  exit 1
 fi
 echo "installed: valkey :$PORT, ingester, waker on thread $THREAD_ID, CLI ~/.local/bin/mctl-bridge"

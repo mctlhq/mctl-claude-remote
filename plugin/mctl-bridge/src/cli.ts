@@ -133,6 +133,7 @@ export async function run(argv: string[], b: Bridge): Promise<{ code: number; ou
 
   switch (command) {
     case "init": {
+      await b.waitServing({ onWait: (r) => process.stderr.write(`waiting for valkey: ${r}\n`) });
       await loadLibrary(b.exec);
       await b.checkVersion();
       return { code: 0, out: { ok: true, durability: await b.durability() } };
