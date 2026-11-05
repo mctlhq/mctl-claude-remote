@@ -10,6 +10,7 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { observe as observeRecord } from "../src/cli.ts";
 import { Bridge } from "../src/store.ts";
 import type { Result } from "../src/store.ts";
 import { ValkeyServer, requiresValkey } from "./support.ts";
@@ -145,6 +146,33 @@ describe.skipIf(requiresValkey)("observe and watch", () => {
     expect(r.code).toBe(5);
     expect(r.stdout).toContain("WATCH-TIMEOUT");
     expect(r.stdout).toContain("task t-1 acked");
+  });
+
+  test("an unchanged state is printed once however many times it is read", () => {
+    const cli = fakeCli("same", `echo '{"ok":true,"id":"t-1","kind":"task","state":"acked","reason":"","terminal":false,"needs_operator":false}'`);
+    const r = watch(cli, "t-1", "2");
+    expect(r.code).toBe(5);
+    expect(r.stdout.split("\n").filter((l) => l === "task t-1 acked")).toHaveLength(1);
+  });
+
+  // observe() on stand-in records: the settled and needs-operator sets are decided per kind.
+  const fakeBridge = (rec: Record<string, string>) =>
+    ({ message: async () => rec, wake: async () => rec, openWakes: async () => [], slotInfo: async () => ({}) }) as unknown as Bridge;
+  const look = async (id: string, state: string) => (await observeRecord(fakeBridge({ state }), id)).out as Record<string, any>;
+
+  test("delivery_unknown and wake_unknown need the operator and are not settled", async () => {
+    for (const [id, state] of [["t-1", "delivery_unknown"], ["w-1", "wake_unknown"]] as const) {
+      const o = await look(id, state);
+      expect(o).toMatchObject({ ok: true, needs_operator: true, terminal: false });
+    }
+    // a state that is neither does not ask for the operator
+    expect(await look("t-1", "acked")).toMatchObject({ needs_operator: false, terminal: false });
+  });
+
+  test("a wake is observable and settles on completed or failed", async () => {
+    expect(await look("w-1", "completed")).toMatchObject({ kind: "wake", terminal: true });
+    expect(await look("w-1", "failed")).toMatchObject({ kind: "wake", terminal: true });
+    expect(await look("w-1", "started")).toMatchObject({ kind: "wake", terminal: false });
   });
 
   test("open wakes of a question are shown next to its state", () => {

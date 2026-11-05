@@ -38,9 +38,15 @@ function sandbox(opts: { valkey: "pong" | "loading"; initRc: number }) {
     encoding: "utf8",
     timeout: 60_000,
   });
+  // what landed in the install dir, and whether the operator can run it: checked before the sandbox is removed
+  const modes: Record<string, number> = {};
+  for (const f of ["mctl-bridge", "slot.sh", "watch.sh"]) {
+    const p = path.join(H, f);
+    modes[f] = fs.existsSync(p) ? fs.statSync(p).mode & 0o111 : -1;
+  }
   const log = fs.existsSync(path.join(root, "launchctl.log")) ? fs.readFileSync(path.join(root, "launchctl.log"), "utf8") : "";
   fs.rmSync(root, { recursive: true, force: true });
-  return { code: r.status, err: r.stderr, out: r.stdout, log };
+  return { code: r.status, err: r.stderr, out: r.stdout, log, modes };
 }
 
 const started = (log: string, job: string) => new RegExp(`kickstart gui/\\d+/com\\.mctl\\.bridge-${job}\\b`).test(log);
@@ -52,6 +58,11 @@ describe("install.sh", () => {
     expect(r.code).toBe(0);
     for (const j of ["valkey", "ingest", "waker"]) expect(started(r.log, j)).toBe(true);
     expect(r.out).toContain("installed:");
+  });
+
+  test("every operator script lands executable, watch.sh included", () => {
+    const r = sandbox({ valkey: "pong", initRc: 0 });
+    for (const f of ["mctl-bridge", "slot.sh", "watch.sh"]) expect(r.modes[f], f).toBeGreaterThan(0);
   });
 
   test("a server that only answers LOADING is not ready: loud failure, jobs still started", () => {

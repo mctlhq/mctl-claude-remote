@@ -100,6 +100,9 @@ if mode == "permission":
     W("   2. Yes, and don't ask again for: git checkout *\r\n")
     W("   3. No\r\n")
     W(" Esc to cancel \u00b7 Tab to amend\r\n")
+elif mode == "single":
+    W(" Do you want to proceed?\r\n")                      # a question with only one numbered line is not a prompt
+    W(" 1. Yes\r\n")
 elif mode == "dialog":
     W(" Quick safety check: is this a project you trust?\r\n")
     W(" \u276f No, exit\r\n   Yes, I trust this folder\r\n Enter to confirm \u00b7 Esc to cancel\r\n")
@@ -112,6 +115,7 @@ elif mode == "bare":
 elif mode == "wide":
     W("\u65e5\u672cx\x1b[7GZ\r\n")                          # two double-width glyphs, then column 7
     W("e\u0301!\r\n")                                      # a combining accent takes no column
+    W("e\u0301\x1b[3GY\r\n")                              # so column 3 is the third cell, right after "e" and a space
     W("\u65e5\u672c\x1b[2Gx\r\n")                          # a narrow char lands on the 2nd half of a wide one
 else:
     W("Working on it\r\n")
@@ -158,6 +162,7 @@ class RenderedScreen(unittest.TestCase):
         # 日本 fills columns 1-4, x is 5, column 6 is blank, Z lands in 7 (one cell off if glyphs count as 1)
         self.assertIn("\u65e5\u672cx Z", shown)
         self.assertIn("e\u0301!", shown)
+        self.assertIn("e\u0301 Y", shown, "the accent took a column of its own")
         # x overwrites the second half of the first glyph: a terminal blanks the whole glyph
         self.assertTrue(any(l == " x\u672c" for l in shown.split("\n")), shown)
 
@@ -214,6 +219,11 @@ class RenderedScreen(unittest.TestCase):
         p = self.prompt()["prompt"]
         self.assertEqual(p["kind"], "dialog")
         self.assertIn("Yes, I trust this folder", "\n".join(p["detail"]))
+
+    def test_a_question_with_a_single_numbered_line_is_not_a_permission_prompt(self):
+        self.start("single")
+        self.assertTrue(wait_for(lambda: "1. Yes" in run("show", self.d).stdout))
+        self.assertEqual(self.prompt(), {"pending": False, "prompt": None})
 
     def test_no_prompt_is_not_reported_as_pending(self):
         self.start("plain")
