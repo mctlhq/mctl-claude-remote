@@ -10,8 +10,10 @@
 # Installed state: $H/VERSION ("<tag> <commit>"), written by this script and only after
 # install.sh exits 0. On a difference the tagged tree is exported with git archive and
 # ops/install.sh is run from that copy. Without a pin the updater never goes backwards:
-# a tag that sorts below the installed one is reported, not installed (a tag pushed on an
-# old main commit cannot roll the mini back; only the operator's pin can).
+# a tag that sorts below the installed one is reported, not installed. This does not stop a
+# high tag (99.0.0) pushed on an old main commit from being installed once, and it then
+# makes that state sticky: later releases sort below it, so only the operator's pin gets
+# the mini out. Restrict who can create tags (a tag ruleset); the guard is not a defence.
 #
 # Safety:
 #  - "could not observe" is never "up to date": a failed fetch, an unreadable waker log or
@@ -101,7 +103,10 @@ main() {
       return 0
     fi
   fi
-  if [ -z "$pin" ] && [ "$(cat "$H/etc/updater-failed" 2>/dev/null || true)" = "$want $sha" ]; then
+  # A failed release waits for a newer release. A pin retries it once: only a pin written
+  # after the failure marker bypasses it, and a failed retry rewrites the marker.
+  if [ "$(cat "$H/etc/updater-failed" 2>/dev/null || true)" = "$want $sha" ] \
+      && ! { [ -n "$pin" ] && [ "$H/etc/pin" -nt "$H/etc/updater-failed" ]; }; then
     say "$want ($sha) failed to install earlier; waiting for a newer release or a pin"
     return 0
   fi

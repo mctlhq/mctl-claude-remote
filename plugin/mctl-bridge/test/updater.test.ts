@@ -134,15 +134,23 @@ describe.skipIf(!usable)("bridge-updater", () => {
     expect(t.installs()[1]).toContain("a thread");
   });
 
-  test("a pin overrides the failed-release marker", () => {
+  test("a pin written after a failure retries the release once, not every run", () => {
     const t = setup();
     commit(t.repo, "bad", { failInstall: true }); git(t.repo, "tag", "1.0.0");
     t.run();
     t.run();
     expect(t.installs()).toHaveLength(1);
-    fs.writeFileSync(path.join(t.H, "etc", "pin"), "1.0.0\n");
+    const pin = path.join(t.H, "etc", "pin");
+    fs.writeFileSync(pin, "1.0.0\n");
+    const marker = path.join(t.H, "etc", "updater-failed");
+    const ago = (sec: number) => new Date(Date.now() - sec * 1000);
+    fs.utimesSync(marker, ago(120), ago(120)); // the failure happened before the pin was written
+    fs.utimesSync(pin, ago(60), ago(60));
     t.run();
     expect(t.installs()).toHaveLength(2);
+    t.run();
+    t.run();
+    expect(t.installs()).toHaveLength(2); // the failed retry rewrote the marker: no loop
   });
 
   test("a pin to a tag that is not on main is refused", () => {

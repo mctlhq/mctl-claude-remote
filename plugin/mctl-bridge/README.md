@@ -98,15 +98,17 @@ release the repository declares, so nothing is copied by hand.
 - **Installed state:** `~/mctl-bridge/VERSION` (`<tag> <commit>`), written by the updater only
   after `install.sh` exits 0; on a difference the tagged tree is exported and its
   `ops/install.sh` runs. Without a pin the updater never goes backwards (a lower tag is
-  reported, not installed); only `etc/pin` can roll back, and a pin also overrides the
-  failed-release marker. Log: `~/mctl-bridge/log/bridge-updater.log`.
+  reported, not installed); only `etc/pin` can roll back, and a pin written after a
+  failure retries that release once (a failed retry is not repeated until the pin is
+  rewritten). A bad high tag on an old `main` commit sticks once installed; recover with a pin. Log: `~/mctl-bridge/log/bridge-updater.log`.
 - **Safe by default:** a failed fetch, an unreadable waker log or a missing
   `etc/thread-id` is reported and nothing is installed; no install while a wake is in flight;
   a release that failed to install is not retried until a newer release or a pin appears
   (`etc/updater-failed`).
 - **Bootstrap once by hand:** `ops/install.sh <thread id>` (also writes `etc/thread-id`).
-  A hand install does not touch `VERSION`, so the updater leaves it in place until a newer
-  release exists; to hold a hand-installed or older build explicitly, use `etc/pin`.
+  The hand install is for bootstrapping: it kickstarts the updater, which installs the
+  declared release over it within seconds unless `VERSION` already matches. To run unreleased
+  code, stop the job first (`launchctl bootout gui/$(id -u)/com.mctl.bridge-updater`).
   Only people who can push tags can choose what the updater considers a release (still
   limited to commits on `main`): restrict tag creation to release-please with a tag ruleset.
   After that the updater takes over. A new updater plist takes effect the next time the
