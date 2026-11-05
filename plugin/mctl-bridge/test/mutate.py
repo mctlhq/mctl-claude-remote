@@ -152,6 +152,11 @@ M=[
  ("install.sh swallows a failed install", "ops/install.sh", "if [[ -n $fail ]]; then\n  echo \"INSTALL FAILED", "if false; then\n  echo \"INSTALL FAILED", 1),
  ("ingest dies on LOADING", "src/ingest.ts", "  await bridge.waitReady({ onWait: (r) => log(\"waiting for valkey\", { reason: r }) });", "  await bridge.checkVersion();", 1),
  ("waker dies on LOADING", "src/waker.ts", "  await bridge.waitReady({ onWait: (r) => log(\"waiting for valkey\", { reason: r }) });", "  await bridge.checkVersion();", 1),
+ ("slot.sh drops the credential-path Bash denies", SLOT, '"Bash(*.ssh*)","Bash(*.config/gh*)","Bash(*.aws*)","Bash(*.git-credentials*)","Bash(*.pw*)","Bash(*keychain*)",', "", 1),
+ ("slot.sh allows a general Bash reader", SLOT, '"Bash(wc:*)","Bash(cut:*)",', '"Bash(wc:*)","Bash(cut:*)","Bash(cat:*)",', 1),
+ ("slot.sh drops the pipe filters", SLOT, '"Bash(head:*)","Bash(tail:*)",', "", 1),
+ ("channel instructions drop the no-cd rule", CH, "Work from the repository root and never cd", "Work from anywhere", 1),
+ ("channel instructions drop the edit-tools rule", CH, "Edit files with the built-in Edit or Write tools, never with a script", "Edit files however you like, including with a script", 1),
  ("slot.sh mcp reads the operator password", SLOT, '$(json "$d/slot.pw")', '$(json "$pw")', 1),
 
  ("poison memo off", LUA, "  redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', body, 'entry', entry, 't', now)\n  redis.call('PEXPIRE', memo, RETAIN_MS)\n  ingest_reject(slot, entry, rid, fn, reason, now)", "  ingest_reject(slot, entry, rid, fn, reason, now)", 1),
