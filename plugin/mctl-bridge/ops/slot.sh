@@ -1,7 +1,14 @@
 #!/bin/zsh
 # Test slots for the end-to-end run: interactive Claude Code on a pty (ops/slot-pty.py).
 #
-#   slot.sh start <slot> <repo dir>   start slot (at most MCTL_BRIDGE_MAX_SLOTS, default 2)
+#   slot.sh start <slot> <repo dir> [--resume <session-id>]
+#                                     start slot (at most MCTL_BRIDGE_MAX_SLOTS, default 2).
+#                                     --resume resumes that earlier Claude Code conversation
+#                                     (claude --resume <id>) so a restarted slot keeps its
+#                                     context. The id must be a UUID; anything else is refused,
+#                                     never replaced by a fresh session.
+#   slot.sh session-id <slot>         print the session id of a RUNNING slot (from its hook state
+#                                     file), one line; an error if unknown, never an empty line
 #   slot.sh stop <slot>               end the session (the adapter unregisters)
 #   slot.sh show <slot> [lines]       print the end of the slot's rendered screen
 #   slot.sh prompt <slot>             JSON: is a permission prompt waiting, whole command included
@@ -70,6 +77,14 @@ case $cmd in
   start)
     s=${1:?slot}; repo=${2:?repo dir}
     [[ $s =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || { echo "bad slot name" >&2; exit 2; }
+    # Optional --resume <session-id>. Validated before anything is written: the id is data that
+    # ends up in a generated shell script, and a bad one must not fall back to a fresh session.
+    resume=
+    if [[ -n ${3:-} ]]; then
+      [[ $3 == --resume && $# -eq 4 ]] || { echo "usage: slot.sh start <slot> <repo dir> [--resume <session-id>]" >&2; exit 2; }
+      [[ $4 =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || { echo "bad session id for --resume (expected a UUID like the one 'slot.sh session-id' prints)" >&2; exit 2; }
+      resume="--resume ${(qq)4} "
+    fi
     slotctx $s
     as_ test -d "$repo" || { echo "no such dir $repo (as ${U:-the operator})" >&2; exit 2; }
     if running | grep -qx "$s"; then echo "slot $s already running" >&2; exit 1; fi
@@ -137,7 +152,7 @@ export ENABLE_CLAUDEAI_MCP_SERVERS=false
 kc=${(qq)d}/keychain.pw
 [[ -r \$kc ]] && printf 'unlock-keychain -p %s %s\\n' "\$(<\$kc)" ${(qq)sh_home}/Library/Keychains/login.keychain-db | security -i >/dev/null 2>&1
 cd ${(qq)repo:A}
-exec claude ${rc}--model ${(qq)MODEL} --mcp-config ${(qq)d}/mcp.json --strict-mcp-config --settings ${(qq)d}/settings.json \\
+exec claude ${rc}--model ${(qq)MODEL} ${resume}--mcp-config ${(qq)d}/mcp.json --strict-mcp-config --settings ${(qq)d}/settings.json \\
   --dangerously-load-development-channels server:mctl-bridge \\
   --allowedTools $tools --permission-mode default 2>>${(qq)d}/log/slot-$s.err
 RUN
@@ -169,8 +184,35 @@ RUN
     s=${1:?slot}; slotctx $s; as_ $PY -I $PTY keys $D "${2:?string}"
     ;;
   list) running ;;
+  session-id)  # the running slot's current session id, from the hook's state file
+    s=${1:?slot}
+    [[ $s =~ ^[a-z0-9][a-z0-9-]{0,30}$ ]] || { echo "bad slot name" >&2; exit 2; }
+    slotctx $s
+    ( cd /; as_ $PY -I $PTY ping $D ) >/dev/null 2>&1 || { echo "slot $s is not running: no session id" >&2; exit 1; }
+    # The newest state file wins (an earlier run of the slot may have left an older pid file).
+    # Not found, unreadable or not a UUID is an error, never an empty line.
+    id=$(as_ /usr/bin/python3 -I -c '
+import glob, json, os, re, sys
+best = None
+for f in glob.glob(os.path.join(sys.argv[1], "state", "*.json")):
+    try:
+        with open(f) as fh:
+            r = json.load(fh)
+        sid = r["session_id"]
+        t = float(r["t"])
+    except Exception:
+        continue
+    if isinstance(sid, str) and re.fullmatch(r"[0-9a-fA-F]{8}(-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12}", sid) and (best is None or t > best[0]):
+        best = (t, sid)
+if best is None:
+    sys.exit(1)
+print(best[1])
+' $D) || { echo "slot $s: no readable session id in $D/state (the SessionStart hook has not recorded one)" >&2; exit 1; }
+    [[ -n $id ]] || { echo "slot $s: empty session id" >&2; exit 1; }
+    print -r -- $id
+    ;;
   uid)  # report the uid that actually owns the slot's claude process (for the isolation proof)
     s=${1:?slot}; slotctx $s
     ps -axo uid=,user=,pid=,command= | awk -v u="${U:-$USER}" -v s="bridge-slot-$s" '$2==u && ($0 ~ s || $0 ~ /claude/) {print}' | head -5 ;;
-  *) sed -n '2,12p' $0; exit 2 ;;
+  *) sed -n '2,24p' $0; exit 2 ;;
 esac
