@@ -3,7 +3,9 @@
 #
 #   slot.sh start <slot> <repo dir>   start slot (at most MCTL_BRIDGE_MAX_SLOTS, default 2)
 #   slot.sh stop <slot>               end the session (the adapter unregisters)
-#   slot.sh show <slot> [lines]       print the end of the slot's screen
+#   slot.sh show <slot> [lines]       print the end of the slot's rendered screen
+#   slot.sh prompt <slot>             JSON: is a permission prompt waiting, whole command included
+#   slot.sh state <slot>              JSON: alive, seconds since last output, prompt (not heartbeat)
 #   slot.sh keys <slot> <string>      type into the slot (printf escapes: \r = Enter)
 #   slot.sh list                      running slots
 #
@@ -138,6 +140,14 @@ RUN
     s=${1:?slot}; slotctx $s
     as_ $PY -I $PTY show $D ${2:-20}
     ;;
+  prompt)  # JSON: is a permission prompt or dialog waiting, with the whole command/detail text
+    s=${1:?slot}; slotctx $s
+    as_ $PY -I $PTY prompt $D
+    ;;
+  state)   # JSON: alive, seconds since the last output, prompt. The adapter heartbeat is not progress.
+    s=${1:?slot}; slotctx $s
+    as_ $PY -I $PTY state $D
+    ;;
   keys)
     s=${1:?slot}; slotctx $s; as_ $PY -I $PTY keys $D "${2:?string}"
     ;;
@@ -145,5 +155,5 @@ RUN
   uid)  # report the uid that actually owns the slot's claude process (for the isolation proof)
     s=${1:?slot}; slotctx $s
     ps -axo uid=,user=,pid=,command= | awk -v u="${U:-$USER}" -v s="bridge-slot-$s" '$2==u && ($0 ~ s || $0 ~ /claude/) {print}' | head -5 ;;
-  *) sed -n '2,10p' $0; exit 2 ;;
+  *) sed -n '2,12p' $0; exit 2 ;;
 esac

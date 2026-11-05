@@ -7,11 +7,16 @@ session and read its output:
   slot-pty.py start <dir> <cmd> [args...]   daemonize; <dir>/ctl.sock, <dir>/screen.log
   slot-pty.py ping  <dir>                   exit 0 if the session is alive
   slot-pty.py keys  <dir> <text>            type text (use \\r for Enter, \\x03 for Ctrl+C)
-  slot-pty.py show  <dir> [lines]           last lines of output, escape codes stripped
+  slot-pty.py show  <dir> [lines]           last lines of the RENDERED screen (a small terminal emulator
+                                            applies cursor moves, so redraws and spaces survive)
+  slot-pty.py prompt <dir>                  JSON: is a permission prompt or dialog waiting, with its
+                                            question, options and the full command/detail text
+  slot-pty.py state <dir>                   JSON: alive, seconds since the last output, and the prompt
+                                            (what Claude is doing; the adapter heartbeat is not)
   slot-pty.py stop  <dir>                   ask the child to end (SIGTERM), then SIGKILL
 The socket is only reachable by the slot user (and root); nothing here reads credentials.
 """
-import fcntl, os, pty, re, select, signal, socket, struct, sys, termios, time
+import codecs, fcntl, json, os, pty, re, select, signal, socket, struct, sys, termios, time
 
 def sock_path(d): return os.path.join(d, "ctl.sock")
 
@@ -24,7 +29,143 @@ def call(d, payload, timeout=5):
         if not c: return out
         out += c
 
-ANSI = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[()][A-Za-z0-9]|\x1b[=>78]")
+
+
+class Screen:
+    """A small terminal emulator, enough to read what a TUI shows right now.
+
+    Stripping escape codes from the byte stream (what `show` used to do) loses the cursor moves
+    a TUI uses for spaces and redraws: words ran together ("gitcheckout") and a spinner's
+    frames piled up. This keeps a character grid instead: printable text, CR/LF/BS/TAB, and the
+    CSI cursor/erase sequences (A B C D E F G H f J K P X d). Colours, modes and everything
+    else are ignored. Scrollback keeps lines that scrolled off the top.
+    """
+    def __init__(self, rows=50, cols=160, keep=2000):
+        self.rows, self.cols, self.keep = rows, cols, keep
+        self.grid = [[" "] * cols for _ in range(rows)]
+        self.back = []
+        self.r = self.c = 0
+        self.state = "text"; self.param = ""
+        self.dec = codecs.getincrementaldecoder("utf-8")("replace")
+
+    def _scroll(self):
+        self.back.append("".join(self.grid.pop(0)).rstrip())
+        del self.back[:-self.keep]
+        self.grid.append([" "] * self.cols)
+
+    def _lf(self):
+        if self.r == self.rows - 1: self._scroll()
+        else: self.r += 1
+
+    def _put(self, ch):
+        if self.c >= self.cols:
+            self.c = 0; self._lf()
+        self.grid[self.r][self.c] = ch; self.c += 1
+
+    def feed(self, data):
+        for ch in self.dec.decode(data):
+            o = ord(ch)
+            if self.state == "text":
+                if ch == "\x1b": self.state = "esc"
+                elif ch == "\r": self.c = 0
+                elif ch == "\n": self._lf()
+                elif ch == "\b": self.c = max(0, self.c - 1)
+                elif ch == "\t": self.c = min(self.cols - 1, (self.c // 8 + 1) * 8)
+                elif o >= 32 and o != 127: self._put(ch)
+            elif self.state == "esc":
+                if ch == "[": self.state = "csi"; self.param = ""
+                elif ch == "]": self.state = "osc"
+                elif ch in "()": self.state = "skip1"
+                else: self.state = "text"
+            elif self.state == "skip1":
+                self.state = "text"
+            elif self.state == "osc":
+                if ch == "\x07": self.state = "text"
+                elif ch == "\x1b": self.state = "oscesc"
+            elif self.state == "oscesc":
+                self.state = "text"
+            elif self.state == "csi":
+                if 0x40 <= o <= 0x7e:
+                    self._csi(ch, self.param); self.state = "text"
+                else:
+                    self.param += ch
+
+    def _csi(self, f, p):
+        if p[:1] in "?><=!": return  # private modes, cursor style, keyboard protocol: no layout effect
+        a = [int(x) if x.isdigit() else 0 for x in p.split(";")] if p else []
+        n = a[0] if a and a[0] else 1
+        if f == "A": self.r = max(0, self.r - n)
+        elif f == "B": self.r = min(self.rows - 1, self.r + n)
+        elif f == "C": self.c = min(self.cols - 1, self.c + n)
+        elif f == "D": self.c = max(0, self.c - n)
+        elif f == "E": self.r = min(self.rows - 1, self.r + n); self.c = 0
+        elif f == "F": self.r = max(0, self.r - n); self.c = 0
+        elif f == "G": self.c = min(self.cols - 1, n - 1)
+        elif f in "Hf":
+            self.r = min(self.rows - 1, (a[0] or 1) - 1 if a else 0)
+            self.c = min(self.cols - 1, (a[1] or 1) - 1 if len(a) > 1 else 0)
+        elif f == "d": self.r = min(self.rows - 1, n - 1)
+        elif f == "J":
+            m = a[0] if a else 0
+            if m == 0:
+                self.grid[self.r][self.c:] = [" "] * (self.cols - self.c)
+                for i in range(self.r + 1, self.rows): self.grid[i] = [" "] * self.cols
+            elif m == 1:
+                self.grid[self.r][:self.c + 1] = [" "] * (self.c + 1)
+                for i in range(self.r): self.grid[i] = [" "] * self.cols
+            else:
+                for i in range(self.rows): self.grid[i] = [" "] * self.cols
+        elif f == "K":
+            m = a[0] if a else 0
+            if m == 0: self.grid[self.r][self.c:] = [" "] * (self.cols - self.c)
+            elif m == 1: self.grid[self.r][:self.c + 1] = [" "] * (self.c + 1)
+            else: self.grid[self.r] = [" "] * self.cols
+        elif f == "X":
+            end = min(self.cols, self.c + n)
+            self.grid[self.r][self.c:end] = [" "] * (end - self.c)
+        elif f == "P":
+            row = self.grid[self.r]; n = min(n, self.cols - self.c)
+            del row[self.c:self.c + n]; row.extend([" "] * n)
+
+    def lines(self):
+        """Scrollback plus the live grid, trailing blanks trimmed."""
+        return self.back + ["".join(r).rstrip() for r in self.grid]
+
+    def visible(self):
+        return ["".join(r).rstrip() for r in self.grid]
+
+SOLID = re.compile(r"[─━]{20,}")
+DASHED = re.compile(r"^[\s╌┄┈─━│]*$")
+QUESTION = re.compile(r"^\s*(?:Do you want to|Would you like to|Allow)\b.*\?\s*$")
+OPTION = re.compile(r"^\s*[❯>]?\s*(\d+)\.\s+(\S.*?)\s*$")
+FOOTER = re.compile(r"Enter to confirm|Esc to cancel|Press Enter to continue")
+
+def find_prompt(lines):
+    """The prompt or dialog the screen is waiting on, or None. `lines` is the visible screen.
+
+    A permission prompt is a question line ('Do you want to ...?') with at least two numbered
+    options below it; the text between the last solid rule above it and the question is the
+    command or edit being asked about, returned whole. Other dialogs (folder trust, development
+    channels) are recognised by their 'Enter to confirm' / 'Esc to cancel' footer.
+    """
+    q = None
+    for i, l in enumerate(lines):
+        if QUESTION.match(l):
+            opts = []
+            for m in map(OPTION.match, lines[i + 1:i + 8]):
+                if not m: break
+                opts.append({"n": int(m.group(1)), "text": m.group(2)})
+            if len(opts) >= 2: q = (i, opts)
+    if q:
+        i, opts = q
+        j = i - 1
+        while j >= 0 and not SOLID.search(lines[j]): j -= 1
+        body = [l.strip() for l in lines[max(j, 0) + (1 if j >= 0 else 0):i] if l.strip() and not DASHED.match(l)]
+        return {"kind": "permission", "question": lines[i].strip(), "options": opts, "detail": body}
+    if any(FOOTER.search(l) for l in lines):
+        shown = [l.strip() for l in lines if l.strip() and not DASHED.match(l)]
+        return {"kind": "dialog", "question": None, "options": [], "detail": shown[-15:]}
+    return None
 
 def serve(d, argv):
     log = os.path.join(d, "screen.log")
@@ -39,6 +180,7 @@ def serve(d, argv):
     srv = socket.socket(socket.AF_UNIX); old = os.umask(0o177); srv.bind(path); os.umask(old)
     srv.listen(4)
     buf = b""; alive = True; died_at = None
+    screen = Screen(); last_out = time.time()
     GRACE = 300  # keep serving this long after the child ends, so `show` can read the tail
     mine = os.stat(path).st_ino
     def reap(reaped=False):
@@ -49,7 +191,8 @@ def serve(d, argv):
                 try: os.waitpid(pid, 0)
                 except ChildProcessError: pass
     def absorb(data):
-        nonlocal buf
+        nonlocal buf, last_out
+        screen.feed(data); last_out = time.time()
         buf = (buf + data)[-200000:]
         with open(log, "wb") as f: f.write(buf)
     def child_exited():
@@ -91,6 +234,9 @@ def serve(d, argv):
             elif cmd == b"K": c.sendall(b"dead")
             elif cmd == b"P": c.sendall(b"alive" if alive else b"dead")
             elif cmd == b"S": c.sendall(buf)
+            elif cmd == b"R": c.sendall("\n".join(screen.lines()).encode())
+            elif cmd == b"V": c.sendall("\n".join(screen.visible()).encode())
+            elif cmd == b"A": c.sendall(json.dumps({"alive": alive, "idle_s": round(time.time() - last_out, 1)}).encode())
             elif cmd == b"Q":
                 c.sendall(b"ok")
                 if alive:  # never signal a pid that was already reaped: it may be reused
@@ -135,10 +281,18 @@ def main():
         text = sys.argv[3].encode().decode("unicode_escape").encode("latin-1")
         sys.stdout.write(call(sys.argv[2], b"K" + text).decode() + "\n")
     elif cmd == "show":
-        raw = ANSI.sub(b"", call(sys.argv[2], b"S")).replace(b"\r", b"")
-        lines = [l for l in raw.decode("utf-8", "replace").split("\n") if l.strip()]
+        lines = [l for l in call(sys.argv[2], b"R").decode("utf-8", "replace").split("\n") if l.strip()]
         n = int(sys.argv[3]) if len(sys.argv) > 3 else 20
         print("\n".join(lines[-n:]))
+    elif cmd == "prompt":
+        p = find_prompt(call(sys.argv[2], b"V").decode("utf-8", "replace").split("\n"))
+        print(json.dumps({"pending": p is not None, "prompt": p}, ensure_ascii=False))
+    elif cmd == "state":
+        st = json.loads(call(sys.argv[2], b"A"))
+        p = find_prompt(call(sys.argv[2], b"V").decode("utf-8", "replace").split("\n"))
+        # What the adapter reports (heartbeat, busy) only says its own process is alive. Progress
+        # of the Claude session is: output on the screen (idle_s) or a prompt waiting for a decision.
+        print(json.dumps({**st, "prompt_pending": p is not None, "prompt": p}, ensure_ascii=False))
     elif cmd == "stop":
         try: call(sys.argv[2], b"Q", timeout=15)
         except OSError: pass

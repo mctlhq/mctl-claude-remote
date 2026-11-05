@@ -31,6 +31,9 @@ text that is not trivially safe in a shell; one trailing newline is dropped.
   sessions                               registered slots
   tasks                                  every open message
   status ID                              one message with its audit trail and late evidence
+  observe ID                             one task (t-), question (q-) or wake (w-): state, terminal or
+                                         needing the operator, open wakes, adapter liveness (read-only;
+                                         an unreadable or unknown id is an error, never an empty state)
   errors                                 delivery_unknown, wake_unknown and late evidence
   wakes                                  wakes not yet settled (intent, started, wake_unknown)
   sweep [--stale-ms MS]                  expiry, stale slots and recovery
@@ -104,6 +107,46 @@ async function lateKeys(b: Bridge): Promise<string[]> {
     for (const k of batch as Reply[]) out.add(text(k));
   } while (cursor !== "0");
   return [...out].sort();
+}
+
+// Where each kind of id ends, and where it needs a person. A state in neither set is in progress.
+const SETTLED: Record<string, string[]> = {
+  t: ["completed", "failed", "cancelled", "expired"],
+  q: ["reply_acknowledged", "closed", "cancelled", "expired"],
+  w: ["completed", "failed"],
+};
+const NEEDS_OPERATOR = ["delivery_unknown", "wake_unknown"];
+
+export async function observe(b: Bridge, id: string): Promise<{ code: number; out: unknown }> {
+  const kind = id.slice(0, 2);
+  if (kind !== "t-" && kind !== "q-" && kind !== "w-") throw new Usage(`observe takes a task (t-), question (q-) or wake (w-) id, got: ${id}`);
+  const k = kind[0]!;
+  const rec = k === "w" ? await b.wake(id) : await b.message(id);
+  // An empty hash is not "finished": the id may be wrong, expired from the store or never created.
+  if (!rec.state) return { code: 1, out: { ok: false, code: "unknown", id } };
+  const out: Record<string, unknown> = {
+    ok: true,
+    id,
+    kind: { t: "task", q: "question", w: "wake" }[k],
+    state: rec.state,
+    reason: rec.reason ?? "",
+    terminal: SETTLED[k]!.includes(rec.state),
+    needs_operator: NEEDS_OPERATOR.includes(rec.state),
+  };
+  if (k === "q") out.wakes = (await b.openWakes()).filter((w) => w.question_id === id).map((w) => ({ id: w.id, state: w.state }));
+  if (rec.slot) {
+    const s = await b.slotInfo(rec.slot);
+    out.slot = {
+      slot: rec.slot,
+      registered: Boolean(s.conn_id),
+      busy: s.busy === "1",
+      heartbeat_age_ms: s.heartbeat ? Date.now() - Number(s.heartbeat) : null,
+      // The adapter reports on itself. A fresh heartbeat or busy=1 does not show that the Claude
+      // session is working or what it waits for: read the screen (slot.sh state/prompt).
+      note: "adapter liveness only, not evidence of progress",
+    };
+  }
+  return { code: 0, out };
 }
 
 export async function run(argv: string[], b: Bridge): Promise<{ code: number; out: unknown }> {
@@ -200,6 +243,8 @@ export async function run(argv: string[], b: Bridge): Promise<{ code: number; ou
       if (!message.state) return { code: 1, out: { ok: false, code: "unknown" } };
       return { code: 0, out: { ok: true, id, message, audit: await b.auditTrail(id), late: await b.late(id) } };
     }
+    case "observe":
+      return observe(b, positional(positionals, "ID"));
     case "errors": {
       const open = await b.openMessages();
       const unknown = open.filter((m) => m.state === "delivery_unknown");
