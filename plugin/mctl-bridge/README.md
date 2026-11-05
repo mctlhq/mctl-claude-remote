@@ -91,8 +91,9 @@ credential files of A and B are readable from either.
 release the repository declares, so nothing is copied by hand.
 
 - **Desired state:** the highest `MAJOR.MINOR.PATCH` tag (no `v`) whose commit is an ancestor
-  of `main`. A tag on any other commit never deploys. Releases come from release-please, so
-  merging the release PR is the deploy decision.
+  of `main`. A tag on any other commit never deploys. Releases are manual: pushing an
+  `X.Y.Z` tag runs `.github/workflows/build.yml`, which builds and pushes the image and
+  dispatches the gitops image bump.
 - **Hold or roll back:** put a tag in `~/mctl-bridge/etc/pin` (it must also be on `main`).
   Delete the file to follow releases again.
 - **Installed state:** `~/mctl-bridge/VERSION` (`<tag> <commit>`), written by the updater only
@@ -110,7 +111,7 @@ release the repository declares, so nothing is copied by hand.
   declared release over it within seconds unless `VERSION` already matches. To run unreleased
   code, stop the job first (`launchctl bootout gui/$(id -u)/com.mctl.bridge-updater`).
   Only people who can push tags can choose what the updater considers a release (still
-  limited to commits on `main`): restrict tag creation to release-please with a tag ruleset.
+  limited to commits on `main`): restrict tag creation to release maintainers with a tag ruleset.
   After that the updater takes over. A new updater plist takes effect the next time the
   job is loaded, because the updater cannot boot itself out mid-install.
 - `com.mctl.codex-remote-guard` is installed by the same script (see `ops/codex-remote-guard.sh`).
