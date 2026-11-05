@@ -10,7 +10,8 @@
 #   slot.sh list                      running slots
 #
 # Slots run in --permission-mode default, never with --dangerously-skip-permissions.
-# Only the bridge's own tools are pre-allowed; anything else prompts, and prompts are
+# The bridge's own tools and a fixed list of local work (see "Permission rules" below) are
+# pre-allowed; remote writes and credentials are denied; anything else prompts, and prompts are
 # answered through Remote Control. Each slot has its own Valkey user and password file;
 # the user can only append to its request stream and read its response stream and inbox.
 # Each slot runs as its own macOS user `mctl-slot-<slot>` (created by host-boundary.sh), so
@@ -101,8 +102,17 @@ case $cmd in
  "env":{"MCTL_BRIDGE_SLOT":$(json "$s"),"MCTL_BRIDGE_TRANSPORT":"rpc","MCTL_BRIDGE_VALKEY_URL":$(json "redis://bridge_slot_$s@127.0.0.1:$port/0"),"MCTL_BRIDGE_VALKEY_PASSWORD_FILE":$(json "$d/slot.pw")}}}}
 JSON
     hook=$(json "/usr/bin/python3 ${(qq)H}/plugin/hooks/state.py")
+    # Permission rules. allow = local, reversible work inside the slot's own checkout: reading,
+    # searching, local git (no remote writes), editing, and the test/syntax runners. deny wins
+    # over allow and covers everything that leaves the machine or touches credentials. A slot
+    # has no GitHub credentials by design, so push/gh are denied rather than merely unprompted.
+    # Everything not listed still prompts. Edit/Write are scoped by Claude Code to the working
+    # directory; which FILES a task may touch is checked on the diff, not here.
+    allow='"Read","Edit","Write","Glob","Grep","Bash(git status:*)","Bash(git diff:*)","Bash(git log:*)","Bash(git show:*)","Bash(git branch:*)","Bash(git rev-parse:*)","Bash(git ls-files:*)","Bash(git grep:*)","Bash(git blame:*)","Bash(git fetch:*)","Bash(git checkout:*)","Bash(git switch:*)","Bash(git add:*)","Bash(git commit:*)","Bash(git stash:*)","Bash(git restore:*)","Bash(git worktree:*)","Bash(ls:*)","Bash(cat:*)","Bash(head:*)","Bash(tail:*)","Bash(wc:*)","Bash(grep:*)","Bash(rg:*)","Bash(diff:*)","Bash(sort:*)","Bash(uniq:*)","Bash(jq:*)","Bash(sed -n:*)","Bash(pwd)","Bash(python3 -m unittest:*)","Bash(python3 -m py_compile:*)","Bash(python3 -I -m unittest:*)","Bash(sh -n:*)","Bash(bash -n:*)","Bash(zsh -n:*)","Bash(shellcheck:*)","Bash(bun test:*)"'
+    deny='"Bash(git push:*)","Bash(git remote:*)","Bash(git config:*)","Bash(git credential:*)","Bash(gh:*)","Bash(curl:*)","Bash(wget:*)","Bash(ssh:*)","Bash(scp:*)","Bash(sudo:*)","Bash(security:*)","Bash(rm -rf:*)","Bash(open:*)","Read(~/.ssh/**)","Read(~/.config/gh/**)","Read(~/.aws/**)","Read(**/*.pw)"'
     put $d/settings.json 600 <<JSON
-{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":$hook}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":$hook}]}],"Stop":[{"hooks":[{"type":"command","command":$hook}]}]}}
+{"permissions":{"allow":[$allow],"deny":[$deny]},
+ "hooks":{"SessionStart":[{"hooks":[{"type":"command","command":$hook}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":$hook}]}],"Stop":[{"hooks":[{"type":"command","command":$hook}]}]}}
 JSON
     # Remote Control name (a flag with a value, or nothing). The slot name is already restricted
     # to [a-z0-9-], and the name is zsh-quoted anyway.
