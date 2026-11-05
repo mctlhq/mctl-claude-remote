@@ -109,14 +109,19 @@ JSON
     # Everything not listed still prompts. Edit/Write are scoped by Claude Code to the working
     # directory; which FILES a task may touch is checked on the diff, not here.
     # Reading goes through the built-in Read/Grep/Glob tools, where the Read denies below apply.
-    # Bash readers (cat, head, grep, sed, jq, ...) are deliberately NOT allowed: a Read deny does
-    # not bind a Bash subprocess, so allowing them would make credential reads silent. They prompt.
+    # Bash readers (cat, grep, rg, sed, awk, jq, diff, ...) are deliberately NOT allowed: a Read deny
+    # does not bind a Bash subprocess, so allowing them would make credential reads silent. They
+    # prompt; slots read with the built-in Read/Grep/Glob tools. The pipe filters head, tail, wc and
+    # cut ARE allowed, so a compound command such as `git log | tail -3` does not prompt on its last
+    # stage. They can also read a named file, so the Bash(*...*) denies below block commands that
+    # mention a credential path. Those are best-effort command-text matches, not a boundary.
+    # sort and uniq stay out: `sort -o FILE` and `uniq IN OUT` write files.
     # The denies are best-effort: a Bash rule matches the command text (git -C . push, /bin/rm and
     # sh -c are not caught), so the real boundary is the slot's own macOS user and the absence of
     # GitHub credentials. git push is also simply not allowed, so it prompts as well as being denied.
     # python3 -m unittest and bun test run repo code: they are trusted-code execution by design.
-    allow='"Read","Edit","Write","Glob","Grep","Bash(git status:*)","Bash(git diff:*)","Bash(git log:*)","Bash(git show:*)","Bash(git branch:*)","Bash(git rev-parse:*)","Bash(git ls-files:*)","Bash(git grep:*)","Bash(git blame:*)","Bash(git fetch origin:*)","Bash(git checkout:*)","Bash(git switch:*)","Bash(git add:*)","Bash(git commit:*)","Bash(git stash:*)","Bash(git restore:*)","Bash(git worktree:*)","Bash(ls:*)","Bash(pwd)","Bash(python3 -m unittest:*)","Bash(python3 -m py_compile:*)","Bash(python3 -I -m unittest:*)","Bash(sh -n:*)","Bash(bash -n:*)","Bash(zsh -n:*)","Bash(shellcheck:*)","Bash(bun test:*)"'
-    deny='"Bash(git push:*)","Bash(git remote:*)","Bash(git config:*)","Bash(git credential:*)","Bash(gh:*)","Bash(curl:*)","Bash(wget:*)","Bash(ssh:*)","Bash(scp:*)","Bash(sudo:*)","Bash(security:*)","Bash(rm -rf:*)","Bash(rm -fr:*)","Bash(rm -r -f:*)","Bash(rm -f -r:*)","Bash(open:*)","Read(~/.ssh/**)","Read(~/.config/gh/**)","Read(~/.aws/**)","Read(**/*.pw)"'
+    allow='"Read","Edit","Write","Glob","Grep","Bash(git status:*)","Bash(git diff:*)","Bash(git log:*)","Bash(git show:*)","Bash(git branch:*)","Bash(git rev-parse:*)","Bash(git ls-files:*)","Bash(git grep:*)","Bash(git blame:*)","Bash(git fetch origin:*)","Bash(git checkout:*)","Bash(git switch:*)","Bash(git add:*)","Bash(git commit:*)","Bash(git stash:*)","Bash(git restore:*)","Bash(git worktree:*)","Bash(ls:*)","Bash(pwd)","Bash(head:*)","Bash(tail:*)","Bash(wc:*)","Bash(cut:*)","Bash(python3 -m unittest:*)","Bash(python3 -m py_compile:*)","Bash(python3 -I -m unittest:*)","Bash(sh -n:*)","Bash(bash -n:*)","Bash(zsh -n:*)","Bash(shellcheck:*)","Bash(bun test:*)"'
+    deny='"Bash(git push:*)","Bash(git remote:*)","Bash(git config:*)","Bash(git credential:*)","Bash(gh:*)","Bash(curl:*)","Bash(wget:*)","Bash(ssh:*)","Bash(scp:*)","Bash(sudo:*)","Bash(security:*)","Bash(rm -rf:*)","Bash(rm -fr:*)","Bash(rm -r -f:*)","Bash(rm -f -r:*)","Bash(open:*)","Bash(*.ssh*)","Bash(*.config/gh*)","Bash(*.aws*)","Bash(*.git-credentials*)","Bash(*.pw*)","Bash(*keychain*)","Read(~/.ssh/**)","Read(~/.config/gh/**)","Read(~/.aws/**)","Read(**/*.pw)"'
     put $d/settings.json 600 <<JSON
 {"permissions":{"allow":[$allow],"deny":[$deny]},
  "hooks":{"SessionStart":[{"hooks":[{"type":"command","command":$hook}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":$hook}]}],"Stop":[{"hooks":[{"type":"command","command":$hook}]}]}}
