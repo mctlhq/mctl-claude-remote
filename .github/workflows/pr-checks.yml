@@ -71,11 +71,53 @@ jobs:
         working-directory: plugin/mctl-bridge
         run: python3 -m unittest discover -s test -p 'test_*.py' -v
 
+  # Decides whether the mutation shards below have anything to test. The run is
+  # about 35 minutes x 4 shards per push, so it is skipped on pull requests that
+  # touch none of its inputs. Every other trigger (push to main, manual run)
+  # always runs it. A diff that cannot be computed counts as relevant: not
+  # being able to look is never read as "nothing changed".
+  mutation-scope:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      run: ${{ steps.scope.outputs.run }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Decide whether bridge mutation is relevant
+        id: scope
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          run=true
+          if [ "$EVENT" = pull_request ]; then
+            if files=$(git diff --name-only "$BASE_SHA...$HEAD_SHA"); then
+              echo "changed files:"; echo "$files"
+              if printf '%s\n' "$files" | sh .github/scripts/bridge-mutation-relevant.sh; then
+                run=true
+              else
+                run=false
+              fi
+            else
+              echo "git diff failed; running mutation to be safe"
+            fi
+          fi
+          echo "run=$run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
   # The mutation run reverts each guarantee in turn and fails if any revert
   # leaves the tests green. Every shard runs the full `bun test` per mutation;
   # sharding only splits which mutations a runner handles. Each matrix job has
   # its own checkout, so the in-place edits mutate.py makes never meet.
   bridge-mutation:
+    needs: [mutation-scope]
+    if: needs.mutation-scope.outputs.run == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -105,8 +147,15 @@ jobs:
 
   # Built only when every check and every mutation shard passed, as before,
   # when it was the last step of the single job.
+  # A skipped mutation (nothing it tests changed) still lets the build run, but
+  # only when the scope job succeeded and said so.
   docker:
-    needs: [checks, bridge-mutation]
+    needs: [checks, mutation-scope, bridge-mutation]
+    if: >-
+      !cancelled() && needs.checks.result == 'success' &&
+      needs.mutation-scope.result == 'success' &&
+      (needs.bridge-mutation.result == 'success' ||
+      (needs.bridge-mutation.result == 'skipped' && needs.mutation-scope.outputs.run == 'false'))
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -125,7 +174,7 @@ jobs:
   # aggregate gate: it runs even when a needed job failed, was cancelled or
   # was skipped, and passes only if every one of them is exactly `success`.
   validate:
-    needs: [checks, bridge-mutation, docker]
+    needs: [checks, mutation-scope, bridge-mutation, docker]
     if: always()
     runs-on: ubuntu-latest
     permissions: {}
@@ -134,8 +183,17 @@ jobs:
       - name: Require every gated job to have succeeded
         env:
           CHECKS: ${{ needs.checks.result }}
+          SCOPE: ${{ needs.mutation-scope.result }}
+          RUN_MUTATION: ${{ needs.mutation-scope.outputs.run }}
           MUTATION: ${{ needs.bridge-mutation.result }}
           DOCKER: ${{ needs.docker.result }}
         run: |
-          echo "checks=$CHECKS bridge-mutation=$MUTATION docker=$DOCKER"
-          [ "$CHECKS" = success ] && [ "$MUTATION" = success ] && [ "$DOCKER" = success ]
+          echo "checks=$CHECKS scope=$SCOPE run_mutation=$RUN_MUTATION bridge-mutation=$MUTATION docker=$DOCKER"
+          [ "$CHECKS" = success ] && [ "$SCOPE" = success ] && [ "$DOCKER" = success ] || exit 1
+          # Mutation may be skipped only when the scope job said it was not
+          # needed; a skip for any other reason (or a missing output) fails.
+          if [ "$RUN_MUTATION" = true ]; then
+            [ "$MUTATION" = success ]
+          else
+            [ "$RUN_MUTATION" = false ] && [ "$MUTATION" = skipped ]
+          fi
