@@ -37,7 +37,7 @@ def serve(d, argv):
     try: os.unlink(path)
     except FileNotFoundError: pass
     srv = socket.socket(socket.AF_UNIX); old = os.umask(0o177); srv.bind(path); os.umask(old)
-    srv.listen(4)
+    srv.listen(64)  # a burst of clients must queue, not be refused (macOS refuses past the backlog)
     buf = b""; alive = True; died_at = None
     GRACE = 300  # keep serving this long after the child ends, so `show` can read the tail
     mine = os.stat(path).st_ino
