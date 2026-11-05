@@ -8,7 +8,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Bridge, newId } from "../src/store.ts";
+import { Bridge, key, newId } from "../src/store.ts";
 import type { Admission, Result, SlotConn } from "../src/store.ts";
 import { ValkeyServer, requiresValkey } from "./support.ts";
 
@@ -109,7 +109,14 @@ describe.skipIf(requiresValkey)("continuation after a planned restart", () => {
     const oldAdm = await admit(old, t1.id, n1.attempt_id);
     must(await b.unregister(old));
     const fresh = await register("a", 200);
+    // a restart leaves the old task delivery_unknown: still open, so the documented
+    // precondition for a continuation ("old task closed") is NOT met yet
     expect((await b.message(t1.id)).state).toBe("delivery_unknown");
+    expect(await b.members(key.open)).toContain(t1.id);
+    // the operator closes it; only then is the continuation sent
+    must(await b.resolve(t1.id, "cancelled", "slot restarted with --resume", "operator"));
+    expect((await b.message(t1.id)).state).toBe("cancelled");
+    expect(await b.members(key.open)).not.toContain(t1.id);
 
     const t2 = must(await b.send({ slot: "a", payload: `Resume ${t1.id}`, idempotency_key: `continue-${t1.id}-${fresh.epoch}` }));
     expect(t2.id).not.toBe(t1.id);
@@ -119,7 +126,7 @@ describe.skipIf(requiresValkey)("continuation after a planned restart", () => {
     // the resumed session still holds the old grant: every use of it is refused
     expect(await b.result("a", oldAdm, "completed", "from the old attempt")).toMatchObject({ ok: false, late: true });
     expect(await b.ask("a", oldAdm, "old question?")).toMatchObject({ ok: false });
-    expect((await b.message(t1.id)).state).toBe("delivery_unknown");
+    expect((await b.message(t1.id)).state).toBe("cancelled"); // evidence changes no state
     const late = await b.late(t1.id);
     expect(late.map((l) => l.kind).sort()).toEqual(["question", "result"]);
     for (const l of late) expect(l).toMatchObject({ attempt_id: n1.attempt_id, epoch: oldAdm.epoch, conn_id: oldAdm.conn_id });
@@ -142,6 +149,11 @@ describe.skipIf(requiresValkey)("continuation after a planned restart", () => {
     expect(sec).toContain(template);
     for (const rule of [
       "The standing ban on resending tasks stays.",
+      "After a restart the old task is normally `delivery_unknown`. That state is NOT closed.",
+      "The OPERATOR closes it, before asking you for a continuation, with `mctl-bridge resolve <old task id> --as cancelled --reason ... --author ...`.",
+      "You never run `resolve` on it yourself, and you never requeue it",
+      "`delivery_unknown` or any open state does NOT count as closed.",
+      "If the old task is still `delivery_unknown` or open, refuse: send nothing, and report to the operator",
       "Never run `slot.sh stop` or `slot.sh start`",
       "`mctl-bridge sessions` shows the slot with a NEW registration",
       "Send exactly ONE new task",

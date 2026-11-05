@@ -109,10 +109,19 @@ then send a `continue` task. The rules:
 - The standing ban on resending tasks stays. The one exception is a deliberate
   continuation after a restart the operator has confirmed.
 - Never run `slot.sh stop` or `slot.sh start`. Restarting is the operator's job.
+- After a restart the old task is normally `delivery_unknown`. That state is NOT closed.
+  The OPERATOR closes it, before asking you for a continuation, with
+  `mctl-bridge resolve <old task id> --as cancelled --reason ... --author ...`.
+  You never run `resolve` on it yourself, and you never requeue it: a requeue would run
+  the task a second time next to the continuation.
 - Before sending, confirm two things. First, `mctl-bridge sessions` shows the slot with a
   NEW registration: a new epoch, live, `busy=0`, no inflight task. Second,
-  `mctl-bridge status <old task id>` or `mctl-bridge observe <old task id>` shows that the
-  previous attempt is closed (cancelled or in a terminal state).
+  `mctl-bridge status <old task id>` or `mctl-bridge observe <old task id>` shows the old
+  task `cancelled` or in another terminal state (completed, failed, closed).
+  `delivery_unknown` or any open state does NOT count as closed.
+- If the old task is still `delivery_unknown` or open, refuse: send nothing, and report to
+  the operator that the precondition is unmet and that the operator must resolve it as
+  cancelled first.
 - Send exactly ONE new task:
   `mctl-bridge send --slot <s> --idem continue-<old task id>-<new epoch> --text ...`
   The `--idem` key makes a second send a no-op. On a timeout or an unclear result, check

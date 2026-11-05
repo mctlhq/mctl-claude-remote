@@ -80,8 +80,8 @@ case $cmd in
     # Optional --resume <session-id>. Validated before anything is written: the id is data that
     # ends up in a generated shell script, and a bad one must not fall back to a fresh session.
     resume=
-    if [[ -n ${3:-} ]]; then
-      [[ $3 == --resume && $# -eq 4 ]] || { echo "usage: slot.sh start <slot> <repo dir> [--resume <session-id>]" >&2; exit 2; }
+    if (( $# > 2 )); then
+      [[ ${3-} == --resume && $# -eq 4 ]] || { echo "usage: slot.sh start <slot> <repo dir> [--resume <session-id>]" >&2; exit 2; }
       [[ $4 =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || { echo "bad session id for --resume (expected a UUID like the one 'slot.sh session-id' prints)" >&2; exit 2; }
       resume="--resume ${(qq)4} "
     fi
@@ -153,6 +153,10 @@ JSON
 #!/bin/zsh
 export PATH=${(qq)sh_home}/.local/bin:/usr/local/bin:/usr/bin:/bin
 export ENABLE_CLAUDEAI_MCP_SERVERS=false
+# The hook (hooks/state.py) and the adapter (src/channel.ts) both honour this: one state dir for
+# the slot in both modes, the one 'slot.sh session-id' reads (without it the trusted mode would
+# write to the operator's ~/.mctl-bridge/state).
+export MCTL_BRIDGE_STATE_DIR=${(qq)d}/state
 # Claude Code keeps its login in the user's login keychain: unlock it for this session.
 kc=${(qq)d}/keychain.pw
 [[ -r \$kc ]] && printf 'unlock-keychain -p %s %s\\n' "\$(<\$kc)" ${(qq)sh_home}/Library/Keychains/login.keychain-db | security -i >/dev/null 2>&1

@@ -155,11 +155,21 @@ describe.skipIf(!usable)("launcher scripts", () => {
     }
     // a stray extra argument, or --resume without an id, is a usage error as well, not a fresh session
     const t = setup();
-    for (const extra of [["--bogus", SID], ["--resume"], ["--resume", SID, "extra"]]) {
+    for (const extra of [["--bogus", SID], ["--resume"], ["--resume", SID, "extra"], ["", "--resume", SID], [""], ["--resume", ""]]) {
       const r = spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo, ...extra], { env: t.env, encoding: "utf8" });
       expect(r.status).toBe(2);
       expect(fs.existsSync(path.join(t.H, "slots"))).toBe(false);
     }
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
+  test("run.sh points the hook and the adapter at the slot's own state dir, the one session-id reads", () => {
+    const t = setup();
+    expect(spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo], { env: t.env, encoding: "utf8" }).status).toBe(0);
+    const d = path.join(t.H, "slots", "s1");
+    stub(path.join(t.home, ".local", "bin", "claude"), `printf '%s' "$MCTL_BRIDGE_STATE_DIR" > "${t.record}/statedir"`);
+    expect(spawnSync(path.join(d, "run.sh"), [], { env: t.env, cwd: t.root }).status).toBe(0);
+    expect(fs.readFileSync(path.join(t.record, "statedir"), "utf8")).toBe(path.join(d, "state"));
     fs.rmSync(t.root, { recursive: true, force: true });
   });
 
