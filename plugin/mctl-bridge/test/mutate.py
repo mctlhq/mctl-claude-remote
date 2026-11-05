@@ -16,7 +16,7 @@ empty shard was requested, or it ran a different number of mutations than its
 partition says. test/test_shards.py proves the partition is exact.
 """
 import subprocess, sys, shutil
-LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'; GUARD='ops/codex-remote-guard.sh'; WAKE='ops/wake-state.sh'; UPD='ops/bridge-updater.sh'; INSTALL='ops/install.sh'
+LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'; GUARD='ops/codex-remote-guard.sh'; WAKE='ops/wake-state.sh'; UPD='ops/bridge-updater.sh'; INSTALL='ops/install.sh'; PTY='ops/slot-pty.py'; WATCH='ops/watch.sh'
 M=[
  ("fencing off", LUA, "local function fenced(s, conn, epoch)\n  return", "local function fenced(s, conn, epoch)\n  do return false end\n  return", 1),
  ("busy gate off", LUA, "if s.busy ~= '0' then return no('busy') end", "", 1),
@@ -183,7 +183,47 @@ M=[
  ("install boots out the updater from the updater", INSTALL, "if [[ -z ${MCTL_BRIDGE_FROM_UPDATER:-} ]]; then", "if true; then", 1),
  ("install overwrites scripts in place", INSTALL, "mv -f $H/$f.new $H/$f", "cp $H/$f.new $H/$f", 1),
  ("install forgets the thread id", INSTALL, 'print -r -- "$THREAD_ID" > $H/etc/thread-id', ':', 1),
+ # Slot observation (ops/slot-pty.py). These run the python suite (test_slot_pty.py), not bun.
+ ("pty: an empty reply reads as a screen", PTY, '    if not reply:\n        sys.exit("slot host sent no answer', '    if False:\n        sys.exit("slot host sent no answer', 1),
+ ("pty: an unreachable host reads as an empty screen", PTY, '        sys.exit(f"slot host unreachable ({e}): cannot observe this slot, its prompt state is UNKNOWN")', '        reply = b"\\n"', 1),
+ ("pty: parameterless sequences ignored", PTY, 'if p and p[0] in "?><=!": return', 'if p[:1] in "?><=!": return', 1),
+ ("pty: save and restore cursor ignored", PTY, 'elif ch == "8": self.r, self.c = self.saved', 'elif ch == "8": pass', 1),
+ ("pty: wide glyphs take one column", PTY, 'w = 2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1', 'w = 1', 1),
+ ("pty: combining marks take a column", PTY, 'if unicodedata.combining(ch) or unicodedata.category(ch) in ("Mn", "Me", "Cf"):', 'if False:', 1),
+ ("pty: half a wide glyph survives an overwrite", PTY, 'if row[self.c] == "" and self.c > 0: row[self.c - 1] = " "', 'pass', 1),
+ ("pty: column moves ignored", PTY, 'elif f == "G": self.c = min(self.cols - 1, n - 1)', 'elif f == "G": pass', 1),
+ ("pty: line erase ignored", PTY, 'elif f == "K":\n            m = a[0] if a else 0', 'elif f == "Kx":\n            m = a[0] if a else 0', 1),
+ ("pty: cursor up ignored", PTY, 'if f == "A": self.r = max(0, self.r - n)', 'if f == "A": pass', 1),
+ ("pty: one numbered option is a permission prompt", PTY, 'if len(opts) >= 2: q = (i, opts)', 'if len(opts) >= 1: q = (i, opts)', 1),
+ ("pty: the command is cut at the wrong rule", PTY, 'while j >= 0 and not SOLID.search(lines[j]): j -= 1', 'j = max(i - 1, 0)', 1),
+ ("pty: dialogs without options are not pending", PTY, 'FOOTER = re.compile(r"Enter to confirm|Esc to cancel|Press Enter to continue")', 'FOOTER = re.compile(r"NEVERMATCHES")', 1),
+ ("pty: idle time is not measured", PTY, '"idle_s": round(time.time() - last_out, 1)', '"idle_s": 0.0', 1),
+ ("pty: output does not reset idle time", PTY, 'screen.feed(data); last_out = time.time()', 'screen.feed(data)', 1),
+ # Slot observation (src/cli.ts observe, ops/watch.sh). bun tests.
+ ("observe: an empty record is finished", CLI, '  if (!rec.state) return { code: 1, out: { ok: false, code: "unknown", id } };', '  if (!rec.state) rec.state = "completed";', 1),
+ ("observe: asked question is settled", CLI, '  q: ["reply_acknowledged", "closed", "cancelled", "expired"],', '  q: ["asked", "reply_acknowledged", "closed", "cancelled", "expired"],', 1),
+ ("observe: delivery_unknown needs no operator", CLI, 'const NEEDS_OPERATOR = ["delivery_unknown", "wake_unknown"];', 'const NEEDS_OPERATOR = ["wake_unknown"];', 1),
+ ("observe: wake_unknown needs no operator", CLI, 'const NEEDS_OPERATOR = ["delivery_unknown", "wake_unknown"];', 'const NEEDS_OPERATOR = ["delivery_unknown"];', 1),
+ ("observe: busy passes as progress", CLI, 'note: "adapter liveness only, not evidence of progress",', 'note: "busy and a fresh heartbeat: working",', 1),
+ ("observe: a question hides its wakes", CLI, '  if (k === "q") out.wakes', '  if (false) out.wakes', 1),
+ ("observe: wake ids refused", CLI, 'kind !== "q-" && kind !== "w-")', 'kind !== "q-")', 1),
+ ("watch: an empty reading is a state", WATCH, 'print("ERR empty output from the CLI"); sys.exit()', 'print("OK running empty"); sys.exit()', 1),
+ ("watch: a garbled reading is a state", WATCH, 'print("ERR unreadable output: " + raw.strip()[:200].replace("\\n", " ")); sys.exit()', 'print("OK running garbled"); sys.exit()', 1),
+ ("watch: a refused reading is a state", WATCH, 'if not isinstance(d, dict) or d.get("ok") is not True:', 'if False:', 1),
+ ("watch: a reply without state is accepted", WATCH, 'if not state:\n    print("ERR reply carries no state"); sys.exit()', 'if False:\n    print("ERR reply carries no state"); sys.exit()', 1),
+ ("watch: never gives up on failing readings", WATCH, 'if [ "$bad" -ge 3 ]; then', 'if false; then', 1),
+ ("watch: a hung reading is waited for", WATCH, 'timeout=float(sys.argv[3]))', 'timeout=None)', 1),
+ ("watch: needs-operator is swallowed", WATCH, "operator) printf 'WATCH-NEEDS-OPERATOR: %s\\n' \"$line\"; exit 4 ;;", "operator) : ;;", 1),
+ ("watch: never times out", WATCH, 'if [ "$waited" -ge "$max" ]; then', 'if false; then', 1),
+ ("watch: a terminal state is not settled", WATCH, 'verdict = "settled" if d.get("terminal") is True else', 'verdict = "running" if d.get("terminal") is True else', 1),
+ ("watch: prints every poll", WATCH, 'if [ "$line" != "$last" ]; then', 'if true; then', 1),
 ]
+
+def tests_for(f):
+    """The suite that must notice a mutation of file f: the python host has its own unittest suite."""
+    if f == PTY:
+        return ['python3', '-m', 'unittest', 'discover', '-s', 'test', '-p', 'test_slot_pty.py']
+    return ['bun', 'test']
 
 def parse_shard(spec, total=None):
     """'I/N' -> (I, N); anything malformed or out of range is an error."""
@@ -236,12 +276,12 @@ def main(argv):
         shutil.copy(f,f+'.bak')
         open(f,'w').write(src.replace(old,new))
         try:
-            r=subprocess.run(['bun','test'],capture_output=True,text=True,timeout=300)
+            r=subprocess.run(tests_for(f),capture_output=True,text=True,timeout=300)
         finally:
             shutil.move(f+'.bak',f)
         ran += 1
         out=r.stdout+r.stderr
-        fails=[l.strip() for l in out.splitlines() if l.strip().startswith('(fail)')]
+        fails=[l.strip() for l in out.splitlines() if l.strip().startswith(('(fail)', 'FAIL:', 'ERROR:'))]
         print(('KILLED ' if r.returncode else 'SURVIVED ')+name, '|', '; '.join(fails)[:200], flush=True)
         if not r.returncode: survived.append(name)
     label = f"shard {shard[0]}/{shard[1]}" if shard else "run"
