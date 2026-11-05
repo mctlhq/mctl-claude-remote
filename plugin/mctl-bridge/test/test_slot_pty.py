@@ -177,7 +177,9 @@ class RenderedScreen(unittest.TestCase):
             while not stop.is_set():
                 try: c, _ = srv.accept()
                 except OSError: continue
-                c.close()
+                try: c.settimeout(2); c.recv(65536)  # read the request: closing with it unread resets the peer on Linux
+                except OSError: pass
+                c.close()  # a clean close: the client sees an empty reply, as from a host that predates the command
         t = threading.Thread(target=serve, daemon=True); t.start()
         self.addCleanup(lambda: (stop.set(), t.join(2), srv.close()))
         for cmd in ("prompt", "state", "show"):
