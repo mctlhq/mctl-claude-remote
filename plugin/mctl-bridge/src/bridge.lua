@@ -24,11 +24,13 @@
 -- Every function returns a JSON object: {"ok":true,...} or {"ok":false,"code":...}.
 -- Rejections are data, not errors: a fenced or stale caller is an expected event.
 
-local VERSION = '4'
+local VERSION = '5'
 local P = 'mctl:bridge:'
 local MAX_PAYLOAD = 16384
 local MAX_HOP = 4
 local RETAIN_MS = 7 * 24 * 3600 * 1000
+-- A request's memo only has to outlive the sender's retries, which take seconds.
+local QUIET_MEMO_MS = 3600 * 1000
 local AUDIT_MAXLEN = 100000
 local FEED_MAXLEN = 10000
 local LATE_MAXLEN = 100
@@ -644,6 +646,16 @@ local SLOT_FN = {
   result = report_result, ask = ask, status = slot_status,
 }
 
+-- A slot polls every few seconds and heartbeats every ten, so a week of these memos filled
+-- the server (150 of 256 MB by 2026-11-06, with noeviction). They answer nothing a later
+-- run could not answer again. A delivered message and every other request keep the full
+-- retention: their memo is what stops a retry from acting twice.
+local function memo_ms(fn, resp)
+  if fn == 'heartbeat' and resp == ok() then return QUIET_MEMO_MS end
+  if fn == 'next' and (resp == no('empty') or resp == no('busy')) then return QUIET_MEMO_MS end
+  return RETAIN_MS
+end
+
 local function out_key(slot) return P .. 's:' .. slot .. ':out' end
 local function resp_key(slot) return P .. 's:' .. slot .. ':resp' end
 local function checkpoint_key(slot) return P .. 'ingest:' .. slot end
@@ -715,7 +727,7 @@ local function ingest(keys, a)
     end
     resp = handler({ skey(slot) }, call)
     redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', resp, 'entry', entry, 't', now)
-    redis.call('PEXPIRE', memo, RETAIN_MS)
+    redis.call('PEXPIRE', memo, memo_ms(fn, resp))
   end
   redis.call('XADD', resp_key(slot), 'MAXLEN', '~', RESP_MAXLEN, '*', 'rid', rid, 'resp', resp)
   checkpoint(slot, entry)

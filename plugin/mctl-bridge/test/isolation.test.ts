@@ -290,6 +290,40 @@ describe.skipIf(requiresValkey)("slot isolation", () => {
     expect(text((await raw.execute(["HGET", "mctl:bridge:rpc:a:x-trim", "args"]))!)).toBe(JSON.stringify(reg));
   });
 
+  test("only a quiet poll or heartbeat has a short memo; a delivered message keeps the long one", async () => {
+    const link = new SlotLink(A.client(), "a", { attemptMs: 2000, attempts: 2 });
+    const conn = newId("k");
+    const reg = must(await link.rpc("register", ["u-1", conn, "7", "t0", "/tmp", "30000"], "x-reg"));
+    const epoch = String(reg.epoch);
+    const ttl = async (rid: string): Promise<number> => Number(await raw.execute(["PTTL", `mctl:bridge:rpc:a:${rid}`]));
+    const HOUR = 3_600_000;
+    const short = async (rid: string): Promise<void> => {
+      const t = await ttl(rid);
+      expect(t).toBeGreaterThan(0);
+      expect(t).toBeLessThanOrEqual(HOUR);
+    };
+
+    must(await link.rpc("heartbeat", [conn, epoch, "1"], "x-beat-busy"));
+    await short("x-beat-busy");
+    const busy = await link.rpc("next", [conn, epoch, newId("a")], "x-next-busy");
+    expect(busy.code).toBe("busy");
+    await short("x-next-busy");
+    must(await link.rpc("heartbeat", [conn, epoch, "0"], "x-beat"));
+    const empty = await link.rpc("next", [conn, epoch, newId("a")], "x-next-empty");
+    expect(empty.code).toBe("empty");
+    await short("x-next-empty");
+
+    must(await b.send({ slot: "a", payload: "work" }));
+    const task = must(await link.rpc("next", [conn, epoch, newId("a")], "x-next-task"));
+    expect(task.kind).toBe("task");
+    expect(await ttl("x-next-task")).toBeGreaterThan(24 * HOUR);
+    expect(await ttl("x-reg")).toBeGreaterThan(24 * HOUR);
+
+    const fencedBeat = await link.rpc("heartbeat", [newId("k"), epoch, "0"], "x-beat-fenced");
+    expect(fencedBeat.ok).toBe(false);
+    expect(await ttl("x-beat-fenced")).toBeGreaterThan(24 * HOUR);
+  });
+
   test("a poison entry is recorded and skipped instead of blocking the slot", async () => {
     await submit(A, { rid: "x-1", fn: "status", args: "[]" });
     const bad = text(
