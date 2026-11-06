@@ -129,7 +129,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
 
     steps:
       - uses: actions/checkout@v7
@@ -146,9 +146,9 @@ jobs:
         working-directory: plugin/mctl-bridge
         run: bun install --frozen-lockfile
 
-      - name: Bridge mutation check (shard ${{ matrix.shard }}/4)
+      - name: Bridge mutation check (shard ${{ matrix.shard }}/8)
         working-directory: plugin/mctl-bridge
-        run: python3 test/mutate.py --shard ${{ matrix.shard }}/4
+        run: python3 test/mutate.py --shard ${{ matrix.shard }}/8
 
   # Built only when every check and every mutation shard passed, as before,
   # when it was the last step of the single job.

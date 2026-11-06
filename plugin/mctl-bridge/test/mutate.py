@@ -5,7 +5,7 @@ Each entry reverts one guarantee in src/bridge.lua (or the durable test
 profile) and runs `bun test`; every mutation must make at least one test fail.
 Run from plugin/mctl-bridge:  python3 test/mutate.py [name ...]
 
-Sharding (CI runs 4 jobs in parallel):
+Sharding (CI runs 8 jobs in parallel):
   python3 test/mutate.py --shard I/N        run shard I of N (1-based)
   python3 test/mutate.py --list-shard I/N   print the names in that shard
 The partition is round-robin over the full list by index (index % N == I-1),

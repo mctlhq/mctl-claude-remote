@@ -21,13 +21,13 @@ class ShardPartition(unittest.TestCase):
 
     def test_real_list_all_n(self):
         self.assertGreater(len(REAL), 50)
-        for n in (1, 2, 3, 4, 5, 7):
+        for n in (1, 2, 3, 4, 5, 7, 8):
             shards = self.check(REAL, n)
             self.assertTrue(all(shards), f"empty shard for N={n}")
 
     def test_synthetic_lists(self):
         for size in (1, 2, 3, 4, 5, 9, 10, 11):
-            for n in (1, 2, 3, 4, 5):
+            for n in (1, 2, 3, 4, 5, 8):
                 self.check([f"m{k}" for k in range(size)], n)
 
     def test_round_robin_rule(self):
@@ -52,10 +52,10 @@ class EmptyShardIsAnError(unittest.TestCase):
         self.assertIn("empty shard", r.stderr)
 
     def test_list_matches_partition(self):
-        for i in range(1, 5):
-            r = self.run_cli("--list-shard", f"{i}/4")
+        for i in range(1, 9):
+            r = self.run_cli("--list-shard", f"{i}/8")
             self.assertEqual(r.returncode, 0, r.stderr)
-            self.assertEqual(r.stdout.split("\n")[:-1], mutate.shard_of(REAL, i, 4))
+            self.assertEqual(r.stdout.split("\n")[:-1], mutate.shard_of(REAL, i, 8))
 
 if __name__ == "__main__":
     unittest.main()
