@@ -120,6 +120,11 @@ describe("log", () => {
     await expect(thread.log(1)).rejects.toThrow("without its items");
   });
 
+  test("empty pages that keep a cursor are an error, not an endless read", async () => {
+    app.emptyPages = true;
+    await expect(thread.log(3)).rejects.toThrow("empty page");
+  });
+
   test("no socket is an error with exit 2", async () => {
     app.stop();
     app = new FakeApp().start();
@@ -278,6 +283,40 @@ describe("say", () => {
     expect(r).toMatchObject({ ok: true, turn_status: "still_running" });
   });
 
+  test("a reply it cannot read after the start is not a failed send", async () => {
+    app.brokenReadAfterComplete = true;
+    const r = await cli(["say", "--stdin", "--wait", "5"], "hello");
+    expect(r.code).toBe(0);
+    expect(r.out).toMatchObject({ ok: true, turn_status: "completed" });
+    expect(r.out.reply_error).toContain("no data");
+    expect(app.starts.length).toBe(1);
+  });
+
+  test("a send log lost after the intent is not a failed send", async () => {
+    await thread.say("first");
+    app.complete(app.turns[0].id);
+    const once = new CodexThread(cfg);
+    const real = fs.appendFileSync;
+    let n = 0;
+    (fs as any).appendFileSync = (...a: any[]) => {
+      if (n++ > 0) throw new Error("disk full");
+      return (real as any)(...a);
+    };
+    try {
+      const r = await once.say("second");
+      expect(r).toMatchObject({ ok: true, log_error: "Error: disk full" });
+    } finally {
+      (fs as any).appendFileSync = real;
+    }
+  });
+
+  test("a connection lost during --wait is unknown, not still running", async () => {
+    app.completeAfterMs = null;
+    setTimeout(() => app.dropClients(), 50);
+    const r = await thread.say("hello", 2000);
+    expect(r).toMatchObject({ ok: true, turn_status: "unknown" });
+  });
+
   test("empty and oversized text are refused before connecting", async () => {
     expect(await thread.say("  \n")).toMatchObject({ ok: false, code: "empty" });
     expect(await thread.say("x".repeat(33 * 1024))).toMatchObject({ ok: false, code: "too_long" });
@@ -292,6 +331,8 @@ describe("say", () => {
     expect((await cli(["say", "--stdin"], "x")).code).toBe(3);
     expect((await cli(["say"], "x")).code).toBe(1);
     expect((await cli(["nonsense"])).code).toBe(1);
+    expect((await cli(["log", "--limt", "50"])).code).toBe(1);
+    expect((await cli(["questions", "--windw", "100"])).code).toBe(1);
   });
 });
 

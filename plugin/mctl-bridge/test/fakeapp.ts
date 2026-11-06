@@ -29,6 +29,10 @@ export class FakeApp {
   brokenRead = false;
   /** thread/turns/list fails from this page on (0-based); null never. */
   brokenPage: number | null = null;
+  /** thread/turns/list answers empty pages that always carry a cursor. */
+  emptyPages = false;
+  /** thread/turns/list answers without data once a turn has completed. */
+  brokenReadAfterComplete = false;
   /** thread/read answers without a status: the thread's state cannot be observed. */
   brokenStatus = false;
   /** thread/read answers with a JSON-RPC error. */
@@ -142,6 +146,8 @@ export class FakeApp {
       case "thread/turns/list": {
         const page = this.reads++;
         this.cursors.push(m.params.cursor ?? null);
+        if (this.emptyPages) return reply({ data: [], nextCursor: "again" });
+        if (this.brokenReadAfterComplete && this.turns.some((t) => t.status === "completed")) return reply({ nextCursor: null });
         if (this.brokenRead || (this.brokenPage !== null && page >= this.brokenPage)) return reply({ nextCursor: null });
         const desc = [...this.turns].reverse();
         const from = m.params.cursor ? Number(m.params.cursor) : 0;

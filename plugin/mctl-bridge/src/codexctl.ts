@@ -61,7 +61,7 @@ export type Message = { turn: string; turn_status: string | null; role: "user" |
 export type Status = { status: string; flags: string[] };
 export type Questions = { waiting: Message[]; scanned_turns: number; older_unknown: boolean };
 export type SayResult =
-  | { ok: true; id: string; turn: string; turn_status?: string; reply?: string[] }
+  | { ok: true; id: string; turn: string; turn_status?: string; reply?: string[]; reply_error?: string; log_error?: string }
   | { ok: false; code: string; id?: string; detail?: string };
 
 function turnMessages(t: any): Message[] {
@@ -89,7 +89,11 @@ function fromOperator(m: Message): boolean {
 const shown = (m: Message): Message => ({ ...m, text: redact(m.text) });
 
 export class CodexThread {
-  constructor(private readonly cfg: Config) {}
+  private readonly cfg: Config;
+
+  constructor(cfg: Config) {
+    this.cfg = cfg;
+  }
 
   private async session(): Promise<AppClient> {
     const c = await AppClient.connect(this.cfg.socketPath, this.cfg.rpcTimeoutMs);
@@ -124,6 +128,7 @@ export class CodexThread {
       turns.push(...r.data);
       const next = r.nextCursor ?? null;
       if (next !== null && typeof next !== "string") throw new Unreadable("thread/turns/list returned a bad cursor");
+      if (next !== null && r.data.length === 0) throw new Unreadable("thread/turns/list returned an empty page with a cursor");
       if (next === null) return { turns, more: false };
       if (turns.length >= limit) return { turns, more: true };
       cursor = next;
@@ -175,6 +180,16 @@ export class CodexThread {
     fs.appendFileSync(this.cfg.sendLog, JSON.stringify({ t: new Date().toISOString(), ...entry }) + "\n", { mode: 0o600 });
   }
 
+  /** After the intent: a record that fails must not read as "nothing was sent". */
+  private recordAfterIntent(entry: Record<string, unknown>): string | undefined {
+    try {
+      this.record(entry);
+      return undefined;
+    } catch (err) {
+      return String(err);
+    }
+  }
+
   /** Start one turn. Never retried: a lost start is settled from the history or stays unknown. */
   async say(text: string, waitMs = 0): Promise<SayResult> {
     const body = text.trim();
@@ -210,30 +225,36 @@ export class CodexThread {
         turn = typeof r?.turn?.id === "string" ? r.turn.id : null;
       } catch (err) {
         if (err instanceof RpcError) {
-          this.record({ id, state: "refused", detail: err.message });
-          return { ok: false, code: "refused", id, detail: err.message };
+          const log_error = this.recordAfterIntent({ id, state: "refused", detail: err.message });
+          return { ok: false, code: "refused", id, detail: log_error ? `${err.message}; send log: ${log_error}` : err.message };
         }
       }
       if (turn === null) {
         turn = await this.settle(id);
         if (turn === null) {
-          this.record({ id, state: "unknown" });
+          this.recordAfterIntent({ id, state: "unknown" });
           return { ok: false, code: "outcome_unknown", id, detail: "the start was not confirmed; not retried, read the log first" };
         }
       }
-      this.record({ id, state: "started", turn });
-      if (waitMs <= 0) return { ok: true, id, turn };
+      // The turn is running from here on: nothing below may look like a failed send.
+      const log_error = this.recordAfterIntent({ id, state: "started", turn });
+      const sent = { ok: true as const, id, turn, ...(log_error ? { log_error } : {}) };
+      if (waitMs <= 0) return sent;
 
       const deadline = Date.now() + waitMs;
       while (Date.now() < deadline && !ended.has(turn) && !c.isClosed) await Bun.sleep(50);
       const status = ended.get(turn);
-      if (status === undefined) return { ok: true, id, turn, turn_status: "still_running" };
-      this.record({ id, state: "ended", turn, status });
-      const { turns } = await this.turns(c, 5);
-      const mine = turns.find((t) => t.id === turn);
-      if (!mine) throw new Unreadable(`turn ${turn} is not in the history`);
-      const reply = turnMessages(mine).filter((m) => m.role === "codex").map((m) => redact(m.text));
-      return { ok: true, id, turn, turn_status: status, reply };
+      if (status === undefined) return { ...sent, turn_status: c.isClosed ? "unknown" : "still_running" };
+      const end_error = this.recordAfterIntent({ id, state: "ended", turn, status });
+      const done = { ...sent, turn_status: status, ...(end_error ? { log_error: end_error } : {}) };
+      try {
+        const { turns } = await this.turns(c, 5);
+        const mine = turns.find((t) => t.id === turn);
+        if (!mine) throw new Unreadable(`turn ${turn} is not in the history`);
+        return { ...done, reply: turnMessages(mine).filter((m) => m.role === "codex").map((m) => redact(m.text)) };
+      } catch (err) {
+        return { ...done, reply_error: err instanceof Error ? err.message : String(err) };
+      }
     } finally {
       off();
       c.close();
@@ -265,6 +286,7 @@ const USAGE = `mctl-codex: read and write the orchestrator's Codex thread (print
                               start one turn in an idle thread, marked ${LEAD_PREFIX.trim()}
 
 Exit: 0 ok, 1 usage, 2 unreadable, 3 refused, nothing sent, 4 outcome unknown.
+Once a turn has started, say exits 0: a reply it could not read is reply_error, never a failure.
 Redaction is pattern based: it lowers the risk of a secret leaving the thread, it does not rule it out.`;
 
 function flag(args: string[], name: string): string | undefined {
@@ -295,20 +317,32 @@ function config(): Config {
   };
 }
 
+/** A mistyped flag must not silently fall back to a default, such as a narrower window. */
+function known(args: string[], valued: string[], bare: string[] = []): void {
+  for (let i = 0; i < args.length; i++) {
+    if (valued.includes(args[i]!)) i++;
+    else if (!bare.includes(args[i]!)) throw new UsageError(`unknown argument ${args[i]}`);
+  }
+}
+
 async function main(argv: string[]): Promise<number> {
   const [cmd, ...args] = argv;
   const print = (v: unknown): void => console.log(JSON.stringify(v));
   switch (cmd) {
     case "status":
+      known(args, []);
       print({ ok: true, ...(await new CodexThread(config()).status()) });
       return 0;
     case "log":
+      known(args, ["--limit"]);
       print({ ok: true, messages: await new CodexThread(config()).log(positive(flag(args, "--limit"), 3, "--limit")) });
       return 0;
     case "questions":
+      known(args, ["--window"]);
       print({ ok: true, ...(await new CodexThread(config()).questions(positive(flag(args, "--window"), 20, "--window"))) });
       return 0;
     case "say": {
+      known(args, ["--file", "--wait"], ["--stdin"]);
       const file = flag(args, "--file");
       if ((file !== undefined) === args.includes("--stdin")) throw new UsageError("give exactly one of --stdin, --file");
       const text = fs.readFileSync(file ?? 0, "utf8");
