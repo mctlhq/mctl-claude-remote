@@ -166,7 +166,11 @@ describe.skipIf(requiresValkey)("continuation after a planned restart", () => {
     ])
       expect(sec).toContain(rule);
     // the interim publishing rule for slot PRs stays explicit until the handoff protocol exists
-    expect(md.replace(/\s+/g, " ")).toContain("INTERIM: publishing the PR is done by the lead session until the handoff protocol in issue #127");
+    const flat = md.replace(/\s+/g, " ");
+    expect(flat).toContain("INTERIM: until the slot handoff directories in issue #127 exist");
+    expect(flat).toContain("Every GitHub write goes through `mctl-publish`");
+    expect(flat).toContain("so never write through it");
+    expect(flat).toContain("`--allow` comes from the task's allowed files, never from the slot's manifest");
     // the marker line the orchestrator answers with is untouched
     expect(md).toContain("ORCH-AGENTS-BRIDGE-2026-11-04.");
   });

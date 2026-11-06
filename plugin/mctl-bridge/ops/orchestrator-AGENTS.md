@@ -80,14 +80,26 @@ ORCH-AGENTS-BRIDGE-2026-11-04.
 
 ## Pull requests from slots: review and merge (trial flow 2, 2026-11-05)
 
-Slots have no GitHub credentials. After a slot reports a verified local commit, the lead
-Claude session publishes the branch as a Draft PR and tells you its number. You take it
-from there with the GitHub connector, not with a local token.
+Slots have no GitHub credentials. A slot commits locally and hands off a git bundle and a
+manifest; you publish them and, after claude-review and agy are green, merge. Every GitHub
+write goes through `mctl-publish`, which acts as `mctl-codex[bot]`, a GitHub App without
+admin rights:
 
-INTERIM: publishing the PR is done by the lead session until the handoff protocol in
-issue #127 exists. Target flow: the slot commits locally and hands off a git bundle, you
-publish it and, after claude-review and agy are green, merge it. Until #127 is
-implemented, do not publish a slot's branch yourself.
+    mctl-publish publish --repo R --bundle F --manifest F --allow PATH --title T --body-file F
+    mctl-publish ready --repo R --pr N --head SHA
+    mctl-publish merge --repo R --pr N --head SHA
+
+Use the GitHub connector for reading only. It acts as the owner with admin rights and can
+bypass branch protection, so never write through it: no merge, ref update, commit, review
+or PR from the connector. Never read the App key, never call the GitHub API with it
+yourself, and never run `git push` directly. If `mctl-publish` refuses or exits non-zero,
+do not work around it: report the exact output with `[operator-question]`. Exit 4 means the
+outcome is unknown: read the state, never repeat the call blindly.
+
+`--allow` comes from the task's allowed files, never from the slot's manifest.
+
+INTERIM: until the slot handoff directories in issue #127 exist, the lead session prepares
+the bundle and manifest from a slot's verified commit and tells you their paths.
 
 1. Review the diff against the task text and the issue. The slot report is input, not proof:
    read the diff yourself and check that only the allowed files changed.
@@ -97,8 +109,9 @@ implemented, do not publish a slot's branch yourself.
 4. Read the unfiltered feedback before merging: `/pulls/N/comments`, `/pulls/N/reviews`,
    `/issues/N/comments`, full history, no bot or date filter.
 5. Merge only if ALL hold: claude[bot] APPROVED on the CURRENT head SHA, every check green,
-   no unaddressed P1/P2 from any bot, and the diff still matches the task. Use a merge commit
-   (never squash, never rebase). If anything is unclear or red, stop and report to the operator.
+   no unaddressed P1/P2 from any bot, and the diff still matches the task. `mctl-publish merge`
+   checks the approval and the checks itself, but only you read the findings and the diff.
+   If anything is unclear or red, stop and report to the operator.
 6. Releases and tags are NOT allowed until the operator says so (no tag ruleset exists yet).
    Deploy, credentials and repository settings remain out of scope as before.
 7. Report the PR number, head SHA, review verdict and merge commit to the operator.

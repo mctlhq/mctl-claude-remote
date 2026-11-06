@@ -199,6 +199,33 @@ connection error. `init` reports the server's persistence as `durable` only for
 
 ## Reading and writing the Codex thread
 
+`mctl-publish` is how the orchestrator writes to GitHub, as `mctl-codex[bot]`. That GitHub App
+has contents and pull requests write, checks and statuses read, no administration and no
+workflows, on selected repositories. Its key is `etc/codex-github-app.pem`, mode 0600.
+
+```
+mctl-publish status
+mctl-publish publish --repo R --bundle F --manifest F --allow PATH --title T --body-file F
+mctl-publish ready --repo R --pr N --head SHA
+mctl-publish merge --repo R --pr N --head SHA
+```
+
+Exit status: 0 ok, 1 usage, 2 unreadable, 3 refused, 4 outcome unknown (not retried).
+
+- `publish` reads the slot's files without following symlinks and only from a closed copy. It
+  checks the hash, the bundle, that the base is on `main`, and that the commits change exactly
+  the manifest's files, all inside `--allow`. Workflow changes, symlinks and submodules are
+  refused. The push keeps the SHAs and is never forced. A ledger keyed by repository, task and
+  head stops a second publication, and a run that stopped midway resumes from what GitHub shows.
+- `merge` requires, on the current head: claude[bot]'s latest review APPROVED, no open change
+  request, every check and status passed including `validate`, and a clean mergeable state. It
+  pins the SHA and uses a merge commit. It does not read review findings: that stays with Codex.
+- Git runs with `credential.helper=` and the token in its environment. Without that, git asks
+  the keychain first, and the Mac mini's keychain holds an admin login: on 2026-11-06 a probe
+  pushed to a protected `main` that way, as the admin, while the App itself was refused.
+- There is no approve command, on purpose. GitHub refuses an App's approval of its own PR but
+  accepts its approval of anybody else's, and that approval satisfies the ruleset.
+
 `mctl-codex` is the operator's CLI for the orchestrator's thread, over the control socket.
 It holds no Valkey credentials and prints JSON. The socket's directory is closed to the slot
 users, and the Codex command rules do not list it, so Codex itself gets a prompt.

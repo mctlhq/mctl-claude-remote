@@ -40,7 +40,7 @@ function sandbox(opts: { valkey: "pong" | "loading"; initRc: number }) {
   });
   // what landed in the install dir, and whether the operator can run it: checked before the sandbox is removed
   const modes: Record<string, number> = {};
-  for (const f of ["mctl-bridge", "mctl-codex", "slot.sh", "watch.sh"]) {
+  for (const f of ["mctl-bridge", "mctl-codex", "mctl-publish", "slot.sh", "watch.sh"]) {
     const p = path.join(H, f);
     modes[f] = fs.existsSync(p) ? fs.statSync(p).mode & 0o111 : -1;
   }
@@ -62,7 +62,7 @@ describe("install.sh", () => {
 
   test("every operator script lands executable, watch.sh included", () => {
     const r = sandbox({ valkey: "pong", initRc: 0 });
-    for (const f of ["mctl-bridge", "mctl-codex", "slot.sh", "watch.sh"]) expect(r.modes[f], f).toBeGreaterThan(0);
+    for (const f of ["mctl-bridge", "mctl-codex", "mctl-publish", "slot.sh", "watch.sh"]) expect(r.modes[f], f).toBeGreaterThan(0);
   });
 
   test("a server that only answers LOADING is not ready: loud failure, jobs still started", () => {
