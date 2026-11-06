@@ -33,6 +33,7 @@ import { redact } from "./codexctl.ts";
 export const REVIEW_BOT = "claude[bot]";
 const MAX_BUNDLE_BYTES = 256 * 1024 * 1024;
 const MAX_MANIFEST_BYTES = 256 * 1024;
+const MAX_BODY_BYTES = 64 * 1024;
 const PASSING = new Set(["success", "neutral", "skipped"]);
 const SHA = /^[0-9a-f]{40}$/;
 const BRANCH = /^(feat|fix|ci|docs|chore|refactor|test)\/[A-Za-z0-9._/-]{1,100}$/;
@@ -205,7 +206,26 @@ export class GitHub {
 }
 
 /** Open a file a slot wrote: regular file only, no symlink, bounded. */
+/**
+ * O_NOFOLLOW covers only the last component. A link a slot planted higher up the path is
+ * refused too; the system's own root-owned links (/tmp, /var) are not a slot's doing.
+ */
+function refusePlantedLinks(file: string): void {
+  let cur: string = path.sep;
+  for (const part of path.resolve(file).split(path.sep).filter(Boolean).slice(0, -1)) {
+    cur = path.join(cur, part);
+    let st: fs.Stats;
+    try {
+      st = fs.lstatSync(cur);
+    } catch (err) {
+      throw new Refused("handoff_unreadable", `${file}: ${(err as Error).message}`);
+    }
+    if (st.isSymbolicLink() && st.uid !== 0) throw new Refused("handoff_unreadable", `${file}: ${cur} is a symbolic link`);
+  }
+}
+
 function readUntrusted(file: string, limit: number): Buffer {
+  refusePlantedLinks(file);
   let fd: number;
   try {
     fd = fs.openSync(file, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -371,16 +391,24 @@ export async function publish(cfg: Config, gh: GitHub, o: PublishOpts): Promise<
       if (git.run("cat-file", "-e", `${m.head_sha}^{commit}`).code !== 0) throw new Refused("head_not_in_bundle", m.head_sha);
       if (git.run("merge-base", "--is-ancestor", m.base_sha, m.head_sha).code !== 0) throw new Refused("head_not_on_base", m.head_sha);
 
+      const range = `${m.base_sha}..${m.head_sha}`;
+      const merges = git.must("rev-list", "--min-parents=2", range).split("\n").filter(Boolean);
+      if (merges.length) throw new Refused("merge_commit", merges[0]!);
       const raw = parseRaw(git.must("diff", "--raw", "--no-abbrev", "--no-renames", "-z", m.base_sha, m.head_sha));
       if (raw.length === 0) throw new Refused("no_changes", m.head_sha);
       const real = raw.map((r) => r.path).sort();
       const claimed = [...new Set(m.changed_files)].sort();
       if (JSON.stringify(real) !== JSON.stringify(claimed)) throw new Refused("files_mismatch", `the commits change ${real.join(", ")}`);
-      const outside = real.filter((f) => !allowed(f, o.allow));
+      // We merge with a merge commit, so every commit lands in main's history: a file added
+      // and then reverted is not in the final diff, yet it is published all the same.
+      const commits = git.must("rev-list", range).split("\n").filter(Boolean);
+      const touched = commits.flatMap((c) => parseRaw(git.must("diff", "--raw", "--no-abbrev", "--no-renames", "-z", `${c}^`, c)));
+      const everyPath = [...new Set(touched.map((r) => r.path))].sort();
+      const outside = everyPath.filter((f) => !allowed(f, o.allow));
       if (outside.length) throw new Refused("outside_allowed_files", outside.join(", "));
-      const workflows = real.filter((f) => f.startsWith(".github/workflows/") || f.startsWith(".github/actions/"));
+      const workflows = everyPath.filter((f) => f.startsWith(".github/workflows/") || f.startsWith(".github/actions/"));
       if (workflows.length) throw new Refused("workflow_change", `owner gate: ${workflows.join(", ")}`);
-      const special = raw.filter((r) => [r.newMode, r.oldMode].some((x) => x === "120000" || x === "160000"));
+      const special = touched.filter((r) => [r.newMode, r.oldMode].some((x) => x === "120000" || x === "160000"));
       if (special.length) throw new Refused("special_file", special.map((r) => r.path).join(", "));
 
       fs.writeFileSync(ledger, JSON.stringify({ state: "intent", task_id: m.task_id, attempt_id: m.attempt_id, head: m.head_sha, branch: m.branch }), { mode: 0o600 });
@@ -476,14 +504,17 @@ export async function gate(gh: GitHub, repo: string, pr: number, head: string): 
     if (c?.status !== "completed") throw new Refused("checks_pending", String(c?.name));
     if (!PASSING.has(c?.conclusion)) throw new Refused("checks_failed", `${c?.name}: ${c?.conclusion}`);
   }
-  const combined = await gh.read(`/repos/${repo}/commits/${head}/status`);
+  const combined = await gh.read(`/repos/${repo}/commits/${head}/status?per_page=100`);
   if (!Array.isArray(combined?.statuses)) throw new Unreadable("commit statuses are not a list");
+  if (combined.statuses.length !== combined.total_count) throw new Unreadable(`read ${combined.statuses.length} commit statuses of ${String(combined.total_count)}`);
   for (const s of combined.statuses) if (s?.state !== "success") throw new Refused("checks_failed", `${s?.context}: ${s?.state}`);
   const validate = runs.some((c) => c.name === "validate" && c.conclusion === "success") || combined.statuses.some((s: any) => s.context === "validate");
   if (!validate) throw new Refused("checks_pending", "validate has not passed on this head");
 
-  // Asked for last: GitHub computes it lazily, and null means "not yet", never "fine".
-  if (p.mergeable !== true || p.mergeable_state !== "clean") throw new Refused("not_mergeable", `${String(p.mergeable)} ${String(p.mergeable_state)}`);
+  // Read again, last: the first read only starts GitHub's lazy computation, and null means
+  // "not yet", never "fine". This read also sees a head that moved during the checks above.
+  const last = await readPr(gh, repo, pr, head);
+  if (last.mergeable !== true || last.mergeable_state !== "clean") throw new Refused("not_mergeable", `${String(last.mergeable)} ${String(last.mergeable_state)}`);
 }
 
 export async function merge(cfg: Config, gh: GitHub, repo: string, pr: number, head: string): Promise<Record<string, unknown>> {
@@ -561,7 +592,7 @@ export async function main(argv: string[], cfg: Config = config()): Promise<numb
           manifest: need(a, "--manifest"),
           allow,
           title: need(a, "--title"),
-          body: fs.readFileSync(need(a, "--body-file"), "utf8"),
+          body: readUntrusted(need(a, "--body-file"), MAX_BODY_BYTES).toString("utf8"),
         }));
         return 0;
       }

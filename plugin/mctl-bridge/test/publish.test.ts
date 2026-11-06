@@ -27,6 +27,9 @@ type Fake = {
   reviews: any[];
   runs: any[];
   statuses: any[];
+  statusTotal: number | null;
+  prLater: any;
+  prReads: number;
   fail: Record<string, number>;
   dropMerge: boolean;
   dropPull: boolean;
@@ -49,6 +52,7 @@ function handle(req: Request, url: URL, body: any): Response {
     return J({ token: TOKEN }, 201);
   }
   if (key === "DELETE /installation/token") return new Response(null, { status: 204 });
+  if (key === "GET /app") return J({ slug: "mctl-codex", permissions: { contents: "write" } });
   fake.tokenSeen.push(auth);
   if (key === "GET /installation/repositories") return J({ total_count: 1, repositories: [{ full_name: REPO }] });
   if (key === "GET /repos/mctlhq/r/pulls") return J(fake.pulls);
@@ -57,7 +61,7 @@ function handle(req: Request, url: URL, body: any): Response {
     const pr = { number: 7, html_url: "https://x/7", draft: body.draft, head: { sha: "unused" } };
     return J(pr, 201);
   }
-  if (key === "GET /repos/mctlhq/r/pulls/7") return J(fake.pr);
+  if (key === "GET /repos/mctlhq/r/pulls/7") return J(++fake.prReads > 1 && fake.prLater ? fake.prLater : fake.pr);
   if (key === "GET /repos/mctlhq/r/pulls/7/reviews") return J(fake.reviews);
   if (key === "PUT /repos/mctlhq/r/pulls/7/merge") {
     if (fake.dropMerge) throw new Error("drop");
@@ -65,7 +69,7 @@ function handle(req: Request, url: URL, body: any): Response {
   }
   if (key === "POST /graphql") return J({ data: {} });
   if (p.endsWith("/check-runs")) return J({ total_count: fake.runs.length, check_runs: fake.runs });
-  if (p.endsWith("/status")) return J({ statuses: fake.statuses });
+  if (p.endsWith("/status")) return J({ total_count: fake.statusTotal ?? fake.statuses.length, statuses: fake.statuses });
   return J({ message: "no route " + key }, 404);
 }
 
@@ -99,6 +103,9 @@ beforeEach(() => {
     reviews: [{ user: { login: "claude[bot]" }, state: "APPROVED", commit_id: HEAD }],
     runs: [{ name: "validate", status: "completed", conclusion: "success" }, { name: "docker", status: "completed", conclusion: "skipped" }],
     statuses: [],
+    statusTotal: null,
+    prLater: null,
+    prReads: 0,
     mergeReply: { status: 200, body: { merged: true, sha: "m".repeat(40) } },
   };
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "publish-")));
@@ -141,6 +148,21 @@ function handoff(edit: (dir: string) => void = (d) => fs.writeFileSync(path.join
   const manifest = path.join(tmp, "h.json");
   fs.writeFileSync(manifest, JSON.stringify(m));
   return { bundle, manifest, m };
+}
+function commit(file: string, text: string): void {
+  fs.writeFileSync(path.join(work, file), text);
+  git(work, "add", "-A");
+  git(work, "commit", "-qm", `change ${file}`);
+}
+/** A handoff of whatever the given branch holds on top of `from`. */
+function seal(branch: string, from: string, files: string[]): { bundle: string; manifest: string } {
+  const bundle = path.join(tmp, "y.bundle");
+  git(work, "bundle", "create", "-q", bundle, branch, `^${from}`);
+  const sha256 = crypto.createHash("sha256").update(fs.readFileSync(bundle)).digest("hex");
+  const manifest = path.join(tmp, "y.json");
+  const m: Manifest = { task_id: "t-2", attempt_id: "a-2", repo: REPO, base_sha: from, head_sha: git(work, "rev-parse", "HEAD"), branch, changed_files: files, sha256 };
+  fs.writeFileSync(manifest, JSON.stringify(m));
+  return { bundle, manifest };
 }
 const opts = (h: { bundle: string; manifest: string }, allow = ["src/"]) => ({ repo: REPO, bundle: h.bundle, manifest: h.manifest, allow, title: "feat: x", body: "b" });
 async function refused(p: Promise<unknown>, code: string): Promise<void> {
@@ -226,17 +248,34 @@ describe("publish", () => {
     const first = handoff();
     await publish(cfg, gh, opts(first));
     git(work, "checkout", "-q", "-B", "feat/y", first.m.head_sha);
-    fs.writeFileSync(path.join(work, "src/a.txt"), "c\n");
-    git(work, "add", "-A");
-    git(work, "commit", "-qm", "feat: y");
-    const head = git(work, "rev-parse", "HEAD");
-    const bundle = path.join(tmp, "y.bundle");
-    git(work, "bundle", "create", "-q", bundle, "feat/y", `^${first.m.head_sha}`);
-    const sha256 = crypto.createHash("sha256").update(fs.readFileSync(bundle)).digest("hex");
-    const manifest = path.join(tmp, "y.json");
-    fs.writeFileSync(manifest, JSON.stringify({ ...first.m, task_id: "t-2", base_sha: first.m.head_sha, head_sha: head, branch: "feat/y", changed_files: ["src/a.txt"], sha256 }));
-    await refused(publish(cfg, gh, opts({ bundle, manifest })), "base_not_on_main");
+    commit("src/a.txt", "c\n");
+    await refused(publish(cfg, gh, opts(seal("feat/y", first.m.head_sha, ["src/a.txt"]))), "base_not_on_main");
     expect(remoteRefs()).not.toContain("feat/y");
+  });
+
+  test("a file outside the allow list is refused even when a later commit reverts it", async () => {
+    git(work, "checkout", "-q", "-B", "feat/y", base);
+    commit("secret.txt", "x\n");
+    git(work, "rm", "-q", "secret.txt");
+    git(work, "commit", "-qm", "revert");
+    commit("src/a.txt", "c\n");
+    await refused(publish(cfg, gh, opts(seal("feat/y", base, ["src/a.txt"]))), "outside_allowed_files");
+  });
+
+  test("a merge commit in the handoff is refused", async () => {
+    git(work, "checkout", "-q", "-B", "side", base);
+    commit("src/s.txt", "s\n");
+    git(work, "checkout", "-q", "-B", "feat/y", base);
+    commit("src/a.txt", "c\n");
+    git(work, "merge", "-q", "--no-ff", "-m", "merge", "side");
+    await refused(publish(cfg, gh, opts(seal("feat/y", base, ["src/a.txt", "src/s.txt"]))), "merge_commit");
+  });
+
+  test("a directory link planted above a handoff file is refused", async () => {
+    const h = handoff();
+    const dir = path.join(tmp, "dlink");
+    fs.symlinkSync(tmp, dir);
+    await refused(publish(cfg, gh, { ...opts(h), manifest: path.join(dir, "h.json") }), "handoff_unreadable");
   });
 
   test("a change outside the allowed files is refused", async () => {
@@ -360,6 +399,22 @@ describe("merge", () => {
   });
 });
 
+describe("merge, read last", () => {
+  test("mergeability computed by the time of the last read is enough", async () => {
+    fake.pr = { ...fake.pr, mergeable: null, mergeable_state: "unknown" };
+    fake.prLater = { ...fake.pr, mergeable: true, mergeable_state: "clean" };
+    expect(await merge(cfg, gh, REPO, 7, HEAD)).toMatchObject({ ok: true });
+  });
+  test("a head that moved during the checks is refused", async () => {
+    fake.prLater = { ...fake.pr, head: { sha: "d".repeat(40) } };
+    await refused(merge(cfg, gh, REPO, 7, HEAD), "head_moved");
+  });
+  test("a status list shorter than total_count is unreadable, not green", async () => {
+    fake.statusTotal = 31;
+    await expect(merge(cfg, gh, REPO, 7, HEAD)).rejects.toThrow(Unreadable);
+  });
+});
+
 describe("listing", () => {
   test("a total_count that does not add up is a failed read", async () => {
     fake.fail = {};
@@ -420,6 +475,43 @@ describe("ready and the CLI", () => {
     }
     expect(out).toContain('"merge_commit"');
     expect(out).not.toContain(TOKEN);
+  });
+
+  async function quietly(run: () => Promise<number>): Promise<{ code: number; out: string }> {
+    const writeOut = process.stdout.write;
+    const writeErr = process.stderr.write;
+    let out = "";
+    (process.stdout as any).write = (s: string) => ((out += s), true);
+    (process.stderr as any).write = (s: string) => ((out += s), true);
+    try {
+      return { code: await run(), out };
+    } finally {
+      (process.stdout as any).write = writeOut;
+      (process.stderr as any).write = writeErr;
+    }
+  }
+  const publishArgs = (h: { bundle: string; manifest: string }, body: string) => ["publish", "--repo", REPO, "--bundle", h.bundle, "--manifest", h.manifest, "--allow", "src/", "--title", "feat: x", "--body-file", body];
+  const pullBodies = () => fake.calls.filter((c) => c.method === "POST" && c.path.endsWith("/pulls")).map((c) => c.body.body);
+
+  test("--body-file reads a plain file, so a planted link cannot publish the key", async () => {
+    const h = handoff();
+    const link = path.join(tmp, "body.md");
+    fs.symlinkSync(cfg.keyFile, link);
+    expect((await quietly(() => main(publishArgs(h, link), cfg))).code).toBe(3);
+    expect(pullBodies()).toEqual([]);
+    fs.unlinkSync(link);
+    fs.writeFileSync(link, "x".repeat(64 * 1024 + 1));
+    expect((await quietly(() => main(publishArgs(h, link), cfg))).code).toBe(3);
+    expect(pullBodies()).toEqual([]);
+    fs.writeFileSync(link, "the body");
+    expect((await quietly(() => main(publishArgs(h, link), cfg))).code).toBe(0);
+    expect(pullBodies()).toEqual(["the body"]);
+  });
+
+  test("status shows the app, its permissions and the repositories", async () => {
+    const r = await quietly(() => main(["status"], cfg));
+    expect(r.code).toBe(0);
+    expect(JSON.parse(r.out)).toMatchObject({ ok: true, app: "mctl-codex", permissions: { contents: "write" }, installed: [REPO], allowed: [REPO] });
   });
 
   test("the token is revoked when the run ends", async () => {

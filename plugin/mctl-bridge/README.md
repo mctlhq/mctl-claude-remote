@@ -214,7 +214,8 @@ Exit status: 0 ok, 1 usage, 2 unreadable, 3 refused, 4 outcome unknown (not retr
 
 - `publish` reads the slot's files without following symlinks and only from a closed copy. It
   checks the hash, the bundle, that the base is on `main`, and that the commits change exactly
-  the manifest's files, all inside `--allow`. Workflow changes, symlinks and submodules are
+  the manifest's files, and every commit stays inside `--allow`, so a file added and then
+  reverted still counts. Merge commits, workflow changes, symlinks and submodules are
   refused. The push keeps the SHAs and is never forced. A ledger keyed by repository, task and
   head stops a second publication, and a run that stopped midway resumes from what GitHub shows.
 - `merge` requires, on the current head: claude[bot]'s latest review APPROVED, no open change
