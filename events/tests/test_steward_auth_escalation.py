@@ -46,7 +46,9 @@ class AuthEscalationTest(unittest.TestCase):
         self.sends = self.root / "sends"
         self.ts = self.logdir / "auth-alert-ts"
         executable(self.bin / "curl", f'#!/bin/sh\nfor a; do case "$a" in text=*) echo "$a" >> "{self.sends}";; esac; done\n'
-                   '[ "${FAKE_CURL:-ok}" = fail ] && exit 22\nexit 0\n')
+                   # Like the real curl, an HTTP error only fails the call under --fail.
+                   '[ "${FAKE_CURL:-ok}" = network ] && exit 7\n'
+                   'if [ "${FAKE_CURL:-ok}" = http_error ]; then for a; do [ "$a" = --fail ] && exit 22; done; fi\nexit 0\n')
         # Ends the loop after $TICKS sleeps by killing the loop subshell.
         executable(self.bin / "sleep", f'#!/bin/sh\nn=$(cat "{self.root}/n" 2>/dev/null || echo 0); n=$((n+1)); echo $n > "{self.root}/n"\n'
                    '[ "$n" -gt "$TICKS" ] && kill -9 $PPID\nexit 0\n')
@@ -160,7 +162,12 @@ class AuthEscalationTest(unittest.TestCase):
 
     def test_failed_send_is_not_recorded_so_next_tick_retries(self) -> None:
         self.tick(1, rc=1, err="Not logged in")
-        self.run_loop(1, FAKE_CURL="fail")
+        self.run_loop(1, FAKE_CURL="network")
+        self.assertFalse(self.ts.exists())
+
+    def test_telegram_http_error_is_not_recorded_so_next_tick_retries(self) -> None:
+        self.tick(1, rc=1, err="Not logged in")
+        self.run_loop(1, FAKE_CURL="http_error")
         self.assertFalse(self.ts.exists())
 
     def test_temp_files_are_cleaned_up(self) -> None:

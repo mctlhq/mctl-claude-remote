@@ -608,7 +608,7 @@ tg_send() {
     echo "[$_tg_tag] TELEGRAM_BOT_TOKEN/STARTUP_WEDGE_ALERT_CHAT_ID not set; skipping alert"
     return 0
   fi
-  if curl -s -m 10 -o /dev/null \
+  if curl -s --fail -m 10 -o /dev/null \
     "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
     --data-urlencode "chat_id=${STARTUP_WEDGE_ALERT_CHAT_ID}" \
     --data-urlencode "text=${_tg_text}"; then
