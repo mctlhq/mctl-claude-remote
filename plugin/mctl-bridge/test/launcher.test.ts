@@ -100,6 +100,122 @@ describe.skipIf(!usable)("launcher scripts", () => {
     fs.rmSync(t.root, { recursive: true, force: true });
   });
 
+  const SID = "0f8fad5b-d9cb-469f-a165-70867728950e";
+  const BASE_ARGV = (d: string) => [
+    "--remote-control", "mctl-slot-S1",
+    "--model", "haiku",
+    "--mcp-config", path.join(d, "mcp.json"),
+    "--strict-mcp-config",
+    "--settings", path.join(d, "settings.json"),
+    "--dangerously-load-development-channels", "server:mctl-bridge",
+    "--allowedTools", "mcp__mctl-bridge__ack_task,mcp__mctl-bridge__ack_reply,mcp__mctl-bridge__ask_orchestrator,mcp__mctl-bridge__report_result,mcp__mctl-bridge__bridge_status",
+    "--permission-mode", "default",
+  ];
+  const argvOf = (t: ReturnType<typeof setup>) => {
+    const d = path.join(t.H, "slots", "s1");
+    expect(spawnSync(path.join(d, "run.sh"), [], { env: t.env, cwd: t.root, encoding: "utf8" }).status).toBe(0);
+    return fs.readFileSync(path.join(t.record, "argv"), "utf8").split("\0").slice(0, -1);
+  };
+
+  test("start without --resume leaves run.sh exactly as before (no --resume anywhere)", () => {
+    const t = setup();
+    expect(spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo], { env: t.env, encoding: "utf8" }).status).toBe(0);
+    expect(fs.readFileSync(path.join(t.H, "slots", "s1", "run.sh"), "utf8")).not.toContain("--resume");
+    expect(argvOf(t)).toEqual(BASE_ARGV(path.join(t.H, "slots", "s1")));
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
+  test("start --resume <id> adds --resume <id> after --model and keeps every other argument", () => {
+    const t = setup();
+    const r = spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo, "--resume", SID], { env: t.env, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    const d = path.join(t.H, "slots", "s1");
+    expect(spawnSync("zsh", ["-n", path.join(d, "run.sh")]).status).toBe(0);
+    // the id is zsh-quoted in the generated script like every other value
+    expect(fs.readFileSync(path.join(d, "run.sh"), "utf8")).toContain(`--model 'haiku' --resume '${SID}' --mcp-config`);
+    const base = BASE_ARGV(d);
+    expect(argvOf(t)).toEqual([...base.slice(0, 4), "--resume", SID, ...base.slice(4)]);
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
+  test("start --resume refuses an id that is not a UUID: nothing is written and nothing is executed", () => {
+    const bad = [
+      "", "abc", "$(touch MARKER)", `${SID}; touch MARKER`, `${SID}'$(touch MARKER)`, "`touch MARKER`",
+      `${SID} --dangerously-skip-permissions`, `${SID}\n`, "../../etc/passwd", SID.slice(1), `${SID}0`,
+    ];
+    for (const id of bad) {
+      const t = setup();
+      const r = spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo, "--resume", id], { env: t.env, cwd: t.root, encoding: "utf8" });
+      expect(r.status).toBe(2);
+      expect(r.stderr).toContain("bad session id");
+      expect(fs.existsSync(path.join(t.H, "slots"))).toBe(false); // refused before any file was generated
+      expect(fs.existsSync(path.join(t.record, "screen"))).toBe(false);
+      for (const dir of [t.root, t.repo, t.H, process.cwd()]) expect(fs.existsSync(path.join(dir, "MARKER"))).toBe(false);
+      fs.rmSync(t.root, { recursive: true, force: true });
+    }
+    // a stray extra argument, or --resume without an id, is a usage error as well, not a fresh session
+    const t = setup();
+    for (const extra of [["--bogus", SID], ["--resume"], ["--resume", SID, "extra"], ["", "--resume", SID], [""], ["--resume", ""]]) {
+      const r = spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo, ...extra], { env: t.env, encoding: "utf8" });
+      expect(r.status).toBe(2);
+      expect(fs.existsSync(path.join(t.H, "slots"))).toBe(false);
+    }
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
+  test("run.sh points the hook and the adapter at the slot's own state dir, the one session-id reads", () => {
+    const t = setup();
+    expect(spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo], { env: t.env, encoding: "utf8" }).status).toBe(0);
+    const d = path.join(t.H, "slots", "s1");
+    stub(path.join(t.home, ".local", "bin", "claude"), `printf '%s' "$MCTL_BRIDGE_STATE_DIR" > "${t.record}/statedir"`);
+    expect(spawnSync(path.join(d, "run.sh"), [], { env: t.env, cwd: t.root }).status).toBe(0);
+    expect(fs.readFileSync(path.join(t.record, "statedir"), "utf8")).toBe(path.join(d, "state"));
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
+  test("session-id prints the running slot's newest recorded id on one line, and fails when it cannot", () => {
+    const t = setup();
+    const alive = path.join(t.root, "bin", "alivepython");
+    stub(alive, `exit 0`);
+    const dead = t.env;
+    const live = { ...t.env, MCTL_BRIDGE_PYTHON: alive };
+    const d = path.join(t.H, "slots", "s1");
+    const run = (env: NodeJS.ProcessEnv) => spawnSync("zsh", [path.join(OPS, "slot.sh"), "session-id", "s1"], { env, encoding: "utf8" });
+    const put = (name: string, rec: object) => {
+      fs.mkdirSync(path.join(d, "state"), { recursive: true });
+      fs.writeFileSync(path.join(d, "state", name), JSON.stringify(rec));
+    };
+
+    // no state file at all
+    let r = run(live);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("no readable session id");
+
+    // unreadable, non-UUID and missing-field records are errors, never an empty line
+    put("1.json", { session_id: "$(touch MARKER)", t: 5 });
+    put("2.json", { state: "idle", t: 6 });
+    fs.writeFileSync(path.join(d, "state", "3.json"), "{not json");
+    r = run(live);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+
+    // an older pid file and a newer one: the newest wins
+    put("10.json", { session_id: "11111111-2222-3333-4444-555555555555", t: 100 });
+    put("11.json", { session_id: SID, t: 200 });
+    r = run(live);
+    expect(r.status).toBe(0);
+    expect(r.stdout).toBe(`${SID}\n`);
+
+    // a slot that is not running has no current session, whatever stale files remain
+    r = run(dead);
+    expect(r.status).toBe(1);
+    expect(r.stdout).toBe("");
+    expect(r.stderr).toContain("not running");
+    expect(fs.existsSync(path.join(t.root, "MARKER"))).toBe(false);
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
   test("Remote Control is on by default, named per slot, and can be turned off", () => {
     const on = setup();
     expect(spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "ab-2", on.repo], { env: on.env, encoding: "utf8" }).status).toBe(0);

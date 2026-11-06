@@ -34,6 +34,13 @@ and the trusted tooling). `ack_task` returns a grant only if its `task_id`, `att
 and no work starts. `ops/slot.sh start` creates `bridge_slot_<name>`, its password file
 and the allow-list entry (`mctl:bridge:slots-allowed`).
 
+To keep a slot's context across a restart, read its session id while it runs
+(`ops/slot.sh session-id <slot>`, from the hook's state file) and start it again with
+`ops/slot.sh start <slot> <repo> --resume <id>` (`claude --resume <id>`; the id must be a
+UUID, anything else is refused). A resumed session still believes its old attempt admission
+is valid and the bridge refuses a stale one, so the task text after a restart must tell the
+slot to call `ack_task` for the new attempt.
+
 A request whose handler raises a script error (Valkey does not roll back the writes made
 before the error) is answered once: the ingester passes the request id, function and
 arguments to `bridge_ingest_poison`, which stores the rejection (`rejected` /
