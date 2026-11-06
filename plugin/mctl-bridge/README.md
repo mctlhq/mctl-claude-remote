@@ -203,6 +203,7 @@ connection error. `init` reports the server's persistence as `durable` only for
 bun install --frozen-lockfile
 bunx tsc --noEmit
 bun test                 # needs valkey-server or redis-server on PATH
+                         # from the repository root: bun test --cwd plugin/mctl-bridge
 python3 test/mutate.py   # every guarantee reverted in turn must fail a test
 ```
 

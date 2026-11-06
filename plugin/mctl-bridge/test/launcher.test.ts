@@ -69,8 +69,13 @@ describe.skipIf(!usable)("launcher scripts", () => {
     for (const r of ["Bash(git push:*)", "Bash(gh:*)", "Bash(curl:*)", "Bash(sudo:*)", "Bash(git remote:*)", "Bash(git config:*)"]) expect(deny).toContain(r);
     expect(allow.filter((r) => deny.includes(r))).toEqual([]);
     // a Read deny does not bind a Bash subprocess, so no general Bash reader may be pre-allowed
-    for (const reader of ["cat", "grep", "rg", "sed", "jq", "diff", "less", "more", "awk", "sort", "uniq"])
+    for (const reader of ["cat", "grep", "rg", "sed", "jq", "diff", "cmp", "less", "more", "awk", "sort", "uniq"])
       expect(allow.some((a) => a.startsWith(`Bash(${reader}`))).toBe(false);
+    // the bridge suite runs from the repository root under the bun test rule; never a general
+    // bun --cwd rule, a cd, or a python that reads its program from stdin
+    expect(allow).toContain("Bash(bun test:*)");
+    expect(allow.some((a) => a.startsWith("Bash(bun --cwd"))).toBe(false);
+    expect(allow.some((a) => a.startsWith("Bash(cd") || a.startsWith("Bash(python3 -:") || a.startsWith("Bash(python3:"))).toBe(false);
     // pipe filters are allowed so a compound command does not prompt on its last stage
     for (const f of ["head", "tail", "wc", "cut"]) expect(allow).toContain(`Bash(${f}:*)`);
     // ...and every credential path is denied by command text, since a filter can read a file
@@ -170,6 +175,18 @@ describe.skipIf(!usable)("launcher scripts", () => {
     stub(path.join(t.home, ".local", "bin", "claude"), `printf '%s' "$MCTL_BRIDGE_STATE_DIR" > "${t.record}/statedir"`);
     expect(spawnSync(path.join(d, "run.sh"), [], { env: t.env, cwd: t.root }).status).toBe(0);
     expect(fs.readFileSync(path.join(t.record, "statedir"), "utf8")).toBe(path.join(d, "state"));
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
+  test("run.sh puts bun and the Valkey binaries on PATH, after the existing entries", () => {
+    const t = setup();
+    expect(spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo], { env: t.env, encoding: "utf8" }).status).toBe(0);
+    const d = path.join(t.H, "slots", "s1");
+    stub(path.join(t.home, ".local", "bin", "claude"), `printf '%s' "$PATH" > "${t.record}/path"`);
+    expect(spawnSync(path.join(d, "run.sh"), [], { env: t.env, cwd: t.root }).status).toBe(0);
+    expect(fs.readFileSync(path.join(t.record, "path"), "utf8")).toBe(
+      `${t.home}/.local/bin:/usr/local/bin:/usr/bin:/bin:/opt/my bun/bin:${t.H}/valkey/bin`,
+    );
     fs.rmSync(t.root, { recursive: true, force: true });
   });
 
@@ -346,5 +363,10 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(INSTRUCTIONS).toContain("Read, Grep and Glob tools, not cat, grep or sed in Bash");
     expect(INSTRUCTIONS).toContain("Edit files with the built-in Edit or Write tools, never with a script run through python3, sed -i,");
     expect(INSTRUCTIONS).toContain("Run syntax checks (sh -n, bash -n) as separate short commands.");
+    expect(INSTRUCTIONS).toContain("bun test --cwd plugin/mctl-bridge and");
+    expect(INSTRUCTIONS).toContain("python3 -m unittest discover -s plugin/mctl-bridge/test -p 'test_*.py'.");
+    expect(INSTRUCTIONS).toContain("For a temporary mutation check: commit first, edit with the Edit tool, run the test, undo with");
+    expect(INSTRUCTIONS).toContain("git restore <file>, and confirm with git status or git diff.");
+    expect(INSTRUCTIONS).toContain("Never copy backups to a temp dir");
   });
 });
