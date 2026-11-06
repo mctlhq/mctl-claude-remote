@@ -25,5 +25,13 @@ check script-itself 0 '.github/scripts/bridge-mutation-relevant.sh
 check empty-list 0 ''
 check quoted-path 0 '"docs/\303\251.md"
 '
-check no-trailing-newline 0 'plugin/mctl-bridge/ops/slot.sh'
+check blank-line-only 0 '
+'
+check blank-lines-then-docs 1 '
+
+README.md
+'
+check no-trailing-newline-relevant 0 'README.md
+plugin/mctl-bridge/ops/slot.sh'
+check no-trailing-newline-docs 1 'README.md'
 exit $fail

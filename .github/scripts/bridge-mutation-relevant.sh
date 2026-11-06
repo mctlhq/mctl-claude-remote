@@ -5,7 +5,10 @@
 # a path git had to quote (non-ASCII or special characters), is not evidence
 # of "nothing relevant", so both count as relevant.
 n=0
-while IFS= read -r p; do
+# "|| [ -n ... ]" keeps a last line with no newline; blank lines are not paths,
+# so `printf '%s\n' ""` from an empty diff still counts as an empty list.
+while IFS= read -r p || [ -n "$p" ]; do
+  [ -z "$p" ] && continue
   n=$((n + 1))
   case "$p" in
     plugin/mctl-bridge/src/* | \
