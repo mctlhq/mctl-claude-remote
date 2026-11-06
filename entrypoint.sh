@@ -597,6 +597,28 @@ else
   echo "[entrypoint] WARN native claude is '$NATIVE_NOW', image pins '$BUNDLED_VER'; using npm-global claude: $(claude --version 2>&1 | head -n 1)" >&2
 fi
 
+# Best-effort Telegram sender shared by the startup-wedge alert and the steward
+# auth-loss escalation. Defined here, before the scheduler subshell forks, so both
+# callers see it. $1 = log tag, $2 = message text. Returns 0 when unconfigured
+# (logged loudly) so callers never block or retry-spam; non-zero only when the
+# send itself failed.
+tg_send() {
+  _tg_tag="$1"; _tg_text="$2"
+  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${STARTUP_WEDGE_ALERT_CHAT_ID:-}" ]; then
+    echo "[$_tg_tag] TELEGRAM_BOT_TOKEN/STARTUP_WEDGE_ALERT_CHAT_ID not set; skipping alert"
+    return 0
+  fi
+  if curl -s -m 10 -o /dev/null \
+    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+    --data-urlencode "chat_id=${STARTUP_WEDGE_ALERT_CHAT_ID}" \
+    --data-urlencode "text=${_tg_text}"; then
+    echo "[$_tg_tag] alert sent to chat ${STARTUP_WEDGE_ALERT_CHAT_ID}"
+  else
+    echo "[$_tg_tag] alert send failed"
+    return 1
+  fi
+}
+
 # Optional pr-steward scheduler. Fires a headless `claude -p` tick on a cadence
 # so the steward runs without a human prompting the live session. Off unless
 # pr-steward is enabled AND PR_STEWARD_SCHEDULE_SECONDS is a positive integer.
@@ -633,6 +655,30 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
   # degrades exactly at that long, precise instruction-following, so its model is
   # pinned on the invocation itself rather than inherited.
   STEWARD_MODEL="${PR_STEWARD_MODEL:-sonnet}"
+  # Auth-loss escalation (#64): a tick that dies because the OAuth session is gone
+  # sends one Telegram message, then a reminder at most every this many seconds
+  # (not once per tick). Last-alert epoch lives beside the scheduler log.
+  STEWARD_AUTH_REMINDER="${PR_STEWARD_AUTH_REMINDER_SECONDS:-21600}"
+  printf '%s' "$STEWARD_AUTH_REMINDER" | grep -qE '^[1-9][0-9]*$' || STEWARD_AUTH_REMINDER=21600
+  STEWARD_AUTH_TS="$STEWARD_LOG_DIR/auth-alert-ts"
+  STEWARD_STDERR="$STEWARD_LOG_DIR/tick-stderr.log"
+  # $1 = tick stderr file, $2 = tick result JSON. Call only for a non-zero tick.
+  # Returns 0 when the output shows an auth loss (alerting if one is due).
+  steward_auth_escalate() {
+    grep -qE 'Failed to authenticate|OAuth session expired|Not logged in' "$1" "$2" 2>/dev/null || return 1
+    echo "[scheduler $(date -u +%FT%TZ)] tick failed: Claude auth lost (re-login required)" >>"$STEWARD_SCHED_LOG"
+    _au_now=$(date +%s)
+    _au_last=$(cat "$STEWARD_AUTH_TS" 2>/dev/null || echo 0)
+    case "$_au_last" in '' | *[!0-9]*) _au_last=0 ;; esac
+    [ "$_au_last" -gt "$_au_now" ] && _au_last=0
+    if [ "$_au_last" -eq 0 ]; then _au_kind="auth lost"; else _au_kind="auth STILL lost (reminder)"; fi
+    if [ "$_au_last" -eq 0 ] || [ $((_au_now - _au_last)) -ge "$STEWARD_AUTH_REMINDER" ]; then
+      if tg_send steward-auth "[$DEVICE_NAME] pr-steward $_au_kind: the Claude session is not authenticated, so scheduled ticks fail and no PR is being handled. Log in again. Next reminder in $((STEWARD_AUTH_REMINDER / 3600))h or more." >>"$STEWARD_SCHED_LOG" 2>&1; then
+        echo "$_au_now" >"$STEWARD_AUTH_TS"
+      fi
+    fi
+    return 0
+  }
   (
     while true; do
       sleep "${PR_STEWARD_SCHEDULE_SECONDS}"
@@ -659,16 +705,27 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
         else
           STEWARD_LOG_OFFSET=$(stat -c %s "$STEWARD_ACTION_LOG" 2>/dev/null || echo -1)
         fi
+        # Both redirects below truncate, so a stale result/stderr from an earlier
+        # run is never classified.
+        STEWARD_TICK_RC=0
         timeout "$STEWARD_TICK_TIMEOUT" "$STEWARD_CLAUDE_BIN" -p "Run the pr-steward skill" \
           --model "$STEWARD_MODEL" --output-format json \
-          --no-session-persistence --dangerously-skip-permissions >"$STEWARD_RESULT" 2>>"$STEWARD_SCHED_LOG" \
-          || echo "[scheduler $(date -u +%FT%TZ)] tick exited non-zero (timeout/error)" >>"$STEWARD_SCHED_LOG"
+          --no-session-persistence --dangerously-skip-permissions >"$STEWARD_RESULT" 2>"$STEWARD_STDERR" \
+          || STEWARD_TICK_RC=$?
+        cat "$STEWARD_STDERR" >>"$STEWARD_SCHED_LOG" 2>/dev/null || true
+        if [ "$STEWARD_TICK_RC" -eq 0 ]; then
+          # Only a successful tick ends the auth backoff; unrelated failures keep it.
+          rm -f "$STEWARD_AUTH_TS"
+        else
+          echo "[scheduler $(date -u +%FT%TZ)] tick exited non-zero (timeout/error)" >>"$STEWARD_SCHED_LOG"
+          steward_auth_escalate "$STEWARD_STDERR" "$STEWARD_RESULT" || true
+        fi
         jq -r 'if type == "array" then ([.[] | select(type == "object" and .type == "result")] | last | .result? // empty)
                elif type == "object" then (.result // empty) else empty end' \
           "$STEWARD_RESULT" >>"$STEWARD_SCHED_LOG" 2>/dev/null || true
         [ -x "$STEWARD_USAGE" ] && timeout 120 "$STEWARD_USAGE" --result "$STEWARD_RESULT" \
           --config "$STEWARD_CONFIG_PATH" --log-offset "$STEWARD_LOG_OFFSET" >>"$STEWARD_SCHED_LOG" 2>&1 || true
-        rm -f "$STEWARD_RESULT"
+        rm -f "$STEWARD_RESULT" "$STEWARD_STDERR"
       fi
     done
   ) &
@@ -1009,17 +1066,7 @@ healthz_code() {
 # logs loudly and returns 0 when unconfigured so the recovery path never blocks.
 send_wedge_alert() {
   code="$1"; uuid="$2"
-  if [ -z "${TELEGRAM_BOT_TOKEN:-}" ] || [ -z "${STARTUP_WEDGE_ALERT_CHAT_ID:-}" ]; then
-    echo "[startup-wedge] TELEGRAM_BOT_TOKEN/STARTUP_WEDGE_ALERT_CHAT_ID not set; skipping alert"
-    return 0
-  fi
-  text="[$DEVICE_NAME] startup wedge: relay never came up (healthz=$code) for session $uuid — forced a FRESH session. Resume-modal suppression may have broken (Claude Code update?); check CLAUDE_CODE_RESUME_* env."
-  curl -s -m 10 -o /dev/null \
-    "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-    --data-urlencode "chat_id=${STARTUP_WEDGE_ALERT_CHAT_ID}" \
-    --data-urlencode "text=${text}" \
-    && echo "[startup-wedge] alert sent to chat ${STARTUP_WEDGE_ALERT_CHAT_ID}" \
-    || echo "[startup-wedge] alert send failed"
+  tg_send startup-wedge "[$DEVICE_NAME] startup wedge: relay never came up (healthz=$code) for session $uuid — forced a FRESH session. Resume-modal suppression may have broken (Claude Code update?); check CLAUDE_CODE_RESUME_* env." || true
 }
 
 # One-shot per-launch probe. Args: <claude_child_pid> <session_uuid>.
