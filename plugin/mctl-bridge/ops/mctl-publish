@@ -1,0 +1,5 @@
+#!/bin/zsh
+# The orchestrator's GitHub writes, as the mctl-codex App. The App key stays in a 0600 file
+# that only this CLI reads; see src/publish.ts for why git never sees the keychain.
+H=${MCTL_BRIDGE_HOME:-$HOME/mctl-bridge}
+exec ${BUN:-$HOME/.bun/bin/bun} run --silent --no-env-file --config=$H/plugin/bunfig.toml $H/plugin/src/publish.ts "$@"
