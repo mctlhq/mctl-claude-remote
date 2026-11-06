@@ -135,6 +135,10 @@ JSON
     # sh -c are not caught), so the real boundary is the slot's own macOS user and the absence of
     # GitHub credentials. git push is also simply not allowed, so it prompts as well as being denied.
     # python3 -m unittest and bun test run repo code: they are trusted-code execution by design.
+    # The bridge suite runs from the repository root as `bun test --cwd plugin/mctl-bridge`, which
+    # Bash(bun test:*) already covers, so a slot needs no cd. Not `bun --cwd plugin/mctl-bridge test`: that form runs the package.json script,
+    # not the test runner, and a general Bash(bun --cwd:*) would run any script in any directory.
+    # cmp, cd and python3 - stay out for the reason above: they would read past the Read denies.
     allow='"Read","Edit","Write","Glob","Grep","Bash(git status:*)","Bash(git diff:*)","Bash(git log:*)","Bash(git show:*)","Bash(git branch:*)","Bash(git rev-parse:*)","Bash(git ls-files:*)","Bash(git grep:*)","Bash(git blame:*)","Bash(git fetch origin:*)","Bash(git checkout:*)","Bash(git switch:*)","Bash(git add:*)","Bash(git commit:*)","Bash(git stash:*)","Bash(git restore:*)","Bash(git worktree:*)","Bash(ls:*)","Bash(pwd)","Bash(head:*)","Bash(tail:*)","Bash(wc:*)","Bash(cut:*)","Bash(python3 -m unittest:*)","Bash(python3 -m py_compile:*)","Bash(python3 -I -m unittest:*)","Bash(sh -n:*)","Bash(bash -n:*)","Bash(zsh -n:*)","Bash(shellcheck:*)","Bash(bun test:*)"'
     deny='"Bash(git push:*)","Bash(git remote:*)","Bash(git config:*)","Bash(git credential:*)","Bash(gh:*)","Bash(curl:*)","Bash(wget:*)","Bash(ssh:*)","Bash(scp:*)","Bash(sudo:*)","Bash(security:*)","Bash(rm -rf:*)","Bash(rm -fr:*)","Bash(rm -r -f:*)","Bash(rm -f -r:*)","Bash(open:*)","Bash(*.ssh*)","Bash(*.config/gh*)","Bash(*.aws*)","Bash(*.git-credentials*)","Bash(*.pw*)","Bash(*keychain*)","Read(~/.ssh/**)","Read(~/.config/gh/**)","Read(~/.aws/**)","Read(**/*.pw)"'
     put $d/settings.json 600 <<JSON
@@ -151,7 +155,8 @@ JSON
     # and wedge the slot. (No backticks in the heredoc: it is expanded when written.)
     put $d/run.sh 700 <<RUN
 #!/bin/zsh
-export PATH=${(qq)sh_home}/.local/bin:/usr/local/bin:/usr/bin:/bin
+# After the system entries, so they add the test tools (bun, valkey-server) and shadow nothing.
+export PATH=${(qq)sh_home}/.local/bin:/usr/local/bin:/usr/bin:/bin:${(qq)bun:h}:${(qq)H}/valkey/bin
 export ENABLE_CLAUDEAI_MCP_SERVERS=false
 # The hook (hooks/state.py) and the adapter (src/channel.ts) both honour this: one state dir for
 # the slot in both modes, the one 'slot.sh session-id' reads (without it the trusted mode would

@@ -242,6 +242,22 @@ M=[
  ("watch: never times out", WATCH, 'if [ "$waited" -ge "$max" ]; then', 'if false; then', 1),
  ("watch: a terminal state is not settled", WATCH, 'verdict = "settled" if d.get("terminal") is True else', 'verdict = "running" if d.get("terminal") is True else', 1),
  ("watch: prints every poll", WATCH, 'if [ "$line" != "$last" ]; then', 'if true; then', 1),
+ # Slots run the tests from the repository root and never need a Bash reader (test/launcher.test.ts).
+ ("slot.sh drops the bun test rule", SLOT, ',"Bash(bun test:*)"', "", 1),
+ ("slot.sh allows bun --cwd anywhere", SLOT, '"Bash(bun test:*)"', '"Bash(bun test:*)","Bash(bun --cwd:*)"', 1),
+ ("slot.sh allows cmp", SLOT, '"Bash(wc:*)","Bash(cut:*)",', '"Bash(wc:*)","Bash(cut:*)","Bash(cmp:*)",', 1),
+ ("slot.sh allows cd", SLOT, '"Bash(wc:*)","Bash(cut:*)",', '"Bash(wc:*)","Bash(cut:*)","Bash(cd:*)",', 1),
+ ("slot.sh allows python3 from stdin", SLOT, '"Bash(wc:*)","Bash(cut:*)",', '"Bash(wc:*)","Bash(cut:*)","Bash(python3 -:*)",', 1),
+ ("slot.sh PATH lacks bun", SLOT, "/usr/bin:/bin:${(qq)bun:h}:${(qq)H}/valkey/bin", "/usr/bin:/bin:${(qq)H}/valkey/bin", 1),
+ ("slot.sh PATH lacks valkey", SLOT, "/usr/bin:/bin:${(qq)bun:h}:${(qq)H}/valkey/bin", "/usr/bin:/bin:${(qq)bun:h}", 1),
+ ("slot.sh PATH test tools shadow the system", SLOT, "export PATH=${(qq)sh_home}/.local/bin:/usr/local/bin:/usr/bin:/bin:${(qq)bun:h}:${(qq)H}/valkey/bin", "export PATH=${(qq)bun:h}:${(qq)H}/valkey/bin:${(qq)sh_home}/.local/bin:/usr/local/bin:/usr/bin:/bin", 1),
+ ("slot.sh PATH bun dir unquoted", SLOT, ":/bin:${(qq)bun:h}:", ":/bin:${bun:h}:", 1),
+ ("slot.sh PATH valkey dir unquoted", SLOT, ":${(qq)H}/valkey/bin", ":$H/valkey/bin", 1),
+ ("instructions drop the root bun test command", CH, "the bridge tests from the root too: bun test --cwd plugin/mctl-bridge and", "the bridge tests from the root too: and", 1),
+ ("instructions drop the root python test command", CH, "python3 -m unittest discover -s plugin/mctl-bridge/test -p 'test_*.py'.", "python3 -m unittest.", 1),
+ ("instructions drop commit first", CH, "For a temporary mutation check: commit first, edit", "For a temporary mutation check: edit", 1),
+ ("instructions drop the git restore undo", CH, "   git restore <file>, and confirm with git status or git diff. Never", "   Never", 1),
+ ("instructions drop the temp backup ban", CH, " Never copy backups to a temp dir and", " Keep copies and", 1),
 ]
 
 def tests_for(f):
