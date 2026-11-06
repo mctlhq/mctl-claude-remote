@@ -1,0 +1,5 @@
+#!/bin/zsh
+# The operator's CLI for the orchestrator's Codex thread. No Valkey credentials: it only
+# speaks to the Codex control socket, whose directory is closed to the slot users.
+H=${MCTL_BRIDGE_HOME:-$HOME/mctl-bridge}
+exec ${BUN:-$HOME/.bun/bin/bun} run --silent --no-env-file --config=$H/plugin/bunfig.toml $H/plugin/src/codexctl.ts "$@"

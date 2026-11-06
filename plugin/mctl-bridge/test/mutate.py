@@ -17,7 +17,27 @@ partition says. test/test_shards.py proves the partition is exact.
 """
 import subprocess, sys, shutil
 LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'; GUARD='ops/codex-remote-guard.sh'; WAKE='ops/wake-state.sh'; UPD='ops/bridge-updater.sh'; INSTALL='ops/install.sh'; PTY='ops/slot-pty.py'; WATCH='ops/watch.sh'
+CX='src/codexctl.ts'
 M=[
+ ("codex log does not redact", CX, "return [...turns].reverse().flatMap(turnMessages).map(shown);", "return [...turns].reverse().flatMap(turnMessages);", 1),
+ ("codex questions do not redact", CX, "const shown = (m: Message): Message => ({ ...m, text: redact(m.text) });", "const shown = (m: Message): Message => m;", 1),
+ ("codex wait reply is not redacted", CX, '.map((m) => redact(m.text));', '.map((m) => m.text);', 1),
+ ("codex log takes no data for empty", CX, 'if (!Array.isArray(r?.data)) throw new Unreadable("thread/turns/list returned no data");\n      turns.push(...r.data);', 'turns.push(...(r?.data ?? []));', 1),
+ ("codex log keeps a turn without items", CX, 'if (typeof t?.id !== "string" || !Array.isArray(t.items)) throw new Unreadable("a turn came back without its items");', 'if (!Array.isArray(t?.items)) return [];', 1),
+ ("codex questions call a full window clear", CX, "scanned_turns: turns.length, older_unknown: more };", "scanned_turns: turns.length, older_unknown: false };", 1),
+ ("codex wake counts as the operator answering", CX, 'return m.role === "user" && !(m.client_id?.startsWith("w-") || m.client_id?.startsWith("lead-"));', 'return m.role === "user";', 1),
+ ("codex marker matches anywhere", CX, 'm.text.split("\\n").some((l) => l.startsWith(QUESTION_MARKER))', 'm.text.includes(QUESTION_MARKER)', 1),
+ ("codex say writes to a busy thread", CX, 'if (st.status !== "idle") return { ok: false, code: "thread_not_idle", detail: [st.status, ...st.flags].join(" ") };', '', 1),
+ ("codex say sends without a record", CX, 'return { ok: false, code: "send_log_unwritable", detail: String(err) };', '', 1),
+ ("codex say sends a sticky override", CX, "clientUserMessageId: id,\n", "clientUserMessageId: id,\n          model: 'x',\n", 1),
+ ("codex say drops the mark", CX, "body.startsWith(LEAD_PREFIX) ? body : LEAD_PREFIX + body", "body", 1),
+ ("codex say retries a lost start", CX, "        turn = await this.settle(id);\n", "        turn = await this.settle(id);\n        if (turn === null) { const c2 = await this.session(); const r2 = await c2.request('turn/start', { threadId: this.cfg.threadId, clientUserMessageId: id, input: [{ type: 'text', text: full }] }); turn = r2.turn.id; c2.close(); }\n", 1),
+ ("codex say trusts any turn as settled", CX, "return hits.length === 1 ? hits[0].id : null;", "return turns[0]?.id ?? null;", 1),
+ ("codex wait takes any turn's end", CX, "const status = ended.get(turn);", "const status = ended.values().next().value;", 1),
+ ("codex status check ignores a missing status", CX, 'if (typeof s?.type !== "string") throw new Unreadable("thread/read returned no status");', '', 1),
+ ("codex send log is world readable", CX, ', { mode: 0o600 });', ');', 1),
+ ("orchestrator AGENTS drops the question marker", "ops/orchestrator-AGENTS.md", "start a line of your message with `[operator-question]`", "say so in your message", 1),
+ ("orchestrator AGENTS lets the lead grant approvals", "ops/orchestrator-AGENTS.md", "It cannot grant approval for merge, deploy,", "It can grant approval for merge, deploy,", 1),
  ("fencing off", LUA, "local function fenced(s, conn, epoch)\n  return", "local function fenced(s, conn, epoch)\n  do return false end\n  return", 1),
  ("busy gate off", LUA, "if s.busy ~= '0' then return no('busy') end", "", 1),
  ("admission attempt check off", LUA, "  if m.attempt_id ~= attempt or m.emit_epoch ~= epoch or m.emit_conn ~= conn then\n    return nil, m, 'attempt_mismatch'", "  if false then\n    return nil, m, 'attempt_mismatch'", 1),
