@@ -28,8 +28,24 @@ jobs:
       - name: Install Redis-protocol server and zsh for adapter and launcher tests
         run: sudo apt-get update -qq && sudo apt-get install -y -qq redis-server zsh
 
+      # The steward scripts run under the image's jq (Debian bookworm: 1.6),
+      # but the runner ships jq 1.7. 1.7 accepts programs 1.6 rejects (e.g.
+      # `$def`, where `def` is a keyword in 1.6), so the tests must see 1.6.
+      - name: Put jq 1.6 first on PATH
+        run: |
+          set -eu
+          dir="$RUNNER_TEMP/jq16"
+          mkdir -p "$dir"
+          curl -fsSL -o "$dir/jq" https://github.com/jqlang/jq/releases/download/jq-1.6/jq-linux64
+          echo "af986793a515d500ab2d35f8d2aecd656e764504b789b66d7e1a0b727a124c44  $dir/jq" | sha256sum -c -
+          chmod +x "$dir/jq"
+          echo "$dir" >> "$GITHUB_PATH"
+          [ "$("$dir/jq" --version)" = "jq-1.6" ]
+
       - name: Inbound events adapter and PTY launcher tests
-        run: python3 -m unittest discover -s events/tests -p 'test_*.py' -v
+        run: |
+          [ "$(jq --version)" = "jq-1.6" ] || { echo "expected jq-1.6, got $(jq --version)"; exit 1; }
+          python3 -m unittest discover -s events/tests -p 'test_*.py' -v
 
       # The TypeScript port of the same adapter, shipped as a Claude Code
       # plugin that runs its source on Bun. It runs the same integration tests
