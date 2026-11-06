@@ -87,11 +87,13 @@ jobs:
         working-directory: plugin/mctl-bridge
         run: python3 -m unittest discover -s test -p 'test_*.py' -v
 
-  # Decides whether the mutation shards below have anything to test. The run is
-  # about 35 minutes x 4 shards per push, so it is skipped on pull requests that
-  # touch none of its inputs. Every other trigger (push to main, manual run)
-  # always runs it. A diff that cannot be computed counts as relevant: not
-  # being able to look is never read as "nothing changed".
+  # Decides whether the mutation shards below have anything to test. A run is
+  # about 22 minutes x 8 shards. It is skipped on pull requests that touch none
+  # of its inputs and on pushes to main, by owner decision (2026-11-06): the pull
+  # request's run is the gate, so the merged result is not re-proven. A manual
+  # run (workflow_dispatch) always runs it, and is the way to prove main. A diff
+  # that cannot be computed counts as relevant: not being able to look is never
+  # read as "nothing changed".
   mutation-scope:
     runs-on: ubuntu-latest
     permissions:
@@ -115,7 +117,10 @@ jobs:
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: |
           run=true
-          if [ "$EVENT" = pull_request ]; then
+          if [ "$EVENT" = push ]; then
+            echo "push to main: the pull request already ran it"
+            run=false
+          elif [ "$EVENT" = pull_request ]; then
             # --no-renames: a file moved out of an input directory must show
             # up under its old path too. quotepath=false keeps paths literal.
             if files=$(git -c core.quotepath=false diff --no-renames --name-only "$BASE_SHA...$HEAD_SHA"); then
