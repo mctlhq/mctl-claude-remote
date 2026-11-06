@@ -17,8 +17,20 @@ partition says. test/test_shards.py proves the partition is exact.
 """
 import subprocess, sys, shutil
 LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'; GUARD='ops/codex-remote-guard.sh'; WAKE='ops/wake-state.sh'; UPD='ops/bridge-updater.sh'; INSTALL='ops/install.sh'; PTY='ops/slot-pty.py'; WATCH='ops/watch.sh'
-CX='src/codexctl.ts'; PB='src/publish.ts'
+CX='src/codexctl.ts'; PB='src/publish.ts'; RC='src/reconcile.ts'
 M=[
+ ("reconcile treats unreadable as no prompt", RC, 'this.note("reconcile slot unreadable", {', 'this.waiting.delete(slot); this.note("reconcile slot unreadable", {', 1),
+ ("reconcile logs an unreadable slot every pass", RC, 'if (!this.unreadable.has(slot)) {', 'if (true) {', 1),
+ ("reconcile restarts the clock on a repeat", RC, 'if (held?.hash === hash) {', 'if (false) {', 1),
+ ("reconcile repeats a waiting prompt every pass", RC, 'if (now - held.lastNote >= this.cfg.waitingEveryMs) {', 'if (true) {', 1),
+ ("reconcile logs prompt text", RC, 'this.note("reconcile prompt seen", { slot, hash, kind: st.prompt.kind });', 'this.note("reconcile prompt seen", { slot, hash, kind: st.prompt.kind, prompt: st.prompt });', 1),
+ ("reconcile takes a missing field as no prompt", RC, 'if (typeof d.prompt_pending !== "boolean") throw new StateUnreadable("no prompt_pending field");', '', 1),
+ ("reconcile takes bad JSON as no prompt", RC, 'throw new StateUnreadable(`not JSON: ${raw.slice(0, 80)}`);', 'return { alive: true, prompt: null };', 1),
+ ("reconcile ignores the exit status of slot.sh", RC, 'if (code !== 0) throw new StateUnreadable(', 'if (false) throw new StateUnreadable(', 1),
+ ("reconcile never kills a hung reader", RC, 'const killer = setTimeout(() => p.kill(), timeoutMs);', 'const killer = setTimeout(() => {}, timeoutMs);', 1),
+ ("reconcile forgets its cursor", RC, 'if (page.length > 0) await this.bridge.setReconcileCursor(cursor);', '', 1),
+ ("reconcile stops at the first page", RC, 'if (page.length < RESULT_PAGE) return;', 'return;', 1),
+ ("reconcile lets a slot failure stop the pass", RC, 'if (!this.unreadable.has(slot)) {', 'throw err; if (!this.unreadable.has(slot)) {', 1),
  ("publish git keeps the keychain helper", PB, '["-c", "credential.helper=", "-c", "core.hooksPath=/dev/null"', '["-c", "core.hooksPath=/dev/null"', 1),
  ("publish follows a symlink", PB, "fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK", "fs.constants.O_RDONLY | fs.constants.O_NONBLOCK", 1),
  ("publish skips the bundle hash", PB, 'if (actual !== m.sha256) throw new Refused("sha256_mismatch", `the bundle is ${actual}`);', '', 1),

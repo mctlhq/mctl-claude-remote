@@ -18,6 +18,8 @@
     <key>MCTL_BRIDGE_VALKEY_URL</key><string>redis://bridge_orch@127.0.0.1:@PORT@/0</string>
     <key>MCTL_BRIDGE_VALKEY_PASSWORD_FILE</key><string>@H@/etc/orch.pw</string>
     <key>MCTL_BRIDGE_THREAD_ID</key><string>@THREAD@</string>
+    <key>MCTL_BRIDGE_RECONCILE_SLOTS</key><string>a,b</string>
+    <key>MCTL_BRIDGE_SLOT_SH</key><string>@H@/slot.sh</string>
     <key>MCTL_BRIDGE_CODEX_SOCKET</key><string>@HOME@/.codex/app-server-control/app-server-control.sock</string>
   </dict>
   <key>RunAtLoad</key><true/>
