@@ -139,10 +139,20 @@ JSON
     # Bash(bun test:*) already covers, so a slot needs no cd. Not `bun --cwd plugin/mctl-bridge test`: that form runs the package.json script,
     # not the test runner, and a general Bash(bun --cwd:*) would run any script in any directory.
     # cmp, cd and python3 - stay out for the reason above: they would read past the Read denies.
-    allow='"Read","Edit","Write","Glob","Grep","Bash(git status:*)","Bash(git diff:*)","Bash(git log:*)","Bash(git show:*)","Bash(git branch:*)","Bash(git rev-parse:*)","Bash(git ls-files:*)","Bash(git grep:*)","Bash(git blame:*)","Bash(git fetch origin:*)","Bash(git checkout:*)","Bash(git switch:*)","Bash(git add:*)","Bash(git commit:*)","Bash(git stash:*)","Bash(git restore:*)","Bash(git worktree:*)","Bash(ls:*)","Bash(pwd)","Bash(head:*)","Bash(tail:*)","Bash(wc:*)","Bash(cut:*)","Bash(python3 -m unittest:*)","Bash(python3 -m py_compile:*)","Bash(python3 -I -m unittest:*)","Bash(sh -n:*)","Bash(bash -n:*)","Bash(zsh -n:*)","Bash(shellcheck:*)","Bash(bun test:*)"'
-    deny='"Bash(git push:*)","Bash(git remote:*)","Bash(git config:*)","Bash(git credential:*)","Bash(gh:*)","Bash(curl:*)","Bash(wget:*)","Bash(ssh:*)","Bash(scp:*)","Bash(sudo:*)","Bash(security:*)","Bash(rm -rf:*)","Bash(rm -fr:*)","Bash(rm -r -f:*)","Bash(rm -f -r:*)","Bash(open:*)","Bash(*.ssh*)","Bash(*.config/gh*)","Bash(*.aws*)","Bash(*.git-credentials*)","Bash(*.pw*)","Bash(*keychain*)","Read(~/.ssh/**)","Read(~/.config/gh/**)","Read(~/.aws/**)","Read(**/*.pw)"'
+    # Build, typecheck and Go tests (operator decision 2026-11-07: tests, typecheck, lint and build
+    # run without asking). go build/test/vet run repo code like bun test does, and may fetch modules
+    # through the Go proxy (read-only, checked against go.sum). Their -exec, -toolexec and -vettool
+    # flags run an arbitrary program, so those are denied. go run, go generate, go get, go mod and
+    # gofmt -w stay out: they run code of the command line's choosing or rewrite files outside Edit.
+    # Typecheck is the exact package script, not Bash(bun run:*), which would run any script.
+    # Rebasing onto origin/main is exact too: a general Bash(git rebase:*) would allow --exec/-x,
+    # which runs any command. git merge stays out: mctl-publish refuses merge commits anyway.
+    # GIT_EDITOR=true keeps git rebase --continue from opening an editor in a terminal nobody sees.
+    allow='"Read","Edit","Write","Glob","Grep","Bash(git status:*)","Bash(git diff:*)","Bash(git log:*)","Bash(git show:*)","Bash(git branch:*)","Bash(git rev-parse:*)","Bash(git ls-files:*)","Bash(git grep:*)","Bash(git blame:*)","Bash(git fetch origin:*)","Bash(git checkout:*)","Bash(git switch:*)","Bash(git add:*)","Bash(git commit:*)","Bash(git stash:*)","Bash(git restore:*)","Bash(git worktree:*)","Bash(ls:*)","Bash(pwd)","Bash(head:*)","Bash(tail:*)","Bash(wc:*)","Bash(cut:*)","Bash(python3 -m unittest:*)","Bash(python3 -m py_compile:*)","Bash(python3 -I -m unittest:*)","Bash(sh -n:*)","Bash(bash -n:*)","Bash(zsh -n:*)","Bash(shellcheck:*)","Bash(bun test:*)","Bash(bun run typecheck)","Bash(bun run --cwd plugin/mctl-bridge typecheck)","Bash(go build:*)","Bash(go test:*)","Bash(go vet:*)","Bash(gofmt -l:*)","Bash(gofmt -d:*)","Bash(git rebase origin/main)","Bash(git rebase --continue)","Bash(git rebase --abort)"'
+    deny='"Bash(git push:*)","Bash(git remote:*)","Bash(git config:*)","Bash(git credential:*)","Bash(gh:*)","Bash(curl:*)","Bash(wget:*)","Bash(ssh:*)","Bash(scp:*)","Bash(sudo:*)","Bash(security:*)","Bash(rm -rf:*)","Bash(rm -fr:*)","Bash(rm -r -f:*)","Bash(rm -f -r:*)","Bash(open:*)","Bash(go *-exec*)","Bash(go *-toolexec*)","Bash(go *-vettool*)","Bash(*.ssh*)","Bash(*.config/gh*)","Bash(*.aws*)","Bash(*.git-credentials*)","Bash(*.pw*)","Bash(*keychain*)","Read(~/.ssh/**)","Read(~/.config/gh/**)","Read(~/.aws/**)","Read(**/*.pw)"'
     put $d/settings.json 600 <<JSON
 {"permissions":{"allow":[$allow],"deny":[$deny]},
+ "env":{"GIT_EDITOR":"true"},
  "hooks":{"SessionStart":[{"hooks":[{"type":"command","command":$hook}]}],"UserPromptSubmit":[{"hooks":[{"type":"command","command":$hook}]}],"Stop":[{"hooks":[{"type":"command","command":$hook}]}]}}
 JSON
     # Remote Control name (a flag with a value, or nothing). The slot name is already restricted

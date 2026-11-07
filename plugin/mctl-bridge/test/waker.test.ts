@@ -8,7 +8,7 @@ import path from "node:path";
 import { AppClient } from "../src/appserver.ts";
 import { Bridge, key, newId } from "../src/store.ts";
 import type { Result, SlotConn } from "../src/store.ts";
-import { Waker, marker } from "../src/waker.ts";
+import { Waker, alertVia, marker } from "../src/waker.ts";
 import type { WakerConfig } from "../src/waker.ts";
 import { FakeApp } from "./fakeapp.ts";
 import { ValkeyConnectionError } from "../src/valkey.ts";
@@ -166,6 +166,20 @@ describe.skipIf(requiresValkey)("waker", () => {
     expect(await w.tick()).toBeNull();
     expect(app.starts).toHaveLength(0);
     app.failStatus = false;
+    expect(await w.tick()).not.toBeNull();
+    expect(app.starts).toHaveLength(1);
+  });
+
+  // 2026-11-07: a turn that failed on a usage limit left the thread in systemError, and the waker
+  // (like mctl-codex say) treated that as busy, so nothing could reach the thread until the
+  // operator typed into it by hand. No turn runs in systemError; a status we do not know is no.
+  test("a thread left in systemError by a failed turn is woken; an unknown status is not", async () => {
+    await question();
+    const w = waker();
+    app.restingStatus = "notLoaded";
+    expect(await w.tick()).toBeNull();
+    expect(app.starts).toHaveLength(0);
+    app.restingStatus = "systemError";
     expect(await w.tick()).not.toBeNull();
     expect(app.starts).toHaveLength(1);
   });
@@ -428,3 +442,18 @@ describe.skipIf(requiresValkey)("waker", () => {
   });
 });
 
+
+describe("alertVia", () => {
+  const a = { slot: "b", hash: "abc123", kind: "permission", waited_s: 360 };
+  test("maps say's results, and only outcome_unknown is maybe-sent", async () => {
+    const texts: string[] = [];
+    const via = (r: any) => alertVia(async (t) => (texts.push(t), typeof r === "function" ? r() : r));
+    expect(await via({ ok: true, id: "x", turn: "t" })(a)).toEqual({ outcome: "sent" });
+    expect(await via({ ok: false, code: "outcome_unknown", id: "x", detail: "d" })(a)).toEqual({ outcome: "unknown", detail: "d" });
+    expect(await via({ ok: false, code: "thread_not_idle", detail: "active" })(a)).toEqual({ outcome: "not_sent", detail: "thread_not_idle: active" });
+    expect(await via({ ok: false, code: "refused", id: "x", detail: "no" })(a)).toEqual({ outcome: "not_sent", detail: "refused: no" });
+    expect(await via(() => { throw new Error("socket down"); })(a)).toEqual({ outcome: "not_sent", detail: "socket down" });
+    expect(texts[0]).toContain("slot.sh prompt b");
+    expect(texts[0]).toContain("6 min");
+  });
+});

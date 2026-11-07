@@ -6,7 +6,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { CodexThread, LEAD_PREFIX, QUESTION_MARKER, redact } from "../src/codexctl.ts";
+import { BRIDGE_PREFIX, CodexThread, LEAD_PREFIX, QUESTION_MARKER, redact } from "../src/codexctl.ts";
 import type { Config } from "../src/codexctl.ts";
 import { FakeApp } from "./fakeapp.ts";
 
@@ -206,6 +206,12 @@ describe("say", () => {
     expect(app.starts[0].input[0].text).toBe(`${LEAD_PREFIX}hello`);
   });
 
+  test("a configured prefix replaces the lead mark: the waker's timer sends as [bridge]", async () => {
+    await new CodexThread({ ...cfg, prefix: BRIDGE_PREFIX }).say("slot b waits");
+    expect(app.starts[0].input[0].text).toBe(`${BRIDGE_PREFIX}slot b waits`);
+    expect(app.starts[0].input[0].text).not.toContain(LEAD_PREFIX.trim());
+  });
+
   test("sends no sticky override", async () => {
     await thread.say("hello");
     expect(Object.keys(app.starts[0]).sort()).toEqual(["clientUserMessageId", "input", "threadId"]);
@@ -224,6 +230,15 @@ describe("say", () => {
     expect(r).toMatchObject({ ok: false, code: "thread_not_idle" });
     expect(app.starts.length).toBe(1);
     expect(sends().length).toBe(before);
+  });
+
+  test("a thread left in systemError by a failed turn takes a say; an unknown status does not", async () => {
+    app.restingStatus = "notLoaded";
+    expect(await thread.say("first")).toMatchObject({ ok: false, code: "thread_not_idle", detail: "notLoaded" });
+    expect(app.starts.length).toBe(0);
+    app.restingStatus = "systemError";
+    expect(await thread.say("second")).toMatchObject({ ok: true });
+    expect(app.starts.length).toBe(1);
   });
 
   test("an unreadable status is an error and nothing is sent", async () => {
@@ -349,4 +364,6 @@ test("the orchestrator's rules tell Codex how to raise a question and what a lea
   expect(rules).toContain(`start a line of your message with \`${QUESTION_MARKER}\``);
   expect(rules).toContain(`A turn that starts with \`${LEAD_PREFIX.trim()}\``);
   expect(rules).toContain("It cannot grant approval for merge, deploy,");
+  expect(rules).toContain(`A turn that starts with \`${BRIDGE_PREFIX.trim()}\` was sent by the waker's own timer`);
+  expect(rules).toContain("A `[bridge]` message grants");
 });

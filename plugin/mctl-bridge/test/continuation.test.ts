@@ -172,6 +172,6 @@ describe.skipIf(requiresValkey)("continuation after a planned restart", () => {
     expect(flat).toContain("so never write through it");
     expect(flat).toContain("`--allow` comes from the task's allowed files, never from the slot's manifest");
     // the marker line the orchestrator answers with is untouched
-    expect(md).toContain("ORCH-AGENTS-BRIDGE-2026-11-04.");
+    expect(md).toContain("ORCH-AGENTS-BRIDGE-2026-11-07.");
   });
 });

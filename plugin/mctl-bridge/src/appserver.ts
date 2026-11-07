@@ -19,6 +19,16 @@ export class ConnectionLost extends Error {}
 
 export type Note = { method: string; params?: any };
 
+/**
+ * Whether a thread with this status may get a new turn/start. `idle` and `systemError` both
+ * mean no turn is running: `systemError` is what a turn that failed (for example on a usage
+ * limit) leaves behind, and only a new turn clears it. Anything else, `active` in particular
+ * (a start there joins the running turn) or a status we could not read, is "no".
+ */
+export function acceptsTurn(statusType: unknown): boolean {
+  return statusType === "idle" || statusType === "systemError";
+}
+
 type Pending = { resolve: (v: any) => void; reject: (e: Error) => void; timer: NodeJS.Timeout; method: string };
 
 export class AppClient {

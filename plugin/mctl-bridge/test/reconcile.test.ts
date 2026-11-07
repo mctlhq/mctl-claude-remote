@@ -7,7 +7,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { Reconciler, StateUnreadable, parseState, slotShReader } from "../src/reconcile.ts";
-import type { SlotState } from "../src/reconcile.ts";
+import type { Alert, AlertOutcome, PromptAlert, SlotState } from "../src/reconcile.ts";
 import { Bridge, key } from "../src/store.ts";
 import { ValkeyServer, requiresValkey } from "./support.ts";
 
@@ -57,10 +57,16 @@ describe.skipIf(requiresValkey)("Reconciler", () => {
   let notes: Array<{ msg: string; fields: Record<string, any> }>;
   let clock: number;
   const named = (msg: string) => notes.filter((n) => n.msg === msg);
-  const make = (slots = ["a", "b"]): Reconciler =>
+  let alerts: PromptAlert[];
+  let alertResult: () => Promise<{ outcome: AlertOutcome; detail?: string }>;
+  const fakeAlert: Alert = async (a) => {
+    alerts.push(a);
+    return alertResult();
+  };
+  const make = (slots = ["a", "b"], alertAfterMs = 0): Reconciler =>
     new Reconciler(
       b,
-      { slots, waitingEveryMs: 300_000 },
+      { slots, waitingEveryMs: 300_000, alertAfterMs, alert: fakeAlert },
       async (slot) => {
         const s = states[slot];
         if (s instanceof Error) throw s;
@@ -80,6 +86,8 @@ describe.skipIf(requiresValkey)("Reconciler", () => {
   beforeEach(async () => {
     states = {};
     notes = [];
+    alerts = [];
+    alertResult = async () => ({ outcome: "sent" });
     clock = 1_000_000;
     await server.client().execute(["HDEL", key.orch, "reconcile_cursor"]);
     await server.client().execute(["DEL", key.feed]);
@@ -144,6 +152,110 @@ describe.skipIf(requiresValkey)("Reconciler", () => {
     await r.pass();
     expect(named("reconcile prompt cleared").map((n) => n.fields.waited_s)).toEqual([60]);
     expect(named("reconcile prompt seen").length).toBe(2);
+  });
+
+  test("a prompt alerts once, only after the threshold, and a new prompt alerts again", async () => {
+    const r = make(["a"], 300_000);
+    states.a = { alive: true, prompt: PROMPT };
+    await r.pass();
+    clock += 240_000;
+    await r.pass();
+    expect(alerts).toEqual([]);
+    clock += 60_000;
+    await r.pass();
+    expect(alerts.map((a) => [a.slot, a.kind, a.waited_s])).toEqual([["a", "permission", 300]]);
+    expect(named("reconcile prompt alert sent").length).toBe(1);
+    clock += 600_000;
+    await r.pass();
+    expect(alerts.length).toBe(1);
+    states.a = { alive: true, prompt: { ...PROMPT, question: "Another?" } };
+    await r.pass();
+    clock += 300_000;
+    await r.pass();
+    expect(alerts.length).toBe(2);
+    expect(alerts[1].hash).not.toBe(alerts[0].hash);
+  });
+
+  test("not_sent is retried on the next pass and logged only when its reason changes", async () => {
+    const r = make(["a"], 60_000);
+    alertResult = async () => ({ outcome: "not_sent", detail: "thread_not_idle" });
+    states.a = { alive: true, prompt: PROMPT };
+    await r.pass();
+    for (let i = 0; i < 3; i++) {
+      clock += 60_000;
+      await r.pass();
+    }
+    expect(alerts.length).toBe(3);
+    expect(named("reconcile prompt alert not sent").length).toBe(1);
+    alertResult = async () => ({ outcome: "not_sent", detail: "refused" });
+    clock += 60_000;
+    await r.pass();
+    expect(named("reconcile prompt alert not sent").map((n) => n.fields.detail)).toEqual(["thread_not_idle", "refused"]);
+    alertResult = async () => ({ outcome: "sent" });
+    clock += 60_000;
+    await r.pass();
+    clock += 60_000;
+    await r.pass();
+    expect(alerts.length).toBe(5);
+    expect(named("reconcile prompt alert sent").length).toBe(1);
+  });
+
+  test("an unknown outcome, or a throwing alert, is never retried", async () => {
+    for (const result of [async () => ({ outcome: "unknown" as const }), async () => { throw new Error("boom"); }]) {
+      alerts = [];
+      notes = [];
+      alertResult = result;
+      const r = make(["a"], 60_000);
+      states.a = { alive: true, prompt: PROMPT };
+      await r.pass();
+      clock += 60_000;
+      await r.pass();
+      clock += 600_000;
+      await r.pass();
+      expect(alerts.length).toBe(1);
+      expect(named("reconcile prompt alert outcome unknown").length).toBe(1);
+      states.a = { alive: true, prompt: null };
+      await r.pass();
+    }
+  });
+
+  test("an unreadable slot never alerts, even past the threshold", async () => {
+    const r = make(["a"], 60_000);
+    states.a = { alive: true, prompt: PROMPT };
+    await r.pass();
+    states.a = new Error("sudo failed");
+    clock += 600_000;
+    await r.pass();
+    expect(alerts).toEqual([]);
+    states.a = { alive: true, prompt: PROMPT };
+    await r.pass();
+    expect(alerts.map((a) => a.waited_s)).toEqual([600]);
+  });
+
+  test("alerts are off when alertAfterMs is 0", async () => {
+    const r = make(["a"], 0);
+    states.a = { alive: true, prompt: PROMPT };
+    await r.pass();
+    clock += 3_600_000;
+    await r.pass();
+    expect(alerts).toEqual([]);
+  });
+
+  test("neither the alert nor its text carries the prompt's text", async () => {
+    const r = make(["a"], 60_000);
+    states.a = { alive: true, prompt: PROMPT };
+    await r.pass();
+    clock += 60_000;
+    await r.pass();
+    expect(alerts.length).toBe(1);
+    const text = Reconciler.alertText(alerts[0]);
+    for (const s of [JSON.stringify(alerts), text, JSON.stringify(notes)]) {
+      expect(s).not.toContain("secret-looking");
+      expect(s).not.toContain("Proceed?");
+    }
+    expect(text).toContain("slot.sh prompt a");
+    expect(text).toContain(alerts[0].hash);
+    expect(text).toContain("1 min");
   });
 
   test("a finished task is logged once, across restarts and past one page", async () => {

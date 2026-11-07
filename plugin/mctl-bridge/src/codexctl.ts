@@ -11,7 +11,7 @@
 // anything waits for the operator can be unknown, and is then reported as unknown.
 //
 // `say` follows the waker's rules (see waker.ts for the live protocol): it only writes
-// to an idle thread, because turn/start on a busy thread joins the running turn; it
+// to a thread with no running turn (idle, or systemError after a failed turn), because turn/start on a busy thread joins the running turn; it
 // never retries, because clientUserMessageId is not deduplicated; and it sends no
 // model, effort, approval or sandbox fields, because those overrides are sticky and
 // would change the thread the operator sees on the phone.
@@ -21,12 +21,14 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { AppClient, ConnectionLost, RpcError } from "./appserver.ts";
+import { AppClient, ConnectionLost, RpcError, acceptsTurn } from "./appserver.ts";
 import type { Note } from "./appserver.ts";
 
 export const VERSION = "0.1.0";
 /** Every `say` carries this, so the thread shows who wrote it. */
 export const LEAD_PREFIX = "[lead-claude] ";
+/** What the waker's prompt timer sends carries this instead (reconcile.ts). */
+export const BRIDGE_PREFIX = "[bridge] ";
 /** Codex starts a line with this to ask the operator (ops/orchestrator-AGENTS.md). */
 export const QUESTION_MARKER = "[operator-question]";
 const MAX_SAY_BYTES = 32 * 1024;
@@ -56,7 +58,7 @@ export function redact(text: string): string {
 /** The thread or its history could not be read: never to be taken for "nothing there". */
 export class Unreadable extends Error {}
 
-export type Config = { threadId: string; socketPath: string; sendLog: string; rpcTimeoutMs: number };
+export type Config = { threadId: string; socketPath: string; sendLog: string; rpcTimeoutMs: number; prefix?: string };
 export type Message = { turn: string; turn_status: string | null; role: "user" | "codex"; client_id: string | null; text: string };
 export type Status = { status: string; flags: string[] };
 export type Questions = { waiting: Message[]; scanned_turns: number; older_unknown: boolean };
@@ -195,7 +197,8 @@ export class CodexThread {
     const body = text.trim();
     if (body === "") return { ok: false, code: "empty" };
     if (Buffer.byteLength(body) > MAX_SAY_BYTES) return { ok: false, code: "too_long" };
-    const full = body.startsWith(LEAD_PREFIX) ? body : LEAD_PREFIX + body;
+    const prefix = this.cfg.prefix ?? LEAD_PREFIX;
+    const full = body.startsWith(prefix) ? body : prefix + body;
 
     const c = await this.session();
     const ended = new Map<string, string>();
@@ -206,7 +209,7 @@ export class CodexThread {
     });
     try {
       const st = await this.readStatus(c);
-      if (st.status !== "idle") return { ok: false, code: "thread_not_idle", detail: [st.status, ...st.flags].join(" ") };
+      if (!acceptsTurn(st.status)) return { ok: false, code: "thread_not_idle", detail: [st.status, ...st.flags].join(" ") };
 
       const id = `lead-${crypto.randomUUID()}`;
       try {
