@@ -562,6 +562,28 @@ describe("the manifest is the final marker", () => {
     expect(fs.readFileSync(path.join(f.root, "t-1.bundle"), "utf8")).toBe("someone else's file");
   });
 
+  test("a replacement that reuses the bundle's inode number is still not deleted", async () => {
+    // Deterministic on any file system: the seam makes cleanup see the replacement with the
+    // original device and inode, which is what a reused inode number looks like to a stat call.
+    const f = fixture();
+    const bundle = path.join(f.root, "t-1.bundle");
+    let original: fs.Stats | null = null;
+    const err = await refused(exportHandoff(f.input, {
+      hooks: {
+        beforeManifestLink: () => {
+          original = fs.lstatSync(bundle);
+          fs.rmSync(bundle);
+          fs.writeFileSync(bundle, "someone else's file");
+        },
+      },
+      statEntry: (file) => (file === bundle && original ? { isFile: () => true, dev: original.dev, ino: original.ino } : fs.lstatSync(file)),
+    }));
+    expect(err.code).toBe("output_conflict");
+    expect(original).not.toBeNull();
+    expect(fs.existsSync(path.join(f.root, "t-1.manifest.json"))).toBe(false);
+    expect(fs.readFileSync(bundle, "utf8")).toBe("someone else's file");
+  });
+
   test("a manifest that appears from elsewhere is not overwritten", async () => {
     const f = fixture();
     const err = await refused(exportHandoff(f.input, { hooks: { beforeManifestLink: () => fs.writeFileSync(path.join(f.root, "t-1.manifest.json"), "theirs") } }));

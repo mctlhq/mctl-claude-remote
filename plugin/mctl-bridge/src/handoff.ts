@@ -77,6 +77,11 @@ export type ExportOptions = {
     afterBundleLink?: () => void;
     beforeManifestLink?: () => void;
   };
+  /**
+   * Test seam: how a name is looked up when deciding whether this call still owns the file there.
+   * A test returns another file's identity to model a replacement that reuses an inode number.
+   */
+  statEntry?: (file: string) => { isFile(): boolean; dev: number; ino: number };
 };
 
 export type ExportResult = {
@@ -323,9 +328,28 @@ function sha256File(file: string, limit: number): { sha256: string; bytes: numbe
   }
 }
 
-function writeNew(file: string, data: Buffer, created?: () => void): void {
+/** A file this call created: its device and inode, and the hash of its bytes once known. */
+type Owned = { dev: number; ino: number; sha256: string | null };
+
+/**
+ * Whether `file` is still the file this call created: the same device and inode and, once its
+ * bytes are known, the same hash. An inode number can go to a replacement once the original is
+ * unlinked, so the number alone does not prove ownership.
+ */
+function isOwned(file: string, owned: Owned, limit: number, stat: (f: string) => { isFile(): boolean; dev: number; ino: number }): boolean {
+  try {
+    const st = stat(file);
+    if (!st.isFile() || st.dev !== owned.dev || st.ino !== owned.ino) return false;
+    return owned.sha256 === null || sha256File(file, limit).sha256 === owned.sha256;
+  } catch {
+    return false;
+  }
+}
+
+function writeNew(file: string, data: Buffer, created?: (owned: Owned) => void): void {
   const fd = fs.openSync(file, O_CREATE, 0o644);
-  created?.();
+  const st = fs.fstatSync(fd);
+  created?.({ dev: st.dev, ino: st.ino, sha256: null });
   try {
     fs.writeSync(fd, data);
     fs.fsyncSync(fd);
@@ -398,6 +422,7 @@ export async function exportHandoff(input: ExportInput, opts: ExportOptions = {}
   validate(input);
   const { bundle: bundleCap, manifest: manifestCap } = limits(opts);
   const hex = opts.randomHex ?? (() => crypto.randomBytes(8).toString("hex"));
+  const stat = opts.statEntry ?? ((f: string) => fs.lstatSync(f));
   checkRoot(input.handoffRoot);
   const { changed } = verifySource(input);
 
@@ -427,9 +452,9 @@ export async function exportHandoff(input: ExportInput, opts: ExportOptions = {}
     throw new HandoffError("output_unsafe", `${lockPath}: ${(err as Error).message}`);
   }
 
-  let bundleLinked: { dev: number; ino: number } | null = null;
-  let tmpBundleMade = false;
-  let tmpManifestMade = false;
+  let bundleLinked: Owned | null = null;
+  let tmpBundleMade: Owned | null = null;
+  let tmpManifestMade: Owned | null = null;
   let crashed = false;
   try {
     opts.hooks?.afterReserve?.();
@@ -458,9 +483,12 @@ export async function exportHandoff(input: ExportInput, opts: ExportOptions = {}
     // 1. The bundle, under a temporary name, flushed and verified.
     // Created here, exclusively and without following a link: from this line the file is this call's.
     const bundleFd = fs.openSync(tmpBundle, O_CREATE, 0o644);
-    tmpBundleMade = true;
+    const made = fs.fstatSync(bundleFd);
+    const tmp: Owned = { dev: made.dev, ino: made.ino, sha256: null };
+    tmpBundleMade = tmp;
     await writeBundle(input, bundleFd, bundleCap);
     const first = sha256File(tmpBundle, bundleCap);
+    tmp.sha256 = first.sha256;
     checkBundle(input, tmpBundle);
     // The branch must not have moved while the bundle was written.
     const still = git(input.repoPath, "rev-parse", "--verify", "--quiet", `refs/heads/${input.branch}^{commit}`);
@@ -468,10 +496,10 @@ export async function exportHandoff(input: ExportInput, opts: ExportOptions = {}
 
     // 2. Publish the bundle without overwriting anything, then flush the directory.
     fs.linkSync(tmpBundle, bundlePath);
-    const st = fs.lstatSync(bundlePath);
-    bundleLinked = { dev: st.dev, ino: st.ino };
+    // A hard link shares the inode: the identity taken at creation is this bundle's, whatever the name holds later.
+    bundleLinked = { ...tmp, sha256: first.sha256 };
     fs.unlinkSync(tmpBundle);
-    tmpBundleMade = false;
+    tmpBundleMade = null;
     fsyncDir(root);
     opts.hooks?.afterBundleLink?.();
 
@@ -480,8 +508,8 @@ export async function exportHandoff(input: ExportInput, opts: ExportOptions = {}
     const bytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
     if (bytes.length > manifestCap) throw new HandoffError("too_large", `the manifest is ${bytes.length} bytes, over the ${manifestCap} byte limit`);
     parseManifest(bytes); // exactly the publisher's reader
-    writeNew(tmpManifest, bytes, () => {
-      tmpManifestMade = true;
+    writeNew(tmpManifest, bytes, (owned) => {
+      tmpManifestMade = { ...owned, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
     });
     opts.hooks?.beforeManifestLink?.();
 
@@ -493,7 +521,7 @@ export async function exportHandoff(input: ExportInput, opts: ExportOptions = {}
     }
     fs.linkSync(tmpManifest, manifestPath);
     fs.unlinkSync(tmpManifest);
-    tmpManifestMade = false;
+    tmpManifestMade = null;
     fsyncDir(root);
     return describe(first.sha256, first.bytes, false);
   } catch (err) {
@@ -501,14 +529,14 @@ export async function exportHandoff(input: ExportInput, opts: ExportOptions = {}
       crashed = true;
       throw err;
     }
-    // Remove only what this call made. A manifest that never appeared leaves no export, so
-    // the bundle this call linked goes too; one somebody else made stays.
-    if (tmpManifestMade) fs.rmSync(tmpManifest, { force: true });
-    if (tmpBundleMade) fs.rmSync(tmpBundle, { force: true });
-    if (bundleLinked) {
+    // Remove only what this call made, and only while it is still that file: a replacement under
+    // the same name stays. A manifest that never appeared leaves no export, so the bundle this call
+    // linked goes too, unless the name now holds something else.
+    if (tmpManifestMade && isOwned(tmpManifest, tmpManifestMade, manifestCap, stat)) fs.rmSync(tmpManifest, { force: true });
+    if (tmpBundleMade && isOwned(tmpBundle, tmpBundleMade, bundleCap, stat)) fs.rmSync(tmpBundle, { force: true });
+    if (bundleLinked && !fs.existsSync(manifestPath) && isOwned(bundlePath, bundleLinked, bundleCap, stat)) {
       try {
-        const now = fs.lstatSync(bundlePath);
-        if (now.ino === bundleLinked.ino && now.dev === bundleLinked.dev && !fs.existsSync(manifestPath)) fs.unlinkSync(bundlePath);
+        fs.unlinkSync(bundlePath);
       } catch {
         // already gone
       }
