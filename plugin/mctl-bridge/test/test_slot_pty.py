@@ -100,6 +100,17 @@ if mode == "permission":
     W("   2. Yes, and don't ask again for: git checkout *\r\n")
     W("   3. No\r\n")
     W(" Esc to cancel \u00b7 Tab to amend\r\n")
+elif mode == "tall":
+    W("\u2500" * 60 + "\r\n")                              # the box head scrolls off a 50-row screen
+    W(" Bash command\r\n")
+    W(" " + words("cat > plugin/mctl-bridge/src/handoff.ts <<'EOF'") + "\r\n")
+    for n in range(70): W(" line-%02d\r\n" % n)
+    W(" EOF\r\n")
+    W(" Do you want to proceed?\r\n")
+    W(" \u276f 1. Yes\r\n   2. No\r\n")
+elif mode == "answered":
+    W(" Do you want to proceed?\r\n \u276f 1. Yes\r\n   2. No\r\n")  # answered, then scrolled away
+    for n in range(60): W(" out-%02d\r\n" % n)
 elif mode == "single":
     W(" Do you want to proceed?\r\n")                      # a question with only one numbered line is not a prompt
     W(" 1. Yes\r\n")
@@ -124,6 +135,47 @@ sys.stdin.readline()
 print("GOT-KEYS")
 time.sleep(30)
 """
+
+def load_pty():
+    """slot-pty.py as a module. It runs main() at import, which exits on an unknown command;
+    everything above that call is already defined by then."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("slot_pty", PTY)
+    mod = importlib.util.module_from_spec(spec)
+    argv = sys.argv; sys.argv = ["slot-pty.py", "--no-such-command"]
+    try: spec.loader.exec_module(mod)
+    except SystemExit: pass
+    finally: sys.argv = argv
+    return mod
+
+class FindPrompt(unittest.TestCase):
+    RULE = "\u2500" * 60
+    ASK = [" Do you want to proceed?", " \u276f 1. Yes", "   2. No"]
+
+    def setUp(self):
+        self.m = load_pty()
+
+    def test_a_rule_on_the_last_scrollback_line_is_the_head_not_a_truncation(self):
+        p = self.m.find_prompt([" Bash command", " git status"] + self.ASK, back=["old output", self.RULE])
+        self.assertFalse(p["truncated"])
+        self.assertEqual(p["detail"], ["Bash command", "git status"])
+
+    def test_no_rule_anywhere_is_truncated(self):
+        p = self.m.find_prompt([" line-1", " line-2"] + self.ASK, back=["out-1", "out-2"])
+        self.assertTrue(p["truncated"])
+        self.assertEqual(p["detail"], ["line-1", "line-2"])
+
+    def test_a_rule_above_an_earlier_prompt_is_not_this_box_head(self):
+        old = [self.RULE, " Bash command", " rm stale", " Do you want to proceed?", " 1. Yes", " 2. No", " out"]
+        p = self.m.find_prompt([" line-1"] + self.ASK, back=old)
+        self.assertTrue(p["truncated"])
+        self.assertNotIn("rm stale", p["detail"])
+
+    def test_a_rule_beyond_the_scan_limit_is_not_taken(self):
+        back = [self.RULE, " Bash command"] + [" x"] * self.m.BACK_LIMIT
+        p = self.m.find_prompt([" line-1"] + self.ASK, back=back)
+        self.assertTrue(p["truncated"])
+        self.assertNotIn("Bash command", p["detail"])
 
 class RenderedScreen(unittest.TestCase):
     def setUp(self):
@@ -207,6 +259,21 @@ class RenderedScreen(unittest.TestCase):
         self.assertIn("git checkout -b docs/bridge-readme-manual-tags && git branch --show-current", detail)
         self.assertIn("git commit -q -m docs:fix && git log --oneline -1", detail)
         self.assertIn("Create the local docs branch", detail)
+
+    def test_a_box_taller_than_the_screen_keeps_its_head(self):
+        # 2026-11-07: the file path of a long heredoc had scrolled off and was approved unseen
+        self.start("tall")
+        self.assertTrue(wait_for(lambda: self.prompt()["pending"]))
+        p = self.prompt()["prompt"]
+        self.assertEqual(p["detail"][0], "Bash command")
+        self.assertEqual(p["detail"][1], "cat > plugin/mctl-bridge/src/handoff.ts <<'EOF'")
+        self.assertEqual([l for l in p["detail"] if l.startswith("line-")], ["line-%02d" % n for n in range(70)])
+        self.assertFalse(p["truncated"])
+
+    def test_an_answered_prompt_in_the_scrollback_is_not_pending(self):
+        self.start("answered")
+        self.assertTrue(wait_for(lambda: "out-59" in run("show", self.d).stdout))
+        self.assertEqual(self.prompt(), {"pending": False, "prompt": None})
 
     def test_reading_a_prompt_never_answers_it(self):
         self.start("permission")

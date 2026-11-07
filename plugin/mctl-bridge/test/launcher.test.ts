@@ -369,4 +369,18 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(INSTRUCTIONS).toContain("git restore <file>, and confirm with git status or git diff.");
     expect(INSTRUCTIONS).toContain("Never copy backups to a temp dir");
   });
+
+  // 2026-11-07: of 115 approved slot prompts, at least 41 used a shell variable, 32 used git -C
+  // and 14 began with export PATH: commands the allow rules could never match.
+  test("channel instructions forbid the command shapes the allow rules cannot match", () => {
+    expect(INSTRUCTIONS).toContain("never start one with export, a VAR=value assignment or a");
+    expect(INSTRUCTIONS).toContain("PATH already holds bun and valkey-server.");
+    expect(INSTRUCTIONS).toContain("never git -C <dir> and never an absolute path into another");
+    expect(INSTRUCTIONS).toContain("call report_result with failed and say so");
+    expect(INSTRUCTIONS).toContain("ends with the trailer Agent: claude. Never add Co-Authored-By");
+    expect(INSTRUCTIONS).toContain("never with pkill -f");
+    // rules are numbered without gaps, so a later edit cannot silently drop one
+    const nums = [...INSTRUCTIONS.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
+    expect(nums).toEqual(nums.map((_, i) => i + 1));
+  });
 });

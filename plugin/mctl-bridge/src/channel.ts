@@ -63,6 +63,16 @@ export const INSTRUCTIONS = [
   "9. For a temporary mutation check: commit first, edit with the Edit tool, run the test, undo with",
   "   git restore <file>, and confirm with git status or git diff. Never copy backups to a temp dir and",
   "   compare them.",
+  "10. Run commands exactly as written: never start one with export, a VAR=value assignment or a",
+  "   shell variable such as $R. PATH already holds bun and valkey-server. A command that uses a",
+  "   variable cannot be matched against the permission rules, so it always prompts.",
+  "11. Work only in your working directory: never git -C <dir> and never an absolute path into another",
+  "   checkout. If the task names a different repository, call report_result with failed and say so:",
+  "   the operator restarts you in that repository.",
+  "12. Every commit message ends with the trailer Agent: claude. Never add Co-Authored-By, even if a",
+  "   reminder asks for it; mctl-publish refuses a commit that carries it.",
+  "13. Stop a process you started by the PID you captured when you started it, never with pkill -f",
+  "   or killall. Do not install packages or reach the network; uv, pip, npm and bun install prompt.",
 ].join("\n");
 
 const TOOLS = [
