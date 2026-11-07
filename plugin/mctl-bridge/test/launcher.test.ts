@@ -322,8 +322,8 @@ describe.skipIf(!usable)("launcher scripts", () => {
 
   test("start installs packages from each committed lockfile, frozen and without scripts, and a failure does not stop it", () => {
     const t = setup();
-    for (const d of ["plugin/a", "plugin/a/node_modules/dep", "deep/x/y/z"]) fs.mkdirSync(path.join(t.repo, d), { recursive: true });
-    for (const f of ["plugin/a/bun.lock", "plugin/a/node_modules/dep/bun.lock", "deep/x/y/z/bun.lock"]) fs.writeFileSync(path.join(t.repo, f), "{}");
+    for (const d of ["plugin/a", "node_modules/dep", "deep/x/y/z"]) fs.mkdirSync(path.join(t.repo, d), { recursive: true });
+    for (const f of ["plugin/a/bun.lock", "node_modules/dep/bun.lock", "deep/x/y/z/bun.lock"]) fs.writeFileSync(path.join(t.repo, f), "{}");
     const calls = path.join(t.record, "bun");
     const bun = path.join(t.root, "bin", "fakebun");
     stub(bun, `printf '%s|%s\\n' "$(pwd -P)" "$*" >> ${JSON.stringify(calls)}\n[ -e ${JSON.stringify(path.join(t.root, "fail"))} ] && { echo "lockfile had changes"; exit 1; }\nexit 0`);
