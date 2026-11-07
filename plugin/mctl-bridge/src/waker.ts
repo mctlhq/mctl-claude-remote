@@ -23,6 +23,7 @@ import fs from "node:fs";
 
 import { AppClient, ConnectionLost, RpcError } from "./appserver.ts";
 import type { Note } from "./appserver.ts";
+import { Reconciler, slotShReader } from "./reconcile.ts";
 import { Bridge, newId } from "./store.ts";
 import { Connection, endpointFromUrl } from "./valkey.ts";
 
@@ -408,11 +409,25 @@ export async function main(): Promise<number> {
   };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
-  log("started", { thread_id: threadId, socket: cfg.socketPath, per_hour: cfg.perHour });
-  await Promise.all([
+  // Log only for now: see reconcile.ts. No slots listed means the timer is off.
+  const slots = (process.env.MCTL_BRIDGE_RECONCILE_SLOTS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
+  const slotSh = process.env.MCTL_BRIDGE_SLOT_SH ?? "";
+  log("started", { thread_id: threadId, socket: cfg.socketPath, per_hour: cfg.perHour, reconcile_slots: slots });
+  const loops = [
     loop("sweep", sweepMs, () => stopped, () => waker.sweep()),
     loop("wake", cfg.pollMs, () => stopped, () => waker.step()),
-  ]);
+  ];
+  if (slots.length > 0) {
+    if (!slotSh) throw new Error("MCTL_BRIDGE_RECONCILE_SLOTS needs MCTL_BRIDGE_SLOT_SH");
+    const reconciler = new Reconciler(
+      bridge,
+      { slots, waitingEveryMs: intEnv("MCTL_BRIDGE_RECONCILE_WAITING_MS", 300_000) },
+      slotShReader(slotSh, 20_000),
+      log,
+    );
+    loops.push(loop("reconcile", intEnv("MCTL_BRIDGE_RECONCILE_MS", 60_000), () => stopped, () => reconciler.pass()));
+  }
+  await Promise.all(loops);
   return 0;
 }
 

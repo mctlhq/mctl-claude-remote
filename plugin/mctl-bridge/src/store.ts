@@ -345,6 +345,25 @@ export class Bridge implements SlotApi {
     return out;
   }
 
+  /** Feed entries after an id, oldest first. A reply that is not a list is a failed read. */
+  async feedAfter(cursor: string, count: number): Promise<Array<Record<string, string>>> {
+    const reply = await this.exec.execute(["XRANGE", key.feed, `(${cursor}`, "+", "COUNT", count]);
+    if (!Array.isArray(reply)) throw new Error("the feed did not read as a list");
+    return reply.map((e) => {
+      const [id, fields] = e as Reply[];
+      return { entry: text(id!), ...pairs(fields!) };
+    });
+  }
+
+  async reconcileCursor(): Promise<string> {
+    const v = await this.exec.execute(["HGET", key.orch, "reconcile_cursor"]);
+    return v === null ? "0-0" : text(v);
+  }
+
+  async setReconcileCursor(cursor: string): Promise<void> {
+    await this.exec.execute(["HSET", key.orch, "reconcile_cursor", cursor]);
+  }
+
   /** One message's own bounded trail; never scans the global audit stream. */
   async auditTrail(id: string): Promise<Array<Record<string, string>>> {
     const reply = await this.exec.execute(["XRANGE", key.msgAudit(id), "-", "+"]);

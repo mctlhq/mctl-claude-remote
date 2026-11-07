@@ -197,6 +197,20 @@ Exit status: 0 done, 1 refused by the state machine (the JSON says why), 2 usage
 connection error. `init` reports the server's persistence as `durable` only for
 `appendonly yes` with `appendfsync always`.
 
+## The waker's timer
+
+Between Codex turns nobody sees a slot stop on a permission prompt, or a result nobody collects.
+Every minute the waker reads `slot.sh state` for the slots in `MCTL_BRIDGE_RECONCILE_SLOTS` and
+the result events in the feed, and writes to `log/waker.log`:
+
+    reconcile prompt seen | waiting | cleared     slot, hash, kind, waited_s
+    reconcile task finished                       task_id, slot, state, age_s
+    reconcile slot unreadable | readable again
+
+This stage only logs: it starts no turn and presses nothing. A prompt is logged by kind and hash,
+never by its text. An unreadable slot is unknown, not clear, so a prompt's clock keeps running
+through it. The clock lives in memory, so a waker restart counts an open prompt from the restart.
+
 ## Reading and writing the Codex thread
 
 `mctl-publish` is how the orchestrator writes to GitHub, as `mctl-codex[bot]`. That GitHub App
