@@ -100,6 +100,17 @@ if mode == "permission":
     W("   2. Yes, and don't ask again for: git checkout *\r\n")
     W("   3. No\r\n")
     W(" Esc to cancel \u00b7 Tab to amend\r\n")
+elif mode == "tall":
+    W("\u2500" * 60 + "\r\n")                              # the box head scrolls off a 50-row screen
+    W(" Bash command\r\n")
+    W(" " + words("cat > plugin/mctl-bridge/src/handoff.ts <<'EOF'") + "\r\n")
+    for n in range(70): W(" line-%02d\r\n" % n)
+    W(" EOF\r\n")
+    W(" Do you want to proceed?\r\n")
+    W(" \u276f 1. Yes\r\n   2. No\r\n")
+elif mode == "answered":
+    W(" Do you want to proceed?\r\n \u276f 1. Yes\r\n   2. No\r\n")  # answered, then scrolled away
+    for n in range(60): W(" out-%02d\r\n" % n)
 elif mode == "single":
     W(" Do you want to proceed?\r\n")                      # a question with only one numbered line is not a prompt
     W(" 1. Yes\r\n")
@@ -207,6 +218,21 @@ class RenderedScreen(unittest.TestCase):
         self.assertIn("git checkout -b docs/bridge-readme-manual-tags && git branch --show-current", detail)
         self.assertIn("git commit -q -m docs:fix && git log --oneline -1", detail)
         self.assertIn("Create the local docs branch", detail)
+
+    def test_a_box_taller_than_the_screen_keeps_its_head(self):
+        # 2026-11-07: the file path of a long heredoc had scrolled off and was approved unseen
+        self.start("tall")
+        self.assertTrue(wait_for(lambda: self.prompt()["pending"]))
+        p = self.prompt()["prompt"]
+        self.assertEqual(p["detail"][0], "Bash command")
+        self.assertEqual(p["detail"][1], "cat > plugin/mctl-bridge/src/handoff.ts <<'EOF'")
+        self.assertEqual([l for l in p["detail"] if l.startswith("line-")], ["line-%02d" % n for n in range(70)])
+        self.assertFalse(p["truncated"])
+
+    def test_an_answered_prompt_in_the_scrollback_is_not_pending(self):
+        self.start("answered")
+        self.assertTrue(wait_for(lambda: "out-59" in run("show", self.d).stdout))
+        self.assertEqual(self.prompt(), {"pending": False, "prompt": None})
 
     def test_reading_a_prompt_never_answers_it(self):
         self.start("permission")

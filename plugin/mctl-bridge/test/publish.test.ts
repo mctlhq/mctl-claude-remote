@@ -277,6 +277,26 @@ describe("publish", () => {
     await refused(publish(cfg, gh, opts(seal("feat/y", base, ["src/a.txt", "src/s.txt"]))), "merge_commit");
   });
 
+  test("a Co-Authored-By trailer on any commit is refused before anything is pushed", async () => {
+    git(work, "checkout", "-q", "-B", "feat/y", base);
+    fs.writeFileSync(path.join(work, "src/a.txt"), "c\n");
+    git(work, "add", "-A");
+    git(work, "commit", "-qm", "feat: y\n\nAgent: claude\nco-authored-by: Someone <noreply@example.com>");
+    commit("src/a.txt", "d\n"); // a clean commit on top does not hide the earlier one
+    await refused(publish(cfg, gh, opts(seal("feat/y", base, ["src/a.txt"]))), "co_authored_by");
+    expect(remoteRefs()).not.toContain("feat/y");
+    expect(writes()).toEqual([]);
+  });
+
+  test("a commit that only mentions the trailer mid-line is not refused", async () => {
+    git(work, "checkout", "-q", "-B", "feat/y", base);
+    fs.writeFileSync(path.join(work, "src/a.txt"), "c\n");
+    git(work, "add", "-A");
+    git(work, "commit", "-qm", "fix: refuse the Co-Authored-By: trailer\n\nAgent: claude");
+    const r = await publish(cfg, gh, opts(seal("feat/y", base, ["src/a.txt"])));
+    expect((r as { ok: boolean }).ok).toBe(true);
+  });
+
   test("a directory link planted above a handoff file is refused", async () => {
     const h = handoff();
     const dir = path.join(tmp, "dlink");

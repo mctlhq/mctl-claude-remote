@@ -396,6 +396,12 @@ export async function publish(cfg: Config, gh: GitHub, o: PublishOpts): Promise<
       const range = `${m.base_sha}..${m.head_sha}`;
       const merges = git.must("rev-list", "--min-parents=2", range).split("\n").filter(Boolean);
       if (merges.length) throw new Refused("merge_commit", merges[0]!);
+      // Workspace rule: no Co-Authored-By trailer on any commit. A slot's harness reminder asks for
+      // one, so it is checked here on every commit of the range, not trusted to the slot.
+      // Any line counts, not only a parsed trailer block: a line in the body lands in main's history too.
+      for (const c of git.must("rev-list", range).split("\n").filter(Boolean)) {
+        if (/^\s*co-authored-by\s*:/im.test(git.must("log", "-1", "--format=%B", c))) throw new Refused("co_authored_by", c);
+      }
       const raw = parseRaw(git.must("diff", "--raw", "--no-abbrev", "--no-renames", "-z", m.base_sha, m.head_sha));
       if (raw.length === 0) throw new Refused("no_changes", m.head_sha);
       const real = raw.map((r) => r.path).sort();

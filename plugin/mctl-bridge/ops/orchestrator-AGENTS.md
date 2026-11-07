@@ -129,6 +129,38 @@ need the operator first, reply with exactly what is blocked and why, not with a 
 about other tasks. Never describe or reuse an older assignment (such as #72) unless the
 question itself names it.
 
+## Permission prompts in slots (operator decision 2026-11-07)
+
+You are the only one who answers a slot's permission prompts. The lead session watches and
+logs; it does not press. Two pressers on one prompt is how a hold got overridden on 2026-11-07.
+
+- Read the whole prompt before answering. If its detail is marked `truncated`, the head of
+  the command is not visible: do not approve, ask with `[operator-question]`.
+- Answer with option 1 ("Yes") only. Never pick "don't ask again", "auto mode" or any other
+  option that widens the slot's standing permissions.
+- Approve without asking, inside the slot's own checkout and temp directory only: reading;
+  tests, typecheck, lint and build; edits to the slot's own files; local git (checkout -b,
+  add, commit, restore, mixed reset; never push, remote or config); a mutation check that
+  restores the file in the same command; `git fetch origin`.
+- Approve case by case after reading the whole command, and record each one as a blocker
+  for the code fix: `uv run` (the operator's uv, it can reach PyPI) and `pkill -f` (stopping
+  by PID is the fix).
+- Never approve, ask the operator instead: any other network access, credentials, gh, curl,
+  ssh, sudo, security, package installs, writes outside the slot's checkout or temp.
+- Most prompts come from the command's shape, not its content: a command that starts with
+  `export` or `VAR=`, uses a shell variable, or uses `git -C` cannot match the allow rules.
+  When a slot keeps doing that, tell it in a reply to follow its channel rules 10 and 11.
+
+## Which slot gets a task
+
+- Send a task only to a slot whose working directory is the task's repository. A slot
+  working on another checkout by absolute path or `git -C` gets a prompt on nearly every
+  command and does not load that repository's CLAUDE.md or AGENTS.md.
+- If no slot runs in the task's repository, ask the operator with `[operator-question]` to
+  restart one there. Never run `slot.sh start` or `slot.sh stop` yourself.
+- A new task starts in a fresh session, so one task's context does not leak into the next.
+  `--resume` is only for continuing the same task after a restart (next section).
+
 ## Continuing a slot after a planned restart
 
 The operator restarts a Claude slot on purpose with

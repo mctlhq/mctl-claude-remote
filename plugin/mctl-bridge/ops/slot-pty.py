@@ -171,8 +171,12 @@ QUESTION = re.compile(r"^\s*(?:Do you want to|Would you like to|Allow)\b.*\?\s*$
 OPTION = re.compile(r"^\s*[❯>]?\s*(\d+)\.\s+(\S.*?)\s*$")
 FOOTER = re.compile(r"Enter to confirm|Esc to cancel|Press Enter to continue")
 
-def find_prompt(lines):
-    """The prompt or dialog the screen is waiting on, or None. `lines` is the visible screen.
+def find_prompt(lines, back=()):
+    """The prompt or dialog the screen is waiting on, or None. `lines` is the visible screen;
+    `back` is the scrollback above it. Only the visible screen decides whether a prompt is
+    waiting (an answered prompt can still sit in the scrollback). When the box is taller than
+    the screen, its head (the rule and the first lines of the command) has scrolled off: the
+    detail then continues upward into `back`, up to the rule, so the command is never cut.
 
     A permission prompt is a question line ('Do you want to ...?') with at least two numbered
     options below it; the text between the last solid rule above it and the question is the
@@ -191,12 +195,29 @@ def find_prompt(lines):
         i, opts = q
         j = i - 1
         while j >= 0 and not SOLID.search(lines[j]): j -= 1
-        body = [l.strip() for l in lines[max(j, 0) + (1 if j >= 0 else 0):i] if l.strip() and not DASHED.match(l)]
-        return {"kind": "permission", "question": lines[i].strip(), "options": opts, "detail": body}
+        above = []
+        if j < 0:
+            back = list(back)
+            k = len(back) - 1
+            while k >= 0 and not SOLID.search(back[k]): k -= 1
+            above = back[k + 1:] if k >= 0 else []  # no rule in the scrollback either: not the box's head
+        body = [l.strip() for l in above + lines[max(j, 0) + (1 if j >= 0 else 0):i] if l.strip() and not DASHED.match(l)]
+        return {"kind": "permission", "question": lines[i].strip(), "options": opts, "detail": body,
+                "truncated": j < 0 and not above}
     if any(FOOTER.search(l) for l in lines):
         shown = [l.strip() for l in lines if l.strip() and not DASHED.match(l)]
         return {"kind": "dialog", "question": None, "options": [], "detail": shown[-15:]}
     return None
+
+def read_prompt(d):
+    """find_prompt over the live screen, with the scrollback for a box taller than the screen.
+    Two reads ('V', then 'R': both answered by hosts started before this change). The
+    scrollback is used only if the full read still ends with the screen just read; if the
+    screen moved in between, the detail stays visible-only and says truncated."""
+    vis = query(d, b"V").decode("utf-8", "replace").split("\n")
+    full = query(d, b"R").decode("utf-8", "replace").split("\n")
+    back = full[:-len(vis)] if len(full) > len(vis) and full[-len(vis):] == vis else []
+    return find_prompt(vis, back)
 
 def serve(d, argv):
     log = os.path.join(d, "screen.log")
@@ -316,11 +337,11 @@ def main():
         n = int(sys.argv[3]) if len(sys.argv) > 3 else 20
         print("\n".join(lines[-n:]))
     elif cmd == "prompt":
-        p = find_prompt(query(sys.argv[2], b"V").decode("utf-8", "replace").split("\n"))
+        p = read_prompt(sys.argv[2])
         print(json.dumps({"pending": p is not None, "prompt": p}, ensure_ascii=False))
     elif cmd == "state":
         st = json.loads(query(sys.argv[2], b"A"))
-        p = find_prompt(query(sys.argv[2], b"V").decode("utf-8", "replace").split("\n"))
+        p = read_prompt(sys.argv[2])
         # What the adapter reports (heartbeat, busy) only says its own process is alive. Progress
         # of the Claude session is: output on the screen (idle_s) or a prompt waiting for a decision.
         print(json.dumps({**st, "prompt_pending": p is not None, "prompt": p}, ensure_ascii=False))
