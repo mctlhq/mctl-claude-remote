@@ -37,6 +37,7 @@ type Fake = {
   dropPull: boolean;
   mergeReply: { status: number; body: any };
   tokenSeen: string[];
+  app: any;
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -54,7 +55,7 @@ function handle(req: Request, url: URL, body: any): Response {
     return J({ token: TOKEN }, 201);
   }
   if (key === "DELETE /installation/token") return new Response(null, { status: 204 });
-  if (key === "GET /app") return J({ slug: "mctl-codex", permissions: { contents: "write" } });
+  if (key === "GET /app") return J(fake.app);
   fake.tokenSeen.push(auth);
   if (key === "GET /installation/repositories") return J({ total_count: 1, repositories: [{ full_name: REPO }] });
   if (key === "GET /repos/mctlhq/r/pulls") return J(fake.pulls);
@@ -102,7 +103,7 @@ const HEAD = "a".repeat(40);
 
 beforeEach(() => {
   fake = {
-    calls: [], pulls: [], tokenSeen: [], fail: {}, dropMerge: false, dropPull: false,
+    calls: [], pulls: [], tokenSeen: [], app: { slug: "mctl-codex", permissions: { contents: "write" } }, fail: {}, dropMerge: false, dropPull: false,
     pr: { state: "open", draft: false, node_id: "N1", head: { sha: HEAD }, base: { ref: "main" }, mergeable: true, mergeable_state: "clean" },
     reviews: [{ user: { login: "claude[bot]" }, state: "APPROVED", commit_id: HEAD }],
     runs: [{ id: 10, name: "validate", status: "completed", conclusion: "success" }, { id: 11, name: "docker", status: "completed", conclusion: "skipped" }],
@@ -790,6 +791,11 @@ describe("publish --update-from", () => {
     const y = next();
     fake.pulls = [own(first, { user: {} })];
     expect(await publish(cfg, gh, { ...opts(y), updateFrom: first }).catch((e) => e)).toBeInstanceOf(Unreadable);
+    fake.pulls = [own(first)];
+    for (const app of [{}, { slug: "" }, { slug: 7 }]) {
+      fake.app = app;
+      expect(await publish(cfg, gh, { ...opts(y), updateFrom: first }).catch((e) => e)).toBeInstanceOf(Unreadable);
+    }
     expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
   });
 

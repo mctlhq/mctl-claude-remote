@@ -57,6 +57,7 @@ M=[
  ('publish update resumed run takes any PR head', PB, ' && !(present === m.head_sha && prHead === m.head_sha)) throw', ') throw', 1),
  ('publish update resumed run accepts a moved PR', PB, 'if (prHead !== from && !(present === m.head_sha && prHead === m.head_sha)) throw', 'if (prHead !== from && present !== m.head_sha) throw', 1),
  ('publish update resumed run skips the ancestry check', PB, 'if (git.run("merge-base", "--is-ancestor", from, m.head_sha).code !== 0)', 'if (present !== m.head_sha && git.run("merge-base", "--is-ancestor", from, m.head_sha).code !== 0)', 1),
+ ('publish update unreadable slug is permission', PB, 'if (typeof slug !== "string" || slug === "") throw new Unreadable', 'if (false) throw new Unreadable', 1),
  ('publish update unreadable author is permission', PB, 'if (typeof author !== "string") throw new Unreadable', 'if (false) throw new Unreadable', 1),
  ("publish body follows a symlink", PB, 'readUntrusted(need(a, "--body-file"), MAX_BODY_BYTES).toString("utf8")', 'fs.readFileSync(need(a, "--body-file"), "utf8")', 1),
  ("publish body has no limit", PB, 'readUntrusted(need(a, "--body-file"), MAX_BODY_BYTES)', 'readUntrusted(need(a, "--body-file"), MAX_BUNDLE_BYTES)', 1),
