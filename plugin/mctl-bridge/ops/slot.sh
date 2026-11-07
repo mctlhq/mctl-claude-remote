@@ -33,7 +33,10 @@
 set -euo pipefail
 H=${MCTL_BRIDGE_HOME:-$HOME/mctl-bridge}
 MAX=${MCTL_BRIDGE_MAX_SLOTS:-2}
-MODEL=${MCTL_BRIDGE_SLOT_MODEL:-haiku}
+# Sonnet by default: slots do real code work. Haiku was the default for the protocol-only end-to-end
+# run; on 2026-11-07 a restart without MCTL_BRIDGE_SLOT_MODEL quietly put both slots back on it.
+# The model is printed at start, so a restart shows which one it got.
+MODEL=${MCTL_BRIDGE_SLOT_MODEL:-sonnet}
 cmd=${1:-}; shift || true
 
 # A JSON string literal for $1 (escapes quotes, backslashes, control characters).
@@ -112,6 +115,22 @@ case $cmd in
     # Paths are data: every value is JSON-encoded for the JSON files and zsh-quoted
     # (${(qq)...}: single quotes, safe for sh too) where a shell reads it.
     bun=${BUN:-$HOME/.bun/bin/bun}; port=${MCTL_BRIDGE_PORT:-6390}
+    # Dependencies for the typecheck channel rule 14 promises. The launcher installs them here, as
+    # the slot user, from the committed lockfile only: --frozen-lockfile refuses a lockfile that
+    # does not match package.json, and --ignore-scripts runs no package's install scripts. The slot
+    # itself still cannot install anything. A failure is reported and does not stop the start:
+    # tests that need no packages still run, and the typecheck then fails visibly.
+    # MCTL_BRIDGE_SLOT_DEPS=0 skips it.
+    if [[ ${MCTL_BRIDGE_SLOT_DEPS:-1} != 0 ]]; then
+      locks=(${(f)"$(cd / && as_ find "${repo:A}" -maxdepth 3 -name bun.lock -not -path '*/node_modules/*' 2>/dev/null || true)"})
+      for lock in $locks; do
+        if out=$(cd / && as_ sh -c 'cd "$1" && exec "$2" install --frozen-lockfile --ignore-scripts' sh "${lock:h}" "$bun" 2>&1); then
+          echo "deps: installed in ${lock:h}"
+        else
+          echo "deps: bun install failed in ${lock:h}; the slot's typecheck will fail: ${out[-300,-1]}" >&2
+        fi
+      done
+    fi
     put $d/mcp.json 600 <<JSON
 {"mcpServers":{"mctl-bridge":{"command":$(json "$bun"),"args":["run","--silent","--no-env-file",$(json "--config=$H/plugin/bunfig.toml"),$(json "$H/plugin/src/channel.ts")],
  "env":{"MCTL_BRIDGE_SLOT":$(json "$s"),"MCTL_BRIDGE_TRANSPORT":"rpc","MCTL_BRIDGE_VALKEY_URL":$(json "redis://bridge_slot_$s@127.0.0.1:$port/0"),"MCTL_BRIDGE_VALKEY_PASSWORD_FILE":$(json "$d/slot.pw")}}}}
@@ -148,8 +167,17 @@ JSON
     # Rebasing onto origin/main is exact too: a general Bash(git rebase:*) would allow --exec/-x,
     # which runs any command. git merge stays out: mctl-publish refuses merge commits anyway.
     # GIT_EDITOR=true keeps git rebase --continue from opening an editor in a terminal nobody sees.
-    allow='"Read","Edit","Write","Glob","Grep","Bash(git status:*)","Bash(git diff:*)","Bash(git log:*)","Bash(git show:*)","Bash(git branch:*)","Bash(git rev-parse:*)","Bash(git ls-files:*)","Bash(git grep:*)","Bash(git blame:*)","Bash(git fetch origin:*)","Bash(git checkout:*)","Bash(git switch:*)","Bash(git add:*)","Bash(git commit:*)","Bash(git stash:*)","Bash(git restore:*)","Bash(git worktree:*)","Bash(ls:*)","Bash(pwd)","Bash(head:*)","Bash(tail:*)","Bash(wc:*)","Bash(cut:*)","Bash(python3 -m unittest:*)","Bash(python3 -m py_compile:*)","Bash(python3 -I -m unittest:*)","Bash(sh -n:*)","Bash(bash -n:*)","Bash(zsh -n:*)","Bash(shellcheck:*)","Bash(bun test:*)","Bash(bun run typecheck)","Bash(bun run --cwd plugin/mctl-bridge typecheck)","Bash(go build:*)","Bash(go test:*)","Bash(go vet:*)","Bash(gofmt -l:*)","Bash(gofmt -d:*)","Bash(git rebase origin/main)","Bash(git rebase --continue)","Bash(git rebase --abort)"'
-    deny='"Bash(git push:*)","Bash(git remote:*)","Bash(git config:*)","Bash(git credential:*)","Bash(gh:*)","Bash(curl:*)","Bash(wget:*)","Bash(ssh:*)","Bash(scp:*)","Bash(sudo:*)","Bash(security:*)","Bash(rm -rf:*)","Bash(rm -fr:*)","Bash(rm -r -f:*)","Bash(rm -f -r:*)","Bash(open:*)","Bash(go *-exec*)","Bash(go *-toolexec*)","Bash(go *-vettool*)","Bash(*.ssh*)","Bash(*.config/gh*)","Bash(*.aws*)","Bash(*.git-credentials*)","Bash(*.pw*)","Bash(*keychain*)","Read(~/.ssh/**)","Read(~/.config/gh/**)","Read(~/.aws/**)","Read(**/*.pw)"'
+    # date only reads. ps is allowed in one exact form, the one channel rule 15 gives, and every
+    # ps command containing an e or E is denied: -e, -E and the BSD-style e print the environment of
+    # the caller's own processes, which in the trusted experiment are the operator's. The allowed
+    # form has no e in it (lstart, not etime), so the deny cannot catch it.
+    # kill is allowed only behind the user boundary, where the kernel limits it to the slot user's
+    # own processes; in the trusted experiment the slot runs as the operator, so kill still prompts.
+    # pkill and killall match by name or pattern and can hit a process the slot did not start, so
+    # they are denied in both modes (channel rule 13).
+    allow='"Read","Edit","Write","Glob","Grep","Bash(git status:*)","Bash(git diff:*)","Bash(git log:*)","Bash(git show:*)","Bash(git branch:*)","Bash(git rev-parse:*)","Bash(git ls-files:*)","Bash(git grep:*)","Bash(git blame:*)","Bash(git fetch origin:*)","Bash(git checkout:*)","Bash(git switch:*)","Bash(git add:*)","Bash(git commit:*)","Bash(git stash:*)","Bash(git restore:*)","Bash(git worktree:*)","Bash(ls:*)","Bash(pwd)","Bash(head:*)","Bash(tail:*)","Bash(wc:*)","Bash(cut:*)","Bash(python3 -m unittest:*)","Bash(python3 -m py_compile:*)","Bash(python3 -I -m unittest:*)","Bash(sh -n:*)","Bash(bash -n:*)","Bash(zsh -n:*)","Bash(shellcheck:*)","Bash(bun test:*)","Bash(bun run typecheck)","Bash(bun run --cwd plugin/mctl-bridge typecheck)","Bash(go build:*)","Bash(go test:*)","Bash(go vet:*)","Bash(gofmt -l:*)","Bash(gofmt -d:*)","Bash(git rebase origin/main)","Bash(git rebase --continue)","Bash(git rebase --abort)","Bash(ps -o pid,ppid,stat,lstart,command -p:*)","Bash(date)","Bash(date -u)"'
+    deny='"Bash(git push:*)","Bash(git remote:*)","Bash(git config:*)","Bash(git credential:*)","Bash(gh:*)","Bash(curl:*)","Bash(wget:*)","Bash(ssh:*)","Bash(scp:*)","Bash(sudo:*)","Bash(security:*)","Bash(rm -rf:*)","Bash(rm -fr:*)","Bash(rm -r -f:*)","Bash(rm -f -r:*)","Bash(open:*)","Bash(go *-exec*)","Bash(go *-toolexec*)","Bash(go *-vettool*)","Bash(*.ssh*)","Bash(*.config/gh*)","Bash(*.aws*)","Bash(*.git-credentials*)","Bash(*.pw*)","Bash(*keychain*)","Read(~/.ssh/**)","Read(~/.config/gh/**)","Read(~/.aws/**)","Read(**/*.pw)","Bash(pkill:*)","Bash(killall:*)","Bash(ps *e*)","Bash(ps *E*)"'
+    if (( BOUNDARY )); then allow+=',"Bash(kill:*)"'; fi
     put $d/settings.json 600 <<JSON
 {"permissions":{"allow":[$allow],"deny":[$deny]},
  "env":{"GIT_EDITOR":"true"},
@@ -183,7 +211,7 @@ RUN
     # cd to the slot's home first: the host starts in the operator's cwd, which the slot user
     # may not be allowed to enter.
     ( cd /; as_ $PY -I $PTY start $d $d/run.sh )
-    echo "started slot $s in ${repo:A} (pty session in $d); accept the channels prompt with: slot.sh keys $s '\\r'"
+    echo "started slot $s in ${repo:A} on model $MODEL (pty session in $d); accept the channels prompt with: slot.sh keys $s '\\r'"
     ;;
   stop)
     s=${1:?slot}; slotctx $s
