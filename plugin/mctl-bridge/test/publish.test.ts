@@ -694,6 +694,58 @@ describe("publish --update-from", () => {
     expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
   });
 
+  test("a run resumed after its push still checks ancestry and the PR head", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first)];
+    await publish(cfg, gh, { ...opts(y), updateFrom: first });
+    // The push landed but the ledger never reached "done": the next run resumes.
+    const dir = path.join(cfg.home, "publish/ledger");
+    const resume = () => {
+      for (const f of fs.readdirSync(dir)) {
+        const file = path.join(dir, f);
+        const l = JSON.parse(fs.readFileSync(file, "utf8"));
+        if (l.head === y.head) fs.writeFileSync(file, JSON.stringify({ ...l, state: "intent" }));
+      }
+    };
+    resume();
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: "1".repeat(40) }), "not_fast_forward");
+    resume();
+    fake.pulls = [own(base)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "branch_moved");
+    for (const prHead of [y.head, first]) {
+      resume();
+      fake.pulls = [own(prHead)];
+      expect(await publish(cfg, gh, { ...opts(y), updateFrom: first })).toMatchObject({ ok: true, pr: 7, updated_from: first });
+    }
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${y.head}`);
+  });
+
+  test("no refs from the bundle stay behind after an update", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first)];
+    await publish(cfg, gh, { ...opts(y), updateFrom: first });
+    expect(git(path.join(cfg.home, "publish/cache/mctlhq__r.git"), "for-each-ref", "refs/publish/")).toBe("");
+  });
+
+  test("a refused push is push_refused, and an unreadable branch after it is outcome unknown", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first)];
+    const hook = path.join(remote, "hooks/pre-receive");
+    fs.writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "push_refused");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+    // The hook moves the repository away and then refuses: the read-back cannot happen.
+    fs.writeFileSync(hook, `#!/bin/sh\nmv "${remote}" "${remote}.gone"\nexit 1\n`, { mode: 0o755 });
+    const err = await publish(cfg, gh, { ...opts(y), updateFrom: first }).catch((e) => e);
+    fs.renameSync(`${remote}.gone`, remote);
+    expect(err).toBeInstanceOf(OutcomeUnknown);
+    fs.rmSync(hook);
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
   test("only the App's own PR from this repository, on main, is updated", async () => {
     const { first } = await published();
     const y = next();

@@ -473,11 +473,11 @@ export async function publish(cfg: Config, gh: GitHub, o: PublishOpts): Promise<
 /** The --update-from half of publish: everything about the commits is already checked. */
 async function update(gh: GitHub, git: Git, url: string, o: PublishOpts, m: Manifest, present: string | null, ledger: string): Promise<Record<string, unknown>> {
   const from = o.updateFrom!;
-  if (present !== m.head_sha) {
-    if (present === null) throw new Refused("no_branch", `${m.branch} does not exist: there is nothing to update`);
-    if (present !== from) throw new Refused("branch_moved", `${m.branch} is at ${present}, not ${from}`);
-    if (git.run("merge-base", "--is-ancestor", from, m.head_sha).code !== 0) throw new Refused("not_fast_forward", `${m.head_sha} does not descend from ${from}`);
-  }
+  // `present === m.head_sha` is a run resumed after its push: the checks still run, so the
+  // ledger never records an updated_from the new head does not descend from.
+  if (present === null) throw new Refused("no_branch", `${m.branch} does not exist: there is nothing to update`);
+  if (present !== from && present !== m.head_sha) throw new Refused("branch_moved", `${m.branch} is at ${present}, not ${from}`);
+  if (git.run("merge-base", "--is-ancestor", from, m.head_sha).code !== 0) throw new Refused("not_fast_forward", `${m.head_sha} does not descend from ${from}`);
   // The PR is looked up by branch, not by head: before the push its head is the old one.
   const [owner] = o.repo.split("/");
   const open = await gh.list(`/repos/${o.repo}/pulls?state=open&head=${owner}:${encodeURIComponent(m.branch)}`);
@@ -492,7 +492,9 @@ async function update(gh: GitHub, git: Git, url: string, o: PublishOpts, m: Mani
   if (author !== `${slug}[bot]` || pr?.user?.type !== "Bot") throw new Refused("not_own_pr", `PR #${pr.number} was opened by ${author}`);
   if (pr?.head?.repo?.full_name !== o.repo) throw new Refused("not_own_pr", `PR #${pr.number} comes from another repository`);
   if (pr?.base?.ref !== "main") throw new Refused("wrong_base", `PR #${pr.number} targets ${String(pr?.base?.ref)}`);
-  if (present !== m.head_sha && pr?.head?.sha !== from) throw new Refused("branch_moved", `PR #${pr.number} is at ${String(pr?.head?.sha)}, not ${from}`);
+  // The PR listing may lag the branch: after a resumed push it shows either head.
+  const prHead = pr?.head?.sha;
+  if (prHead !== from && !(present === m.head_sha && prHead === m.head_sha)) throw new Refused("branch_moved", `PR #${pr.number} is at ${String(pr?.head?.sha)}, not ${from}`);
   if (present !== m.head_sha) {
     // A plain push: the server takes only a fast-forward, so a branch moved since the read above fails it.
     const pushed = git.run("push", "-q", url, `${m.head_sha}:refs/heads/${m.branch}`);
