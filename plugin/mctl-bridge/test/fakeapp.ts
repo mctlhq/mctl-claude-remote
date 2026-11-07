@@ -47,6 +47,8 @@ export class FakeApp {
   replyText: string | null = null;
   /** activeFlags of a busy thread. */
   activeFlags: string[] = [];
+  /** The status type reported while no turn runs: idle, or e.g. systemError after a failed turn. */
+  restingStatus = "idle";
   private server: Server<unknown> | null = null;
   private readonly sockets = new Set<ServerWebSocket<unknown>>();
 
@@ -142,7 +144,7 @@ export class FakeApp {
           return;
         }
         if (this.brokenStatus) return reply({ thread: { id: this.threadId } });
-        return reply({ thread: { id: this.threadId, status: this.active ? { type: "active", activeFlags: this.activeFlags } : { type: "idle" }, turns: [] } });
+        return reply({ thread: { id: this.threadId, status: this.active ? { type: "active", activeFlags: this.activeFlags } : { type: this.restingStatus }, turns: [] } });
       case "thread/turns/list": {
         const page = this.reads++;
         this.cursors.push(m.params.cursor ?? null);

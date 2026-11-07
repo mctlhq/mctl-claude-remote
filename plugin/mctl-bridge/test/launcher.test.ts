@@ -83,6 +83,14 @@ describe.skipIf(!usable)("launcher scripts", () => {
     for (const r of ["Bash(rm -fr:*)", "Bash(rm -r -f:*)"]) expect(deny).toContain(r);
     // an allow rule must never cover a denied command family by prefix
     for (const a of allow) for (const bad of ["git push", "gh ", "curl", "wget", "ssh", "sudo", "security"]) expect(a.startsWith(`Bash(${bad}`)).toBe(false);
+    // build, typecheck and Go tests run without a prompt (operator decision 2026-11-07)
+    for (const r of ["Bash(go build:*)", "Bash(go test:*)", "Bash(go vet:*)", "Bash(bun run typecheck)", "Bash(bun run --cwd plugin/mctl-bridge typecheck)", "Bash(git rebase origin/main)", "Bash(git rebase --continue)"]) expect(allow).toContain(r);
+    // ...but nothing that runs a program of the command line's choosing: no general bun run, go run,
+    // go generate, go mod or go get, and no rebase form that would take --exec
+    for (const bad of ["Bash(bun run:", "Bash(go run", "Bash(go generate", "Bash(go mod", "Bash(go get", "Bash(go install", "Bash(git rebase:", "Bash(git merge", "Bash(gofmt -w", "Bash(gofmt:"]) expect(allow.some((a) => a.startsWith(bad))).toBe(false);
+    for (const r of ["Bash(go *-exec*)", "Bash(go *-toolexec*)", "Bash(go *-vettool*)"]) expect(deny).toContain(r);
+    // a rebase that stops on a conflict must not open an editor in a terminal nobody sees
+    expect(settings.env).toEqual({ GIT_EDITOR: "true" });
 
     expect(spawnSync("zsh", ["-n", path.join(d, "run.sh")]).status).toBe(0);
     const run = spawnSync(path.join(d, "run.sh"), [], { env: t.env, cwd: t.root, encoding: "utf8" });
@@ -379,6 +387,19 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(INSTRUCTIONS).toContain("call report_result with failed and say so");
     expect(INSTRUCTIONS).toContain("ends with the trailer Agent: claude. Never add Co-Authored-By");
     expect(INSTRUCTIONS).toContain("never with pkill -f");
+    // every command rule 14 promises runs without a prompt is matched by slot.sh's allow list
+    const sh = fs.readFileSync(path.join(import.meta.dir, "..", "ops", "slot.sh"), "utf8");
+    const allowLine = sh.match(/^\s*allow='(.*)'$/m);
+    expect(allowLine).not.toBeNull();
+    const allowed = [...allowLine![1]!.matchAll(/"Bash\(([^"]*)\)"/g)].map((m) => m[1]!);
+    const matches = (cmd: string): boolean => allowed.some((r) => (r.endsWith(":*") ? cmd.startsWith(r.slice(0, -2)) : cmd === r));
+    const promised = ["go build ./...", "go test ./...", "go vet ./...", "bun run --cwd plugin/mctl-bridge typecheck", "git fetch origin", "git rebase origin/main", "git add", "git rebase --continue"];
+    for (const cmd of promised) {
+      expect(INSTRUCTIONS).toContain(cmd);
+      expect([cmd, matches(cmd)]).toEqual([cmd, true]);
+    }
+    expect(INSTRUCTIONS).toContain("Never git merge: mctl-publish refuses merge commits.");
+    expect(matches("git merge origin/main")).toBe(false);
     // rules are numbered without gaps, so a later edit cannot silently drop one
     const nums = [...INSTRUCTIONS.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
     expect(nums).toEqual(nums.map((_, i) => i + 1));

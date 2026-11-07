@@ -73,6 +73,10 @@ export const INSTRUCTIONS = [
   "   reminder asks for it; mctl-publish refuses a commit that carries it.",
   "13. Stop a process you started by the PID you captured when you started it, never with pkill -f",
   "   or killall. Do not install packages or reach the network; uv, pip, npm and bun install prompt.",
+  "14. These run without a prompt when typed exactly so: go build ./..., go test ./..., go vet ./...,",
+  "   bun run --cwd plugin/mctl-bridge typecheck. To bring your branch up to date: git fetch origin,",
+  "   then git rebase origin/main; on a conflict, fix the files with Edit, git add them and run",
+  "   git rebase --continue. Never git merge: mctl-publish refuses merge commits.",
 ].join("\n");
 
 const TOOLS = [

@@ -18,7 +18,7 @@ partition says. test/test_shards.py proves the partition is exact.
 """
 import subprocess, sys, shutil
 LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'; GUARD='ops/codex-remote-guard.sh'; WAKE='ops/wake-state.sh'; UPD='ops/bridge-updater.sh'; INSTALL='ops/install.sh'; PTY='ops/slot-pty.py'; WATCH='ops/watch.sh'
-CX='src/codexctl.ts'; PB='src/publish.ts'; RC='src/reconcile.ts'
+CX='src/codexctl.ts'; PB='src/publish.ts'; RC='src/reconcile.ts'; AP='src/appserver.ts'
 M=[
  ("reconcile treats unreadable as no prompt", RC, 'this.note("reconcile slot unreadable", {', 'this.waiting.delete(slot); this.note("reconcile slot unreadable", {', 1),
  ("reconcile logs an unreadable slot every pass", RC, 'if (!this.unreadable.has(slot)) {', 'if (true) {', 1),
@@ -95,10 +95,11 @@ M=[
  ("codex questions call a full window clear", CX, "scanned_turns: turns.length, older_unknown: more };", "scanned_turns: turns.length, older_unknown: false };", 1),
  ("codex wake counts as the operator answering", CX, 'return m.role === "user" && !(m.client_id?.startsWith("w-") || m.client_id?.startsWith("lead-"));', 'return m.role === "user";', 1),
  ("codex marker matches anywhere", CX, 'm.text.split("\\n").some((l) => l.startsWith(QUESTION_MARKER))', 'm.text.includes(QUESTION_MARKER)', 1),
- ("codex say writes to a busy thread", CX, 'if (st.status !== "idle") return { ok: false, code: "thread_not_idle", detail: [st.status, ...st.flags].join(" ") };', '', 1),
+ ("codex say writes to a busy thread", CX, 'if (!acceptsTurn(st.status)) return { ok: false, code: "thread_not_idle", detail: [st.status, ...st.flags].join(" ") };', '', 1),
  ("codex say sends without a record", CX, 'return { ok: false, code: "send_log_unwritable", detail: String(err) };', '', 1),
  ("codex say sends a sticky override", CX, "clientUserMessageId: id,\n", "clientUserMessageId: id,\n          model: 'x',\n", 1),
- ("codex say drops the mark", CX, "body.startsWith(LEAD_PREFIX) ? body : LEAD_PREFIX + body", "body", 1),
+ ("codex say drops the mark", CX, "body.startsWith(prefix) ? body : prefix + body", "body", 1),
+ ("codex say ignores the configured prefix", CX, "const prefix = this.cfg.prefix ?? LEAD_PREFIX;", "const prefix = LEAD_PREFIX;", 1),
  ("codex say retries a lost start", CX, "        turn = await this.settle(id);\n", "        turn = await this.settle(id);\n        if (turn === null) { const c2 = await this.session(); const r2 = await c2.request('turn/start', { threadId: this.cfg.threadId, clientUserMessageId: id, input: [{ type: 'text', text: full }] }); turn = r2.turn.id; c2.close(); }\n", 1),
  ("codex reply failure reads as a failed send", CX, "        return { ...done, reply_error: err instanceof Error ? err.message : String(err) };", "        throw err;", 1),
  ("codex lost send log reads as a failed send", CX, "    } catch (err) {\n      return String(err);\n    }", "    } catch (err) {\n      throw err;\n    }", 1),
@@ -172,7 +173,17 @@ M=[
  ("waker matches the marker text, not the client id", WK, "it?.type === \"userMessage\" && it?.clientId === wakeId", "it?.type === \"userMessage\" && JSON.stringify(it).includes(`[wake:${wakeId}]`)", 1),
  ("waker sends no clientUserMessageId", WK, "          clientUserMessageId: wakeId,\n", "", 1),
  ("waker wakes a busy thread", WK, "    if (!(await this.threadIdle())) return null;\n", "", 1),
- ("waker takes an unreadable status as idle", WK, "      return type === \"idle\";\n", "      return type === \"idle\" || type === undefined;\n", 1),
+ ("waker takes an unreadable status as idle", WK, "      return acceptsTurn(type);\n", "      return acceptsTurn(type) || type === undefined;\n", 1),
+ ("a thread in systemError takes no turn", AP, 'return statusType === "idle" || statusType === "systemError";', 'return statusType === "idle";', 1),
+ ("any thread status takes a turn", AP, 'return statusType === "idle" || statusType === "systemError";', 'return statusType !== "active";', 1),
+ ("reconcile alerts the same prompt again", RC, 'if (w.alert === "sent" || w.alert === "unknown") return;', 'if (w.alert === "unknown") return;', 1),
+ ("reconcile retries an unknown alert", RC, 'if (w.alert === "sent" || w.alert === "unknown") return;', 'if (w.alert === "sent") return;', 1),
+ ("reconcile alerts before the threshold", RC, 'if (now - w.since < after) return;', '', 1),
+ ("reconcile alerts with alerts off", RC, 'if (!this.cfg.alert || after <= 0) return;', 'if (!this.cfg.alert) return;', 1),
+ ("reconcile logs every unsent alert", RC, 'if (w.lastAlertDetail !== r.detail) this.note', 'this.note', 1),
+ ("reconcile alerts on an unreadable slot", RC, '        this.note("reconcile slot unreadable"', '        { const w = this.waiting.get(slot); if (w) await this.maybeAlert(slot, w, this.now()); }\n        this.note("reconcile slot unreadable"', 1),
+ ("reconcile alert carries the prompt", RC, 'const a: PromptAlert = { slot, hash: w.hash,', 'const a: PromptAlert = { question: "Proceed?", slot, hash: w.hash,', 1),
+ ("waker alert takes unknown as unsent", WK, 'if (r.code === "outcome_unknown") return { outcome: "unknown", detail: r.detail };', '', 1),
  ("waker takes a failed status read as idle", WK, "      log(\"thread status unreadable, no wake this pass\", { error: String(err) });\n      return false;\n", "      return true;\n", 1),
  ("waker accepts summary items", WK, "          if (t?.itemsView !== undefined && t.itemsView !== \"full\") throw", "          if (false) throw", 1),
  ("waker stops at the first page", WK, "        if (older || r.nextCursor === null", "        if (true || r.nextCursor === null", 1),
@@ -204,6 +215,9 @@ M=[
  ("cli ignores --file", CLI, "  if (file !== undefined) {\n    try {", "  if (false) {\n    try {", 1),
  ("cli accepts several text sources", CLI, "if (given !== 1) throw", "if (given === 0) throw", 1),
  ("cli resolve reason ignores stdin", CLI, 'return result(await b.resolve(id, values.as, readText(values, "reason"),', 'return result(await b.resolve(id, values.as, values.reason ?? "",', 1),
+ ("slot.sh allows any git rebase", SLOT, '"Bash(git rebase origin/main)"', '"Bash(git rebase:*)"', 1),
+ ("slot.sh drops the go -toolexec deny", SLOT, '"Bash(go *-toolexec*)",', '', 1),
+ ("slot.sh lets rebase open an editor", SLOT, ' "env":{"GIT_EDITOR":"true"},', '', 1),
  ("slot.sh json not escaped", SLOT, "sys.stdout.write(json.dumps(sys.argv[1]))", "sys.stdout.write('\"' + sys.argv[1] + '\"')", 1),
  ("slot.sh hook path unquoted", SLOT, "${(qq)H}/plugin/hooks/state.py", "$H/plugin/hooks/state.py", 1),
  ("slot.sh run.sh cd unquoted", SLOT, "cd ${(qq)repo:A}", 'cd "${repo:A}"', 1),
