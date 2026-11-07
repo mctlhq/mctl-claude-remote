@@ -481,6 +481,54 @@ export async function ready(cfg: Config, gh: GitHub, repo: string, pr: number, h
   return { ok: true, pr, head };
 }
 
+/**
+ * The checks the repository itself demands of main. They live in two separate places: a
+ * ruleset (`/rules/branches/main`) or classic protection (`/branches/main`), and a repository
+ * may use either. A shape this code does not recognise is a failed read, never "no checks".
+ */
+export async function requiredChecks(gh: GitHub, repo: string): Promise<Set<string>> {
+  const out = new Set<string>();
+  const add = (context: unknown) => {
+    if (typeof context !== "string" || context === "") throw new Unreadable("a required check has no name");
+    out.add(context);
+  };
+  for (const rule of await gh.list(`/repos/${repo}/rules/branches/main`)) {
+    if (rule?.type !== "required_status_checks") continue;
+    const list = rule?.parameters?.required_status_checks;
+    if (!Array.isArray(list)) throw new Unreadable("a required_status_checks rule has no list");
+    for (const c of list) add(c?.context);
+  }
+  const branch = await gh.read(`/repos/${repo}/branches/main`);
+  if (branch?.protected === false) return out;
+  if (branch?.protected !== true) throw new Unreadable("the branch does not say whether it is protected");
+  // A ruleset alone also reads as protected, with classic protection disabled or enforcing nothing.
+  const enabled = branch?.protection?.enabled;
+  if (enabled === false) return out;
+  if (enabled !== true) throw new Unreadable("the branch does not say whether protection is enabled");
+  const classic = branch?.protection?.required_status_checks;
+  if (typeof classic?.enforcement_level !== "string") throw new Unreadable("classic protection has no enforcement level");
+  if (classic.enforcement_level === "off") return out;
+  if (!Array.isArray(classic.contexts)) throw new Unreadable("classic protection has no list of checks");
+  for (const c of classic.contexts) add(c);
+  return out;
+}
+
+/**
+ * Drops a cancelled run that a newer run of the same check replaced: a new push or a repeated
+ * trigger cancels the run in progress, and that says nothing about the head. Only a cancelled
+ * run goes. A failure stays a failure even under a newer success, because two workflows may
+ * give their jobs one name, and the newer run is then checked like any other.
+ */
+export function withoutSuperseded(runs: any[]): any[] {
+  const key = (c: any) => `${String(c?.app?.id)}/${String(c?.name)}`;
+  const newest = new Map<string, number>();
+  for (const c of runs) {
+    if (typeof c?.id !== "number") throw new Unreadable("a check run has no id");
+    newest.set(key(c), Math.max(newest.get(key(c)) ?? 0, c.id));
+  }
+  return runs.filter((c) => !(c.conclusion === "cancelled" && c.id < newest.get(key(c))!));
+}
+
 /** Everything `merge` demands of the current head. Throws on the first thing that fails. */
 export async function gate(gh: GitHub, repo: string, pr: number, head: string): Promise<void> {
   const p = await readPr(gh, repo, pr, head);
@@ -499,7 +547,7 @@ export async function gate(gh: GitHub, repo: string, pr: number, head: string): 
   const claude = latest.get(REVIEW_BOT);
   if (!claude || claude.state !== "APPROVED" || claude.commit_id !== head) throw new Refused("not_approved", `${REVIEW_BOT} has not approved ${head}`);
 
-  const runs = await gh.list(`/repos/${repo}/commits/${head}/check-runs`, "check_runs");
+  const runs = withoutSuperseded(await gh.list(`/repos/${repo}/commits/${head}/check-runs`, "check_runs"));
   for (const c of runs) {
     if (c?.status !== "completed") throw new Refused("checks_pending", String(c?.name));
     if (!PASSING.has(c?.conclusion)) throw new Refused("checks_failed", `${c?.name}: ${c?.conclusion}`);
@@ -508,8 +556,12 @@ export async function gate(gh: GitHub, repo: string, pr: number, head: string): 
   if (!Array.isArray(combined?.statuses)) throw new Unreadable("commit statuses are not a list");
   if (combined.statuses.length !== combined.total_count) throw new Unreadable(`read ${combined.statuses.length} commit statuses of ${String(combined.total_count)}`);
   for (const s of combined.statuses) if (s?.state !== "success") throw new Refused("checks_failed", `${s?.context}: ${s?.state}`);
-  const validate = runs.some((c) => c.name === "validate" && c.conclusion === "success") || combined.statuses.some((s: any) => s.context === "validate");
-  if (!validate) throw new Refused("checks_pending", "validate has not passed on this head");
+  // Every run and status left has passed by now, so a required check only has to be among them.
+  // No required check at all would let a head with no CI through on an empty list.
+  const required = await requiredChecks(gh, repo);
+  if (required.size === 0) throw new Refused("no_required_checks", `${repo} requires no check on main`);
+  const seen = new Set<string>([...runs.map((c) => c.name), ...combined.statuses.map((s: any) => s.context)]);
+  for (const name of required) if (!seen.has(name)) throw new Refused("checks_pending", `${name} has not passed on this head`);
 
   // Read again, last: the first read only starts GitHub's lazy computation, and null means
   // "not yet", never "fine". This read also sees a head that moved during the checks above.
