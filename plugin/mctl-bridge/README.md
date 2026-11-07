@@ -233,7 +233,7 @@ Exit status: 0 ok, 1 usage, 2 unreadable, 3 refused, 4 outcome unknown (not retr
   refused. The push keeps the SHAs and is never forced. A ledger keyed by repository, task and
   head stops a second publication, and a run that stopped midway resumes from what GitHub shows.
 - `merge` requires, on the current head: claude[bot]'s latest review APPROVED, no open change
-  request, every check and status passed including `validate`, and a clean mergeable state. It
+  request, every check and status passed including the checks the repository requires on `main` (from its ruleset or classic protection, with a cancelled run ignored once a newer run of the same check replaced it), and a clean mergeable state. It
   pins the SHA and uses a merge commit. It does not read review findings: that stays with Codex.
 - Git runs with `credential.helper=` and the token in its environment. Without that, git asks
   the keychain first, and the Mac mini's keychain holds an admin login: on 2026-11-06 a probe

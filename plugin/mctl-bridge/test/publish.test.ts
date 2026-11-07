@@ -26,6 +26,8 @@ type Fake = {
   pr: any;
   reviews: any[];
   runs: any[];
+  rules: any;
+  branch: any;
   statuses: any[];
   statusTotal: number | null;
   prLater: any;
@@ -68,6 +70,8 @@ function handle(req: Request, url: URL, body: any): Response {
     return J(fake.mergeReply.body, fake.mergeReply.status);
   }
   if (key === "POST /graphql") return J({ data: {} });
+  if (key === "GET /repos/mctlhq/r/rules/branches/main") return J(fake.rules);
+  if (key === "GET /repos/mctlhq/r/branches/main") return J(fake.branch);
   if (p.endsWith("/check-runs")) return J({ total_count: fake.runs.length, check_runs: fake.runs });
   if (p.endsWith("/status")) return J({ total_count: fake.statusTotal ?? fake.statuses.length, statuses: fake.statuses });
   return J({ message: "no route " + key }, 404);
@@ -101,7 +105,9 @@ beforeEach(() => {
     calls: [], pulls: [], tokenSeen: [], fail: {}, dropMerge: false, dropPull: false,
     pr: { state: "open", draft: false, node_id: "N1", head: { sha: HEAD }, base: { ref: "main" }, mergeable: true, mergeable_state: "clean" },
     reviews: [{ user: { login: "claude[bot]" }, state: "APPROVED", commit_id: HEAD }],
-    runs: [{ name: "validate", status: "completed", conclusion: "success" }, { name: "docker", status: "completed", conclusion: "skipped" }],
+    runs: [{ id: 10, name: "validate", status: "completed", conclusion: "success" }, { id: 11, name: "docker", status: "completed", conclusion: "skipped" }],
+    rules: [{ type: "pull_request", parameters: {} }, { type: "required_status_checks", parameters: { required_status_checks: [{ context: "validate" }] } }],
+    branch: { protected: true, protection: { enabled: true, required_status_checks: { enforcement_level: "off", contexts: [], checks: [] } } },
     statuses: [],
     statusTotal: null,
     prLater: null,
@@ -357,11 +363,30 @@ describe("merge", () => {
     ["an approval by anyone else", "not_approved", () => { fake.reviews = [{ user: { login: "mctl-codex[bot]" }, state: "APPROVED", commit_id: HEAD }]; }],
     ["a later change request by Claude", "changes_requested", () => { fake.reviews.push({ user: { login: "claude[bot]" }, state: "CHANGES_REQUESTED", commit_id: HEAD }); }],
     ["a change request by anyone", "changes_requested", () => { fake.reviews.push({ user: { login: "mashkovd" }, state: "CHANGES_REQUESTED", commit_id: HEAD }); }],
-    ["a running check", "checks_pending", () => { fake.runs.push({ name: "x", status: "in_progress", conclusion: null }); }],
-    ["a failed check", "checks_failed", () => { fake.runs.push({ name: "x", status: "completed", conclusion: "failure" }); }],
+    ["a running check", "checks_pending", () => { fake.runs.push({ id: 20, name: "x", status: "in_progress", conclusion: null }); }],
+    ["a failed check", "checks_failed", () => { fake.runs.push({ id: 20, name: "x", status: "completed", conclusion: "failure" }); }],
     ["a failed status", "checks_failed", () => { fake.statuses.push({ context: "x", state: "failure" }); }],
     ["a pending status", "checks_failed", () => { fake.statuses.push({ context: "x", state: "pending" }); }],
-    ["no validate at all", "checks_pending", () => { fake.runs = [{ name: "docker", status: "completed", conclusion: "success" }]; }],
+    ["a required check that never ran", "checks_pending", () => { fake.runs = [{ id: 10, name: "docker", status: "completed", conclusion: "success" }]; }],
+    ["a repository that requires nothing", "no_required_checks", () => { fake.rules = []; }],
+    ["an unprotected branch with no ruleset", "no_required_checks", () => { fake.rules = []; fake.branch = { protected: false }; }],
+    ["a required check from classic protection that never ran", "checks_pending", () => {
+      fake.rules = [];
+      fake.branch.protection.required_status_checks = { enforcement_level: "non_admins", contexts: ["test", "validate"], checks: [] };
+    }],
+    ["a cancelled run with nothing newer", "checks_failed", () => { fake.runs.push({ id: 20, name: "x", status: "completed", conclusion: "cancelled" }); }],
+    ["a cancelled run newer than the success", "checks_failed", () => {
+      fake.runs.push({ id: 20, name: "x", status: "completed", conclusion: "success" }, { id: 21, name: "x", status: "completed", conclusion: "cancelled" });
+    }],
+    ["a failure under a newer success", "checks_failed", () => {
+      fake.runs.push({ id: 20, name: "x", status: "completed", conclusion: "failure" }, { id: 21, name: "x", status: "completed", conclusion: "success" });
+    }],
+    ["a cancelled run replaced only by another app's run", "checks_failed", () => {
+      fake.runs.push({ id: 20, name: "x", app: { id: 1 }, status: "completed", conclusion: "cancelled" }, { id: 21, name: "x", app: { id: 2 }, status: "completed", conclusion: "success" });
+    }],
+    ["a cancelled run whose replacement still runs", "checks_pending", () => {
+      fake.runs.push({ id: 20, name: "x", status: "completed", conclusion: "cancelled" }, { id: 21, name: "x", status: "in_progress", conclusion: null });
+    }],
     ["mergeability not computed", "not_mergeable", () => { fake.pr.mergeable = null; }],
     ["a blocked state", "not_mergeable", () => { fake.pr.mergeable_state = "blocked"; }],
   ];
@@ -373,12 +398,60 @@ describe("merge", () => {
     });
   }
 
+  test("a cancelled run replaced by a newer success does not block", async () => {
+    fake.runs.push({ id: 21, name: "x", status: "completed", conclusion: "success" }, { id: 20, name: "x", status: "completed", conclusion: "cancelled" });
+    expect(await go()).toMatchObject({ ok: true });
+  });
+
+  test("required checks come from classic protection alone", async () => {
+    fake.rules = [];
+    fake.branch.protection.required_status_checks = { enforcement_level: "non_admins", contexts: ["validate", "docker"], checks: [] };
+    expect(await go()).toMatchObject({ ok: true });
+  });
+
+  test("a required check may be a commit status", async () => {
+    fake.rules = [{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "ext" }] } }];
+    fake.statuses.push({ context: "ext", state: "success" });
+    expect(await go()).toMatchObject({ ok: true });
+  });
+
+  test("classic checks left over with enforcement off do not count", async () => {
+    fake.branch.protection.required_status_checks = { enforcement_level: "off", contexts: ["gone"], checks: [] };
+    expect(await go()).toMatchObject({ ok: true });
+  });
+
+  test("disabled classic protection and an unprotected branch add nothing to a ruleset", async () => {
+    fake.branch.protection = { enabled: false, required_status_checks: { enforcement_level: "non_admins", contexts: ["gone"], checks: [] } };
+    expect(await go()).toMatchObject({ ok: true });
+    fake.branch = { protected: false };
+    expect(await go()).toMatchObject({ ok: true });
+  });
+
+  const malformed: [string, () => void][] = [
+    ["a run with no id", () => { fake.runs.push({ name: "x", status: "completed", conclusion: "success" }); }],
+    ["a ruleset rule with no list", () => { fake.rules = [{ type: "required_status_checks", parameters: {} }]; }],
+    ["a ruleset check with no name", () => { fake.rules = [{ type: "required_status_checks", parameters: { required_status_checks: [{}] } }]; }],
+    ["rules that are not a list", () => { fake.rules = { message: "x" }; }],
+    ["a branch with no protected field", () => { fake.branch = {}; }],
+    ["protection with no enabled field", () => { fake.branch = { protected: true, protection: {} }; }],
+    ["protection with no enforcement level", () => { fake.branch.protection.required_status_checks = { contexts: [] }; }],
+    ["enforced protection with no list", () => { fake.branch.protection.required_status_checks = { enforcement_level: "everyone" }; }],
+    ["an empty classic check name", () => { fake.branch.protection.required_status_checks = { enforcement_level: "everyone", contexts: [""] }; }],
+  ];
+  for (const [name, set] of malformed) {
+    test(`${name} is unreadable, not green`, async () => {
+      set();
+      await expect(go()).rejects.toThrow(Unreadable);
+      expect(merged()).toBe(0);
+    });
+  }
+
   test("a commented review does not cancel an approval", async () => {
     fake.reviews.push({ user: { login: "claude[bot]" }, state: "COMMENTED", commit_id: HEAD });
     expect(await go()).toMatchObject({ ok: true });
   });
 
-  for (const route of ["GET /repos/mctlhq/r/pulls/7", "GET /repos/mctlhq/r/pulls/7/reviews", `GET /repos/mctlhq/r/commits/${HEAD}/check-runs`, `GET /repos/mctlhq/r/commits/${HEAD}/status`]) {
+  for (const route of ["GET /repos/mctlhq/r/pulls/7", "GET /repos/mctlhq/r/pulls/7/reviews", `GET /repos/mctlhq/r/commits/${HEAD}/check-runs`, `GET /repos/mctlhq/r/commits/${HEAD}/status`, "GET /repos/mctlhq/r/rules/branches/main", "GET /repos/mctlhq/r/branches/main"]) {
     test(`a failed read of ${route.split("/").pop()} is unreadable, not green`, async () => {
       fake.fail[route] = 500;
       await expect(go()).rejects.toThrow(Unreadable);
