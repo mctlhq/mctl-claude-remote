@@ -45,6 +45,12 @@ jobs:
   bump-gitops:
     needs: build
     runs-on: ubuntu-latest
+    # The dispatch App key lives only in this environment (mctl-gitops#1033).
+    # Its deployment policy admits `main` and semver tags; the guard below
+    # keeps a tag pointing at an unmerged commit from reaching the mint.
+    environment: app-dispatch
+    permissions:
+      contents: read
     steps:
       - name: Validate semver tag
         run: |
@@ -53,16 +59,38 @@ jobs:
             exit 1
           fi
 
-      # A short-lived token from the internal mctl-agents App, as the other
-      # repos' release workflows mint it, instead of the GITOPS_TOKEN PAT
-      # (dead since 0.14.0: 401). Scoped to dispatching workflows in
-      # mctl-gitops; gitops-bump.yaml pushes with its own deploy key.
+      # Fail closed: the tagged commit must be reachable from origin/main.
+      # Runs before the mint and never references the App key; any failed
+      # fetch, missing ref or git error (not only "not an ancestor") aborts.
+      - name: Require tagged commit on main
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Verify tag is an ancestor of origin/main
+        run: |
+          set -euo pipefail
+          if ! git rev-parse --verify --quiet "refs/remotes/origin/main^{commit}" >/dev/null; then
+            echo "::error::origin/main could not be resolved; refusing to mint the dispatch token"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tagged commit $GITHUB_SHA is not an ancestor of origin/main (or the check failed); refusing to mint the dispatch token"
+            exit 1
+          fi
+
+      # A short-lived token from the mctl-gitops-dispatch App (actions:write +
+      # metadata:read, installed on mctl-gitops only), instead of the
+      # GITOPS_TOKEN PAT (dead since 0.14.0: 401) or the broader mctl-agents
+      # App. Scoped to dispatching workflows in mctl-gitops; gitops-bump.yaml
+      # pushes with its own deploy key. The key is read only by this step.
       - name: Generate Platform App token
         id: app
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
-          client-id: ${{ vars.AGENTS_APP_CLIENT_ID }}
-          private-key: ${{ secrets.AGENTS_APP_PRIVATE_KEY }}
+          client-id: ${{ vars.DISPATCH_APP_CLIENT_ID }}
+          private-key: ${{ secrets.DISPATCH_APP_PRIVATE_KEY }}
           owner: mctlhq
           repositories: mctl-gitops
           permission-actions: write
