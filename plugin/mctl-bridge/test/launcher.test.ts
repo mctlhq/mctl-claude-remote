@@ -449,6 +449,9 @@ describe.skipIf(!usable)("launcher scripts", () => {
     }
     expect(INSTRUCTIONS).toContain("Never git merge: mctl-publish refuses merge commits.");
     expect(matches("git merge origin/main")).toBe(false);
+    // rule 10: one command per call; a status suffix such as ; echo exit=$? holds a variable and prompts
+    expect(INSTRUCTIONS).toContain("Run one");
+    expect(INSTRUCTIONS).toContain("no ; echo exit=$? and no && or ; chains");
     // rule 15: ps by PID and date run in both modes; kill is added only behind the user boundary
     expect(INSTRUCTIONS).toContain("ps -o pid,ppid,stat,lstart,command -p <pid>");
     expect(matches("ps -o pid,ppid,stat,lstart,command -p 10436")).toBe(true);
