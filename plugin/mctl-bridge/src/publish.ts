@@ -71,7 +71,9 @@ export function config(env: Record<string, string | undefined> = process.env): C
     appId: env.MCTL_PUBLISH_APP_ID ?? "5648595",
     installationId: env.MCTL_PUBLISH_INSTALLATION_ID ?? "179394531",
     keyFile: env.MCTL_PUBLISH_KEY_FILE ?? path.join(home, "etc", "codex-github-app.pem"),
-    repos: (env.MCTL_PUBLISH_REPOS ?? "mctlhq/mctl-claude-remote,mctlhq/bridge-step0-sandbox,mctlhq/mctl-telegram,mctlhq/mctl-gitops").split(",").filter(Boolean),
+    // Every repository the App is installed on except mctlhq/.github, which is nearly all workflow
+    // files the App may not push (no workflows permission). Operator decision, 2026-11-07.
+    repos: (env.MCTL_PUBLISH_REPOS ?? "mctlhq/mctl-claude-remote,mctlhq/bridge-step0-sandbox,mctlhq/mctl-telegram,mctlhq/mctl-gitops,mctlhq/mctl-api,mctlhq/mctl-agents,mctlhq/mctl-agent,mctlhq/mctl-web,mctlhq/mctl-docs,mctlhq/mctl-academy,mctlhq/mctl-alice,mctlhq/mctl-support,mctlhq/seerrsense").split(",").filter(Boolean),
     apiUrl: env.MCTL_PUBLISH_API_URL ?? "https://api.github.com",
     gitBase: env.MCTL_PUBLISH_GIT_BASE ?? "https://github.com",
     timeoutMs: Number(env.MCTL_PUBLISH_TIMEOUT_MS ?? 30_000),

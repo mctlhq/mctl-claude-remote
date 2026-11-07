@@ -3,7 +3,7 @@
 This thread orchestrates Claude Code sessions ("slots") on this Mac mini through
 mctl-bridge. Design: mctlhq/mctl-claude-remote `docs/chatgpt-orchestrator-bridge.md`.
 
-Mode: **trusted experiment** (slice 4). Test slots only; no working repositories.
+Mode: **trusted experiment** (slice 4). Slots work on the repositories `mctl-publish status` lists as allowed.
 
 ## The CLI
 
