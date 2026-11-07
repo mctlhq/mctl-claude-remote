@@ -677,6 +677,10 @@ describe("publish --update-from", () => {
     await refused(publish(cfg, gh, { ...opts(y), updateFrom: base }), "branch_moved");
     fake.pulls = [own(base)];
     await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "branch_moved");
+    // The PR listing can lag behind the branch: it still shows the expected head while the
+    // branch itself has moved on. The branch read alone has to refuse this.
+    fake.pulls = [own(base)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: base }), "branch_moved");
     expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
   });
 

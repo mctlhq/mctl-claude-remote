@@ -220,6 +220,7 @@ workflows, on selected repositories. Its key is `etc/codex-github-app.pem`, mode
 ```
 mctl-publish status
 mctl-publish publish --repo R --bundle F --manifest F --allow PATH --title T --body-file F
+mctl-publish publish ... --update-from SHA
 mctl-publish ready --repo R --pr N --head SHA
 mctl-publish merge --repo R --pr N --head SHA
 ```
@@ -232,6 +233,10 @@ Exit status: 0 ok, 1 usage, 2 unreadable, 3 refused, 4 outcome unknown (not retr
   reverted still counts. Merge commits, workflow changes, symlinks and submodules are
   refused. The push keeps the SHAs and is never forced. A ledger keyed by repository, task and
   head stops a second publication, and a run that stopped midway resumes from what GitHub shows.
+- `publish --update-from SHA` fast-forwards the App's own open PR instead of opening one. SHA is
+  the full head the branch has on GitHub now (compare-and-swap); the push is refused if the
+  branch moved, the new head does not descend from SHA, or the PR's author is not this App's
+  bot, its head lives in a fork, or its base is not `main`. All commit checks above still apply.
 - `merge` requires, on the current head: claude[bot]'s latest review APPROVED, no open change
   request, every check and status passed including the checks the repository requires on `main` (from its ruleset or classic protection, with a cancelled run ignored once a newer run of the same check replaced it), and a clean mergeable state. It
   pins the SHA and uses a merge commit. It does not read review findings: that stays with Codex.
