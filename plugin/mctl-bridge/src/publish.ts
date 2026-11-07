@@ -1,7 +1,8 @@
 // mctl-publish: the orchestrator's hands on GitHub, as the mctl-codex GitHub App.
 //
 //   status   which App, which permissions, which repositories
-//   publish  verify a slot's git bundle and manifest, push it unchanged, open a Draft PR
+//   publish  verify a slot's git bundle and manifest, push it unchanged, open a Draft PR;
+//            with --update-from, fast-forward the App's own open PR instead
 //   ready    mark a Draft PR ready for review
 //   merge    merge a PR whose current head is approved by claude[bot] and fully green
 //
@@ -332,7 +333,13 @@ class Git {
   }
 }
 
-export type PublishOpts = { repo: string; bundle: string; manifest: string; allow: string[]; title: string; body: string };
+/**
+ * updateFrom: the head the branch is expected to be at now. Set, publish adds the handoff's
+ * commits to an existing PR instead of opening one: the branch must be exactly there (compare
+ * and swap), the new head must descend from it (a fast-forward, never a rewrite), and the open
+ * PR on the branch must be this App's own. Unset, an occupied branch is refused as before.
+ */
+export type PublishOpts = { repo: string; bundle: string; manifest: string; allow: string[]; title: string; body: string; updateFrom?: string };
 
 function checkRepo(cfg: Config, repo: string): void {
   if (!cfg.repos.includes(repo)) throw new Refused("repo_not_allowed", repo);
@@ -427,6 +434,7 @@ export async function publish(cfg: Config, gh: GitHub, o: PublishOpts): Promise<
         return r.out.split("\t")[0]?.trim() || null;
       };
       const present = remote();
+      if (o.updateFrom !== undefined) return await update(gh, git, url, o, m, present, ledger);
       if (present !== null && present !== m.head_sha) throw new Refused("branch_taken", `${m.branch} is at ${present}`);
       if (present === null) {
         // Never forced: a push that cannot fast-forward is refused by the server.
@@ -460,6 +468,48 @@ export async function publish(cfg: Config, gh: GitHub, o: PublishOpts): Promise<
   } finally {
     fs.rmSync(staging, { recursive: true, force: true });
   }
+}
+
+/** The --update-from half of publish: everything about the commits is already checked. */
+async function update(gh: GitHub, git: Git, url: string, o: PublishOpts, m: Manifest, present: string | null, ledger: string): Promise<Record<string, unknown>> {
+  const from = o.updateFrom!;
+  if (present !== m.head_sha) {
+    if (present === null) throw new Refused("no_branch", `${m.branch} does not exist: there is nothing to update`);
+    if (present !== from) throw new Refused("branch_moved", `${m.branch} is at ${present}, not ${from}`);
+    if (git.run("merge-base", "--is-ancestor", from, m.head_sha).code !== 0) throw new Refused("not_fast_forward", `${m.head_sha} does not descend from ${from}`);
+  }
+  // The PR is looked up by branch, not by head: before the push its head is the old one.
+  const [owner] = o.repo.split("/");
+  const open = await gh.list(`/repos/${o.repo}/pulls?state=open&head=${owner}:${encodeURIComponent(m.branch)}`);
+  if (open.length === 0) throw new Refused("no_open_pr", `no open PR on ${m.branch}`);
+  if (open.length > 1) throw new Refused("ambiguous_pr", `${open.length} open PRs on ${m.branch}`);
+  const pr = open[0];
+  const slug = (await gh.app())?.slug;
+  if (typeof slug !== "string" || slug === "") throw new Unreadable("the App has no slug");
+  const author = pr?.user?.login;
+  if (typeof author !== "string") throw new Unreadable("the PR has no author");
+  // Only the App's own PR: it never pushes onto a branch a person or another bot opened.
+  if (author !== `${slug}[bot]` || pr?.user?.type !== "Bot") throw new Refused("not_own_pr", `PR #${pr.number} was opened by ${author}`);
+  if (pr?.head?.repo?.full_name !== o.repo) throw new Refused("not_own_pr", `PR #${pr.number} comes from another repository`);
+  if (pr?.base?.ref !== "main") throw new Refused("wrong_base", `PR #${pr.number} targets ${String(pr?.base?.ref)}`);
+  if (present !== m.head_sha && pr?.head?.sha !== from) throw new Refused("branch_moved", `PR #${pr.number} is at ${String(pr?.head?.sha)}, not ${from}`);
+  if (present !== m.head_sha) {
+    // A plain push: the server takes only a fast-forward, so a branch moved since the read above fails it.
+    const pushed = git.run("push", "-q", url, `${m.head_sha}:refs/heads/${m.branch}`);
+    if (pushed.code !== 0) {
+      let now: string | null;
+      try {
+        const r = git.run("ls-remote", url, `refs/heads/${m.branch}`);
+        if (r.code !== 0) throw new Error(r.err);
+        now = r.out.split("\t")[0]?.trim() || null;
+      } catch (err) {
+        throw new OutcomeUnknown(`the push failed and the branch could not be read back: ${(err as Error).message}`);
+      }
+      if (now !== m.head_sha) throw new Refused("push_refused", pushed.err.trim().slice(0, 600));
+    }
+  }
+  fs.writeFileSync(ledger, JSON.stringify({ state: "done", task_id: m.task_id, attempt_id: m.attempt_id, head: m.head_sha, branch: m.branch, pr: pr.number, url: pr.html_url, updated_from: from }), { mode: 0o600 });
+  return { ok: true, pr: pr.number, url: pr.html_url, head: m.head_sha, branch: m.branch, updated_from: from, draft: pr.draft === true };
 }
 
 async function readPr(gh: GitHub, repo: string, pr: number, head: string): Promise<any> {
@@ -627,7 +677,7 @@ function prArgs(argv: string[]): { repo: string; pr: number; head: string } {
 }
 
 const USAGE = `usage: mctl-publish status
-       mctl-publish publish --repo R --bundle F --manifest F --allow PATH [--allow PATH ...] --title T --body-file F
+       mctl-publish publish --repo R --bundle F --manifest F --allow PATH [--allow PATH ...] --title T --body-file F [--update-from SHA]
        mctl-publish ready --repo R --pr N --head SHA
        mctl-publish merge --repo R --pr N --head SHA
 Exit: 0 ok, 1 usage, 2 unreadable, 3 refused, 4 outcome unknown.`;
@@ -643,9 +693,11 @@ export async function main(argv: string[], cfg: Config = config()): Promise<numb
         print(await status(cfg, gh));
         return 0;
       case "publish": {
-        const a = args(rest, ["--repo", "--bundle", "--manifest", "--title", "--body-file"], ["--allow"]);
+        const a = args(rest, ["--repo", "--bundle", "--manifest", "--title", "--body-file", "--update-from"], ["--allow"]);
         const allow = (a["--allow"] as string[] | undefined) ?? [];
         if (allow.length === 0) throw new UsageError("--allow is required");
+        const updateFrom = a["--update-from"] as string | undefined;
+        if (updateFrom !== undefined && !SHA.test(updateFrom)) throw new UsageError("--update-from must be a full SHA");
         print(await publish(cfg, gh, {
           repo: need(a, "--repo"),
           bundle: need(a, "--bundle"),
@@ -653,6 +705,7 @@ export async function main(argv: string[], cfg: Config = config()): Promise<numb
           allow,
           title: need(a, "--title"),
           body: readUntrusted(need(a, "--body-file"), MAX_BODY_BYTES).toString("utf8"),
+          updateFrom,
         }));
         return 0;
       }

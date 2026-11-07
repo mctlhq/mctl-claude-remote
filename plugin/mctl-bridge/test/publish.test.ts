@@ -631,6 +631,136 @@ describe("ready and the CLI", () => {
   });
 });
 
+describe("publish --update-from", () => {
+  /** Publish feat/x once as a new PR, then add a commit on top: the update to hand off. */
+  async function published(): Promise<{ first: string }> {
+    const h = handoff();
+    await publish(cfg, gh, opts(h));
+    return { first: h.m.head_sha };
+  }
+  const own = (head: string, over: any = {}) => ({
+    number: 7, html_url: "https://x/7", draft: false, user: { login: "mctl-codex[bot]", type: "Bot" },
+    head: { sha: head, ref: "feat/x", repo: { full_name: REPO } }, base: { ref: "main" }, ...over,
+  });
+  const next = (): { bundle: string; manifest: string; head: string } => {
+    commit("src/a.txt", "c\n");
+    const y = seal("feat/x", base, ["src/a.txt"]);
+    return { ...y, head: git(work, "rev-parse", "HEAD") };
+  };
+  const pulls = () => writes().filter((w) => w.endsWith("/pulls")).length;
+
+  test("fast-forwards the App's own open PR to the new head, opens no PR, and is idempotent", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first)];
+    const r = await publish(cfg, gh, { ...opts(y), updateFrom: first });
+    expect(r).toMatchObject({ ok: true, pr: 7, head: y.head, branch: "feat/x", updated_from: first });
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${y.head}`);
+    expect(pulls()).toBe(1);
+    fake.pulls = [own(y.head)];
+    expect(await publish(cfg, gh, { ...opts(y), updateFrom: first })).toMatchObject({ ok: true, duplicate: true, pr: 7 });
+    expect(pulls()).toBe(1);
+  });
+
+  test("without --update-from an occupied branch is still refused", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first)];
+    await refused(publish(cfg, gh, opts(y)), "branch_taken");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("the branch must be exactly at the expected head, on GitHub and on the PR", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: base }), "branch_moved");
+    fake.pulls = [own(base)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "branch_moved");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("a head that does not descend from the current one is never pushed", async () => {
+    const { first } = await published();
+    git(work, "checkout", "-q", "-B", "feat/x", base);
+    commit("src/a.txt", "other\n");
+    const y = seal("feat/x", base, ["src/a.txt"]);
+    fake.pulls = [own(first)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "not_fast_forward");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("only the App's own PR from this repository, on main, is updated", async () => {
+    const { first } = await published();
+    const y = next();
+    const cases: [any, string][] = [
+      [own(first, { user: { login: "mashkovd", type: "User" } }), "not_own_pr"],
+      [own(first, { user: { login: "dependabot[bot]", type: "Bot" } }), "not_own_pr"],
+      [own(first, { user: { login: "mctl-codex[bot]", type: "User" } }), "not_own_pr"],
+      [own(first, { head: { sha: first, ref: "feat/x", repo: { full_name: "someone/fork" } } }), "not_own_pr"],
+      [own(first, { base: { ref: "release" } }), "wrong_base"],
+    ];
+    for (const [pr, code] of cases) {
+      fake.pulls = [pr];
+      await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), code);
+    }
+    fake.pulls = [];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "no_open_pr");
+    fake.pulls = [own(first), own(first, { number: 8 })];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "ambiguous_pr");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("there must be a branch to update", async () => {
+    const h = handoff();
+    fake.pulls = [own(base)];
+    await refused(publish(cfg, gh, { ...opts(h), updateFrom: base }), "no_branch");
+    expect(remoteRefs()).not.toContain("refs/heads/feat/x");
+  });
+
+  test("the commit checks still run on the whole range before anything is pushed", async () => {
+    const { first } = await published();
+    fs.writeFileSync(path.join(work, "src/a.txt"), "c\n");
+    git(work, "add", "-A");
+    git(work, "commit", "-qm", "fix: c\n\nCo-Authored-By: x <x@x>");
+    const y = seal("feat/x", base, ["src/a.txt"]);
+    fake.pulls = [own(first)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "co_authored_by");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("an unreadable App slug or PR author is a failed read, not permission", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first, { user: {} })];
+    expect(await publish(cfg, gh, { ...opts(y), updateFrom: first }).catch((e) => e)).toBeInstanceOf(Unreadable);
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("the CLI takes --update-from only as a full SHA", async () => {
+    const { first } = await published();
+    const y = next();
+    const body = path.join(tmp, "body.md");
+    fs.writeFileSync(body, "b");
+    const writeErr = process.stderr.write;
+    const writeOut = process.stdout.write;
+    let out = "";
+    (process.stderr as any).write = () => true;
+    (process.stdout as any).write = (s: string) => ((out += s), true);
+    const argv = ["publish", "--repo", REPO, "--bundle", y.bundle, "--manifest", y.manifest, "--allow", "src/", "--title", "t", "--body-file", body];
+    try {
+      expect(await main([...argv, "--update-from", first.slice(0, 12)], cfg)).toBe(1);
+      fake.pulls = [own(first)];
+      expect(await main([...argv, "--update-from", first], cfg)).toBe(0);
+    } finally {
+      (process.stderr as any).write = writeErr;
+      (process.stdout as any).write = writeOut;
+    }
+    expect(out).toContain(`"updated_from":"${first}"`);
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${y.head}`);
+  });
+});
+
 test("the source offers no way to approve, force or bypass", () => {
   const src = fs.readFileSync(path.join(import.meta.dir, "..", "src", "publish.ts"), "utf8");
   const code = src.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
