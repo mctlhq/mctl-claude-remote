@@ -76,24 +76,38 @@ class NativePinTest(unittest.TestCase):
             esac
             """))
 
-    def run_block(self, install: str = "ok", version: str = "ok", timeout_env: str = "2") -> tuple[str, str, str]:
+    def run_block(self, install: str = "ok", version: str = "ok", timeout_env: str = "2",
+                  version_timeout: str | None = "1", outer: int = 30, env_extra: dict | None = None,
+                  read_native: bool = True) -> tuple[str, str, str]:
+        """`version_timeout=None` leaves NATIVE_VERSION_TIMEOUT unset (the default).
+        `outer` bounds the whole shell, so a broken guard fails the test promptly.
+        `read_native=False` skips running the native binary afterwards (it hangs)."""
+
         self.tmp = self.root / "tmp"
         self.tmp.mkdir(exist_ok=True)
-        script = block().replace("/workspace", str(self.ws)).replace("/tmp/claude-install.", f"{self.tmp}/claude-install.")
+        script = (block().replace("/workspace", str(self.ws))
+                  .replace("/tmp/claude-install.", f"{self.tmp}/claude-install.")
+                  .replace("/tmp/claude-version.", f"{self.tmp}/claude-version."))
         # Fail closed: if the script text changes and a substitution stops
         # matching, the block would touch the real /workspace and /tmp.
         self.assertNotIn("/workspace", script)
+        self.assertNotIn("/tmp/claude-", script.replace(str(self.tmp), ""))
         self.assertIn(f"{self.tmp}/claude-install.", script)
+        self.assertIn(f"{self.tmp}/claude-version.", script)
         probe = 'printf "\\nPATH=%s\\n" "$PATH"'
         env = {**os.environ, "PATH": f"{self.root / 'bin'}:{os.environ['PATH']}",
                "FAKE_INSTALL": install, "FAKE_VERSION": version, "NATIVE_INSTALL_TIMEOUT": timeout_env}
+        env.update(env_extra or {})
+        env.pop("NATIVE_VERSION_TIMEOUT", None)
+        if version_timeout is not None:
+            env["NATIVE_VERSION_TIMEOUT"] = version_timeout
         proc = subprocess.run(["/bin/sh", "-e", "-c", script + probe], env=env,
-                              capture_output=True, text=True, timeout=30)
+                              capture_output=True, text=True, timeout=outer)
         self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
         out = proc.stdout + proc.stderr
         path = proc.stdout.rsplit("PATH=", 1)[1].strip()
         native = subprocess.run([str(self.native), "--version"], capture_output=True, text=True).stdout.strip() \
-            if self.native.is_file() else ""
+            if read_native and self.native.is_file() else ""
         return out, path, native
 
     def test_fresh_workspace_installs_and_promotes_the_pin(self) -> None:
@@ -124,7 +138,8 @@ class NativePinTest(unittest.TestCase):
 
         # A recording `timeout` in front of the real one: logs its duration
         # argument, then runs the command unbounded (the fake install is quick).
-        executable(self.root / "bin/timeout", '#!/bin/sh\necho "$1" >> "' + str(self.root / "timeout-args") + '"\nshift\nexec "$@"\n')
+        # Version probes (`timeout -k 2 N bin --version`) pass through unlogged.
+        executable(self.root / "bin/timeout", '#!/bin/sh\n[ "$1" = -k ] && shift 2 && shift && exec "$@"\necho "$1" >> "' + str(self.root / "timeout-args") + '"\nshift\nexec "$@"\n')
         args = self.root / "timeout-args"
         for value in ("0", "abc", "-5", "1.5", ""):
             with self.subTest(value=value):
@@ -317,6 +332,124 @@ class NativePinTest(unittest.TestCase):
         self.assertIn("using npm-global claude", out)
         self.assertEqual("", native)
         self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+
+    # --- `<native> --version` is bounded by NATIVE_VERSION_TIMEOUT (real GNU
+    # `timeout`). A probe that hangs, fails or is blank is "no version" and takes
+    # the existing reinstall/fallback path. Deadlines are 1-2 s and the outer
+    # subprocess is bounded, so a broken guard fails in seconds.
+
+    HANG = '#!/bin/sh\nsleep 60\necho "2.1.280 (Claude Code)"\n'
+    # Ignores TERM and keeps the shell itself alive; only KILL ends it.
+    STUBBORN = '#!/bin/sh\ntrap "" TERM\nwhile :; do sleep 1; done\n'
+
+    def timed(self, **kw):
+        if shutil.which("timeout") is None:
+            self.skipTest("GNU timeout is not on PATH")
+        started = time.monotonic()
+        res = self.run_block(outer=20, **kw)
+        return res, time.monotonic() - started
+
+    def test_hanging_version_probe_is_cut_off_and_reinstalled(self) -> None:
+        executable(self.native, self.HANG)
+        (out, path, native), took = self.timed()
+        self.assertLess(took, 12)
+        self.assertNotIn("already current", out)
+        self.assertIn("installing/refreshing native claude binary", out)
+        self.assertIn("native claude replaced with versions/2.1.280", out)
+        self.assertEqual(PIN, native)
+        self.assertTrue(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_hanging_probe_with_a_failed_install_falls_back_not_aborts(self) -> None:
+        executable(self.native, self.HANG)
+        (out, path, _), took = self.timed(install="fail", read_native=False)
+        self.assertLess(took, 15)
+        self.assertIn("WARN native install failed", out)
+        self.assertIn("WARN native claude is ''", out)  # no version was reported
+        self.assertIn("using npm-global claude", out)
+        self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_probe_that_ignores_term_is_killed(self) -> None:
+        executable(self.native, self.STUBBORN)
+        (out, path, _), took = self.timed(install="fail", version_timeout="1", read_native=False)
+        self.assertLess(took, 15)
+        self.assertIn("using npm-global claude", out)
+        self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_hanging_promoted_download_is_not_promoted(self) -> None:
+        """The versions/<pin> check is a native probe too."""
+
+        executable(self.native, '#!/bin/sh\necho "2.1.274 (Claude Code)"\n')
+        # The installer drops a download that hangs in --version.
+        fake = (self.root / "bin/claude").read_text()
+        patched = fake.replace("printf '#!/bin/sh\\necho", "printf '#!/bin/sh\\nsleep 60\\necho")
+        self.assertNotEqual(fake, patched)
+        (self.root / "bin/claude").write_text(patched)
+        (out, path, native), took = self.timed()
+        self.assertLess(took, 15)
+        self.assertNotIn("replaced", out)
+        self.assertIn("not promoting it", out)
+        self.assertEqual("2.1.274 (Claude Code)", native)
+        self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_descendant_holding_stdout_does_not_block_a_probe(self) -> None:
+        """A probe that exits with a background child still holding its stdout
+        must not hold the substitution open until the child ends."""
+
+        executable(self.native, '#!/bin/sh\n[ -n "$HOLD" ] && { sleep 8 & }\necho "2.1.280 (Claude Code)"\n')
+        (out, path, _), took = self.timed(env_extra={"HOLD": "1"}, read_native=False)
+        self.assertLess(took, 5)
+        self.assertIn("already current", out)
+        self.assertTrue(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_failing_or_blank_probe_is_never_a_match(self) -> None:
+        for name, body in (("exit 1 with the pin printed", '#!/bin/sh\necho "2.1.280 (Claude Code)"\nexit 1\n'),
+                           ("blank", '#!/bin/sh\necho "   "\n'),
+                           ("silent", "#!/bin/sh\nexit 0\n")):
+            with self.subTest(name):
+                shutil.rmtree(self.ws / ".local", ignore_errors=True)
+                executable(self.native, body)
+                out, path, native = self.run_block(install="fail")
+                self.assertNotIn("already current", out)
+                self.assertIn("installing/refreshing", out)
+                self.assertIn("using npm-global claude", out)
+                self.assertFalse(path.startswith(f"{self.ws}/.local/bin:"), path)
+
+    def test_matching_and_mismatched_versions_still_compare_by_number(self) -> None:
+        fake_version_binary(self.native, "2.1.280")
+        out, _, _ = self.run_block()
+        self.assertIn("already current", out)
+        fake_version_binary(self.native, "2.1.274")
+        out, _, native = self.run_block()
+        self.assertNotIn("already current", out)
+        self.assertEqual(PIN, native)
+
+    def test_default_override_and_invalid_version_timeouts(self) -> None:
+        args = self.root / "timeout-args"
+        # Logs the duration of version probes (`timeout -k 2 N bin --version`).
+        executable(self.root / "bin/timeout",
+                   '#!/bin/sh\n[ "$1" = -k ] && echo "$3" >> "' + str(args) + '"\n'
+                   '[ "$1" = -k ] && { shift 3; exec "$@"; }\nshift\nexec "$@"\n')
+        cases = [(None, "20"), ("", "20"), ("0", "20"), ("-5", "20"), ("abc", "20"), ("1.5", "20"),
+                 ("3", "3"), ("45", "45")]
+        for value, expect in cases:
+            with self.subTest(value=value):
+                args.unlink(missing_ok=True)
+                shutil.rmtree(self.ws / ".local", ignore_errors=True)
+                fake_version_binary(self.native, "2.1.280")
+                out, _, _ = self.run_block(version_timeout=value)
+                self.assertIn("already current", out)
+                recorded = args.read_text().split()
+                self.assertTrue(recorded)
+                self.assertEqual({expect}, set(recorded), value)
+
+    def test_install_timeout_semantics_are_unchanged(self) -> None:
+        fake_version_binary(self.native, "2.1.274")
+        started = time.monotonic()
+        out, _, native = self.run_block(install="hang", timeout_env="1")
+        self.assertLess(time.monotonic() - started, 15)
+        self.assertIn("WARN native install failed", out)
+        self.assertEqual("2.1.274 (Claude Code)", native)
 
 
 if __name__ == "__main__":

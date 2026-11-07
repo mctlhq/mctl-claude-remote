@@ -482,7 +482,28 @@ NATIVE_VERSIONS="/workspace/.local/share/claude/versions"
 chmod +x "$NATIVE_CLAUDE" 2>/dev/null || true
 BUNDLED_VER=$(claude --version 2>/dev/null | head -n 1)
 TARGET_VER=$(printf '%s' "$BUNDLED_VER" | awk '{print $1}')
-native_ver() { "$NATIVE_CLAUDE" --version 2>/dev/null | head -n 1; }
+# Asking a native binary for its version is bounded, like the install below: a
+# binary that hangs in --version (a corrupt restore, a wedged self-update) would
+# otherwise park PID 1 here forever. Same normalisation as NATIVE_INSTALL_TIMEOUT:
+# `0` would disable the bound and a non-number makes `timeout` exit 125 and the
+# probe look like a failure. `-k 2` sends KILL when the child ignores TERM.
+# GNU timeout runs the child in its own process group and signals the whole group,
+# so a descendant is not left behind. The output goes to a file, not a pipe: even
+# a descendant that escaped the group cannot hold a `$(...)` open. A probe that
+# times out, fails, or cannot even create its file prints NOTHING (and returns 0,
+# for `set -e`): an empty version never equals the pin, so the caller takes the
+# existing install/fallback path and a hung binary is never "current".
+NATIVE_VERSION_TIMEOUT="${NATIVE_VERSION_TIMEOUT:-20}"
+printf '%s' "$NATIVE_VERSION_TIMEOUT" | grep -qE '^[1-9][0-9]*$' || NATIVE_VERSION_TIMEOUT=20
+bounded_ver() {
+  _vo=$(mktemp /tmp/claude-version.XXXXXX 2>/dev/null) || return 0
+  if timeout -k 2 "$NATIVE_VERSION_TIMEOUT" "$1" --version >"$_vo" 2>/dev/null </dev/null; then
+    head -n 1 "$_vo" 2>/dev/null || true
+  fi
+  rm -f "$_vo" 2>/dev/null || true
+  return 0
+}
+native_ver() { bounded_ver "$NATIVE_CLAUDE"; }
 # Version equality is what decides which binary the session runs, so it is
 # the version *number* (first field) that is compared, never the whole line:
 # a suffix the native build prints and the npm-global one does not would
@@ -531,7 +552,7 @@ else
   # installer chose to do with a pre-existing file.
   if [ -n "$TARGET_VER" ] && [ "$(native_tag)" != "$TARGET_VER" ] && [ -f "$NATIVE_VERSIONS/$TARGET_VER" ]; then
     chmod +x "$NATIVE_VERSIONS/$TARGET_VER" 2>/dev/null || true
-    if [ "$("$NATIVE_VERSIONS/$TARGET_VER" --version 2>/dev/null | head -n 1 | awk '{print $1}')" = "$TARGET_VER" ]; then
+    if [ "$(bounded_ver "$NATIVE_VERSIONS/$TARGET_VER" | awk '{print $1}')" = "$TARGET_VER" ]; then
       # Copy, not symlink: the workspace is mirrored to MinIO by the s3-sync
       # sidecar and restored by an init container, and a symlink does not
       # survive that round trip as a symlink. `.tmp` so the mirror skips the
@@ -559,7 +580,7 @@ else
         echo "[entrypoint] WARN could not replace native claude with versions/$TARGET_VER" >&2
       fi
     else
-      echo "[entrypoint] WARN versions/$TARGET_VER reports '$("$NATIVE_VERSIONS/$TARGET_VER" --version 2>&1 | head -n 1)', not $TARGET_VER; not promoting it" >&2
+      echo "[entrypoint] WARN versions/$TARGET_VER reports '$(bounded_ver "$NATIVE_VERSIONS/$TARGET_VER")', not $TARGET_VER; not promoting it" >&2
     fi
   elif [ -n "$TARGET_VER" ] && [ "$(native_tag)" != "$TARGET_VER" ]; then
     # Nothing at the path this script promotes from. After a failed install
