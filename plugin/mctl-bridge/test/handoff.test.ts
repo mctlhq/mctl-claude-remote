@@ -584,6 +584,80 @@ describe("the manifest is the final marker", () => {
     expect(fs.readFileSync(bundle, "utf8")).toBe("someone else's file");
   });
 
+  describe("a manifest write that stops part-way", () => {
+    const tmpManifest = ".t-1.manifest.json.cafe.tmp";
+    /** Writes `first` bytes for real, then lets `then` run on the second call. No disk is filled. */
+    const partial = (first: number, then: (fd: number, buf: Buffer, offset: number) => number) => {
+      let calls = 0;
+      return (fd: number, buf: Buffer, offset: number, length: number): number => {
+        if (calls++ === 0) return fs.writeSync(fd, buf, offset, Math.min(first, length));
+        return then(fd, buf, offset);
+      };
+    };
+    const enospc = (): never => {
+      throw Object.assign(new Error("ENOSPC: no space left on device, write"), { code: "ENOSPC" });
+    };
+
+    test("a short write then ENOSPC leaves no marker, partial file, bundle or reservation", async () => {
+      const f = fixture();
+      const err = await refused(exportHandoff(f.input, { randomHex: () => "cafe", writeSync: partial(10, enospc) }));
+      expect(err.code).toBe("output_unsafe");
+      expect(listing(f.root)).toEqual([]);
+    });
+
+    test("a write that threw after putting bytes down is still cleaned up", async () => {
+      const f = fixture();
+      const err = await refused(exportHandoff(f.input, {
+        randomHex: () => "cafe",
+        // Bytes reach the file, then the call throws: the count never comes back to the exporter.
+        writeSync: (fd, buf, offset, length) => {
+          fs.writeSync(fd, buf, offset, Math.min(25, length));
+          return enospc();
+        },
+      }));
+      expect(err.code).toBe("output_unsafe");
+      expect(listing(f.root)).toEqual([]);
+    });
+
+    test("a foreign file that replaced the partial temporary manifest is kept, the rest is cleaned", async () => {
+      const f = fixture();
+      const mine = path.join(f.root, tmpManifest);
+      await refused(exportHandoff(f.input, {
+        randomHex: () => "cafe",
+        writeSync: partial(10, () => {
+          fs.rmSync(mine);
+          fs.writeFileSync(mine, "someone else's file");
+          return enospc();
+        }),
+      }));
+      expect(listing(f.root)).toEqual([tmpManifest]);
+      expect(fs.readFileSync(mine, "utf8")).toBe("someone else's file");
+    });
+
+    test("a planted unrelated file is untouched by the cleanup", async () => {
+      const f = fixture();
+      fs.writeFileSync(path.join(f.root, "t-2.bundle"), "other task");
+      await refused(exportHandoff(f.input, { randomHex: () => "cafe", writeSync: partial(10, enospc) }));
+      expect(listing(f.root)).toEqual(["t-2.bundle"]);
+      expect(fs.readFileSync(path.join(f.root, "t-2.bundle"), "utf8")).toBe("other task");
+    });
+
+    test("a write that makes no progress is a refusal, never a complete file", async () => {
+      const f = fixture();
+      const err = await refused(exportHandoff(f.input, { randomHex: () => "cafe", writeSync: partial(10, () => 0) }));
+      expect(err.code).toBe("output_unsafe");
+      expect(listing(f.root)).toEqual([]);
+    });
+
+    test("short writes that all succeed still produce the complete, valid manifest", async () => {
+      const f = fixture();
+      const r = await exportHandoff(f.input, { writeSync: (fd, buf, offset, length) => fs.writeSync(fd, buf, offset, Math.min(7, length)) });
+      const m = parseManifest(fs.readFileSync(r.manifest_path));
+      expect(m.sha256).toBe(r.sha256);
+      expect(listing(f.root)).toEqual(["t-1.bundle", "t-1.manifest.json"]);
+    });
+  });
+
   test("a manifest that appears from elsewhere is not overwritten", async () => {
     const f = fixture();
     const err = await refused(exportHandoff(f.input, { hooks: { beforeManifestLink: () => fs.writeFileSync(path.join(f.root, "t-1.manifest.json"), "theirs") } }));

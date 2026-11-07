@@ -78,7 +78,12 @@ export type ExportOptions = {
     beforeManifestLink?: () => void;
   };
   /**
-   * Test seam: how a name is looked up when deciding whether this call still owns the file there.
+   * @internal Test-only seam: replaces fs.writeSync for the temporary manifest, to model short
+   * writes and a failure part-way (ENOSPC) without filling a disk.
+   */
+  writeSync?: (fd: number, buf: Buffer, offset: number, length: number) => number;
+  /**
+   * @internal Test-only seam: how a name is looked up when deciding whether this call still owns the file there.
    * A test returns another file's identity to model a replacement that reuses an inode number.
    */
   statEntry?: (file: string) => { isFile(): boolean; dev: number; ino: number };
@@ -256,7 +261,8 @@ function checkRoot(root: string): void {
   if ((st.mode & 0o022) !== 0) throw new HandoffError("bad_root", `${root} is writable by group or others`);
 }
 
-const O_CREATE = fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW;
+// Read-write so a failed write can be read back through the descriptor that made the file.
+const O_CREATE = fs.constants.O_RDWR |fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW;
 
 function fsyncDir(dir: string): void {
   const fd = fs.openSync(dir, fs.constants.O_RDONLY | fs.constants.O_DIRECTORY);
@@ -346,13 +352,47 @@ function isOwned(file: string, owned: Owned, limit: number, stat: (f: string) =>
   }
 }
 
-function writeNew(file: string, data: Buffer, created?: (owned: Owned) => void): void {
+type WriteSync = (fd: number, buf: Buffer, offset: number, length: number) => number;
+
+/**
+ * Creates `file` exclusively and writes all of `data`. `owned` is called with the file's identity
+ * and the hash of the bytes it holds so far (none at creation, the written prefix after each
+ * write, and on a failure the bytes actually on disk, read back through this call's own
+ * descriptor), so a partial leftover is still recognisably this call's.
+ */
+function writeNew(file: string, data: Buffer, owned?: (o: Owned) => void, write: WriteSync = fs.writeSync): void {
   const fd = fs.openSync(file, O_CREATE, 0o644);
   const st = fs.fstatSync(fd);
-  created?.({ dev: st.dev, ino: st.ino, sha256: null });
+  const hashOf = (b: Buffer): string => crypto.createHash("sha256").update(b).digest("hex");
+  owned?.({ dev: st.dev, ino: st.ino, sha256: hashOf(Buffer.alloc(0)) });
   try {
-    fs.writeSync(fd, data);
+    let off = 0;
+    while (off < data.length) {
+      const n = write(fd, data, off, data.length - off);
+      // A short write is not a complete file: carry on with the rest, and never loop on no progress.
+      if (!Number.isInteger(n) || n <= 0 || n > data.length - off) throw new Error(`write made no progress at ${off} of ${data.length} bytes`);
+      off += n;
+      owned?.({ dev: st.dev, ino: st.ino, sha256: hashOf(data.subarray(0, off)) });
+    }
     fs.fsyncSync(fd);
+  } catch (err) {
+    // A write that threw may still have put bytes down: record what this file really holds.
+    try {
+      const size = fs.fstatSync(fd).size;
+      if (owned && size <= data.length) {
+        const have = Buffer.alloc(size);
+        let got = 0;
+        while (got < size) {
+          const r = fs.readSync(fd, have, got, size - got, got);
+          if (r === 0) break;
+          got += r;
+        }
+        owned({ dev: st.dev, ino: st.ino, sha256: hashOf(have.subarray(0, got)) });
+      }
+    } catch {
+      // keep the last recorded state
+    }
+    throw err;
   } finally {
     fs.closeSync(fd);
   }
@@ -509,8 +549,8 @@ export async function exportHandoff(input: ExportInput, opts: ExportOptions = {}
     if (bytes.length > manifestCap) throw new HandoffError("too_large", `the manifest is ${bytes.length} bytes, over the ${manifestCap} byte limit`);
     parseManifest(bytes); // exactly the publisher's reader
     writeNew(tmpManifest, bytes, (owned) => {
-      tmpManifestMade = { ...owned, sha256: crypto.createHash("sha256").update(bytes).digest("hex") };
-    });
+      tmpManifestMade = owned; // the hash of the bytes written so far, not of the planned ones
+    }, opts.writeSync);
     opts.hooks?.beforeManifestLink?.();
 
     // The marker goes up only while the bundle in place is still the one that was hashed.
