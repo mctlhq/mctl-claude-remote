@@ -26,7 +26,7 @@ jobs:
       # requires an approving review, those PRs then sit unmergeable until a
       # maintainer triggers a review by hand. mctl-agents is the App the
       # DevLoop implementer and release-please run under across the org.
-      allowed-bots: "mctl-claude-remote,github-actions,dependabot,mctl-agents"
+      allowed-bots: "mctl-claude-remote,github-actions,dependabot,mctl-agents,mctl-codex"
       sensitive-paths: '^(entrypoint\.sh|health-proxy\.js|skills/pr-steward/)'
       conventions: |
         This repo packages a self-hosted `claude --remote-control` device
