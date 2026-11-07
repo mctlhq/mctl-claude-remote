@@ -530,10 +530,10 @@ describe("ready and the CLI", () => {
     await expect(g.token()).rejects.toThrow(Unreadable);
   });
 
-  test("defaults point at the real App and the two installed repositories", () => {
+  test("defaults point at the real App and the repositories slots work on", () => {
     const c = config({ MCTL_BRIDGE_HOME: "/h" });
     expect(c.keyFile).toBe("/h/etc/codex-github-app.pem");
-    expect(c.repos).toEqual(["mctlhq/mctl-claude-remote", "mctlhq/bridge-step0-sandbox"]);
+    expect(c.repos).toEqual(["mctlhq/mctl-claude-remote", "mctlhq/bridge-step0-sandbox", "mctlhq/mctl-telegram", "mctlhq/mctl-gitops"]);
   });
 });
 
