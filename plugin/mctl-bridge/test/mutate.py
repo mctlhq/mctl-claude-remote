@@ -287,6 +287,7 @@ M=[
  ("slot.sh deps installs inside node_modules", SLOT, " -not -path '*/node_modules/*'", '', 1),
  ("slot.sh default model back to haiku", SLOT, 'MODEL=${MCTL_BRIDGE_SLOT_MODEL:-sonnet}', 'MODEL=${MCTL_BRIDGE_SLOT_MODEL:-haiku}', 1),
  ("slot.sh start line hides the model", SLOT, ' on model $MODEL (pty session', ' (pty session', 1),
+ ("channel instructions drop the one-command rule", CH, "no ; echo exit=$? and no && or ; chains", "chains are fine", 1),
  ("channel instructions drop the ps rule", CH, "use ps -o pid,ppid,stat,lstart,command -p <pid>", "use ps aux | grep", 1),
 
  ("poison memo off", LUA, "  redis.call('HSET', memo, 'fn', fn, 'args', raw, 'resp', body, 'entry', entry, 't', now)\n  redis.call('PEXPIRE', memo, RETAIN_MS)\n  ingest_reject(slot, entry, rid, fn, reason, now)", "  ingest_reject(slot, entry, rid, fn, reason, now)", 1),
