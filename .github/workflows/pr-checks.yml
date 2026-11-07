@@ -138,7 +138,7 @@ jobs:
           echo "run=$run" >> "$GITHUB_OUTPUT"
 
   # The mutation run reverts each guarantee in turn and fails if any revert
-  # leaves the tests green. Every shard runs the full `bun test` per mutation;
+  # leaves the tests green. Every shard runs `bun test --bail` per mutation;
   # sharding only splits which mutations a runner handles. Each matrix job has
   # its own checkout, so the in-place edits mutate.py makes never meet.
   bridge-mutation:

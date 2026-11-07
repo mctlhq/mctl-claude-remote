@@ -10,8 +10,9 @@ Sharding (CI runs 8 jobs in parallel):
   python3 test/mutate.py --list-shard I/N   print the names in that shard
 The partition is round-robin over the full list by index (index % N == I-1),
 so it is a pure function of the list. Every shard still validates the patterns
-of the WHOLE list before touching a file and runs the FULL `bun test` per
-mutation. A shard fails if a mutation survived, a run crashed or timed out, an
+of the WHOLE list before touching a file and runs the FULL `bun test --bail` per
+mutation: the run stops at the first failing test, which is all a kill needs, and
+a survivor still goes through every test. A shard fails if a mutation survived, a run crashed or timed out, an
 empty shard was requested, or it ran a different number of mutations than its
 partition says. test/test_shards.py proves the partition is exact.
 """
@@ -360,7 +361,10 @@ def tests_for(f):
     """The suite that must notice a mutation of file f: the python host has its own unittest suite."""
     if f == PTY:
         return ['python3', '-m', 'unittest', 'discover', '-s', 'test', '-p', 'test_slot_pty.py']
-    return ['bun', 'test']
+    # --bail ends the run at the first failure. A kill needs only one failing test,
+    # and a survivor fails none, so it still runs the whole suite: the verdict is
+    # the same as a full run, about three times faster on average.
+    return ['bun', 'test', '--bail']
 
 def parse_shard(spec, total=None):
     """'I/N' -> (I, N); anything malformed or out of range is an error."""

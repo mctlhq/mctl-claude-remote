@@ -276,8 +276,9 @@ python3 test/mutate.py   # every guarantee reverted in turn must fail a test
 ```
 
 In CI the mutation run is split into 8 parallel jobs (`python3 test/mutate.py
---shard I/8`, round-robin over the list). Each shard still runs the full
-`bun test` per mutation and checks the patterns of the whole list first; a
+--shard I/8`, round-robin over the list). Each shard runs `bun test --bail` per
+mutation, which stops at the first failing test (a survivor fails none, so it
+still runs every test), and checks the patterns of the whole list first; a
 shard fails if a mutation survives, a run crashes, or it runs a different
 number of mutations than its partition. `test/test_shards.py` proves the shards
 are disjoint and cover the list, and the `validate` job (the required check)
