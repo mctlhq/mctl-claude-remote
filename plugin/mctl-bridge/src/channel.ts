@@ -77,7 +77,7 @@ export const INSTRUCTIONS = [
   "   bun run --cwd plugin/mctl-bridge typecheck. To bring your branch up to date: git fetch origin,",
   "   then git rebase origin/main; on a conflict, fix the files with Edit, git add them and run",
   "   git rebase --continue. Never git merge: mctl-publish refuses merge commits.",
-  "15. To check on a background run, use ps -o pid,ppid,etime,command -p <pid> with the PIDs you",
+  "15. To check on a background run, use ps -o pid,ppid,stat,lstart,command -p <pid> with the PIDs you",
   "   captured, not ps piped into grep (grep prompts). Stop your own run with kill <pid>.",
   "   Packages are already installed from the lockfile when you start: do not install them.",
 ].join("\n");

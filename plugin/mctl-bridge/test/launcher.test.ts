@@ -306,7 +306,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
     const t = setup();
     expect(spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo], { env: t.env, encoding: "utf8" }).status).toBe(0);
     const trusted = allowOf(path.join(t.H, "slots", "s1", "settings.json"));
-    expect(trusted).toContain("Bash(ps:*)");
+    expect(trusted).toContain("Bash(ps -o pid,ppid,stat,lstart,command -p:*)");
     expect(trusted).not.toContain("Bash(kill:*)");
     const homes = path.join(t.root, "homes");
     fs.mkdirSync(path.join(homes, "mctl-slot-s2"), { recursive: true });
@@ -450,14 +450,20 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(INSTRUCTIONS).toContain("Never git merge: mctl-publish refuses merge commits.");
     expect(matches("git merge origin/main")).toBe(false);
     // rule 15: ps by PID and date run in both modes; kill is added only behind the user boundary
-    expect(INSTRUCTIONS).toContain("ps -o pid,ppid,etime,command -p <pid>");
-    expect(matches("ps -o pid,ppid,etime,command -p 10436")).toBe(true);
+    expect(INSTRUCTIONS).toContain("ps -o pid,ppid,stat,lstart,command -p <pid>");
+    expect(matches("ps -o pid,ppid,stat,lstart,command -p 10436")).toBe(true);
+    expect(matches("ps aux")).toBe(false);
     expect(matches("date -u")).toBe(true);
     expect(matches("kill 10436")).toBe(false);
     const denyLine = sh.match(/^\s*deny='(.*)'$/m);
     const denied = [...denyLine![1]!.matchAll(/"Bash\(([^"]*)\)"/g)].map((m) => m[1]!);
     expect(denied).toContain("pkill:*");
     expect(denied).toContain("killall:*");
+    // ps forms that print process environments are denied, and the deny does not catch the rule-15 form
+    const glob = (r: string): RegExp => new RegExp("^" + r.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$", "s");
+    const globDenied = (cmd: string): boolean => denied.some((r) => r.includes("*") && !r.endsWith(":*") && glob(r).test(cmd));
+    for (const env of ["ps eww", "ps -E", "ps auxe", "ps -ww -E -p 1", "ps -o pid,ppid,stat,lstart,command -p 10436 -e", "ps -o pid,ppid,stat,lstart,command -p 1 e"]) expect([env, globDenied(env)]).toEqual([env, true]);
+    expect(globDenied("ps -o pid,ppid,stat,lstart,command -p 10436")).toBe(false);
     // rules are numbered without gaps, so a later edit cannot silently drop one
     const nums = [...INSTRUCTIONS.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
     expect(nums).toEqual(nums.map((_, i) => i + 1));
