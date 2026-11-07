@@ -97,6 +97,7 @@ write goes through `mctl-publish`, which acts as `mctl-codex[bot]`, a GitHub App
 admin rights:
 
     mctl-publish publish --repo R --bundle F --manifest F --allow PATH --title T --body-file F
+    mctl-publish publish --repo R --bundle F --manifest F --allow PATH --title T --body-file F --update-from SHA
     mctl-publish ready --repo R --pr N --head SHA
     mctl-publish merge --repo R --pr N --head SHA
 
@@ -108,6 +109,12 @@ do not work around it: report the exact output with `[operator-question]`. Exit 
 outcome is unknown: read the state, never repeat the call blindly.
 
 `--allow` comes from the task's allowed files, never from the slot's manifest.
+
+`--update-from SHA` adds a slot's follow-up commits to a PR that `mctl-publish` opened itself
+(author `mctl-codex[bot]`, same repository, base `main`). SHA is the full head GitHub shows for
+that branch now; the push is a fast-forward from it and is refused if the branch moved, the
+new head does not descend from it, or the PR is not the App's own. Title and body stay as
+they are. Never use it to take over someone else's branch.
 
 INTERIM: until the slot handoff directories in issue #127 exist, the lead session prepares
 the bundle and manifest from a slot's verified commit and tells you their paths.
