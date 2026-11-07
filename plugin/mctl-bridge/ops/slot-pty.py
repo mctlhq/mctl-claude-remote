@@ -169,6 +169,7 @@ SOLID = re.compile(r"[─━]{20,}")
 DASHED = re.compile(r"^[\s╌┄┈─━│]*$")
 QUESTION = re.compile(r"^\s*(?:Do you want to|Would you like to|Allow)\b.*\?\s*$")
 OPTION = re.compile(r"^\s*[❯>]?\s*(\d+)\.\s+(\S.*?)\s*$")
+BACK_LIMIT = 400  # scrollback lines a prompt box may extend above the screen
 FOOTER = re.compile(r"Enter to confirm|Esc to cancel|Press Enter to continue")
 
 def find_prompt(lines, back=()):
@@ -195,15 +196,20 @@ def find_prompt(lines, back=()):
         i, opts = q
         j = i - 1
         while j >= 0 and not SOLID.search(lines[j]): j -= 1
-        above = []
-        if j < 0:
+        above, head = [], j >= 0
+        if not head:
+            # Walk up the scrollback to the box's rule, but not past an earlier prompt's question
+            # and not further than BACK_LIMIT lines: a rule found beyond either belongs to older
+            # output, and taking it would hide that this box's head is gone.
             back = list(back)
-            k = len(back) - 1
-            while k >= 0 and not SOLID.search(back[k]): k -= 1
-            above = back[k + 1:] if k >= 0 else []  # no rule in the scrollback either: not the box's head
+            for k in range(len(back) - 1, max(len(back) - BACK_LIMIT, 0) - 1, -1):
+                if SOLID.search(back[k]):
+                    above, head = back[k + 1:], True
+                    break
+                if QUESTION.match(back[k]): break
         body = [l.strip() for l in above + lines[max(j, 0) + (1 if j >= 0 else 0):i] if l.strip() and not DASHED.match(l)]
         return {"kind": "permission", "question": lines[i].strip(), "options": opts, "detail": body,
-                "truncated": j < 0 and not above}
+                "truncated": not head}
     if any(FOOTER.search(l) for l in lines):
         shown = [l.strip() for l in lines if l.strip() and not DASHED.match(l)]
         return {"kind": "dialog", "question": None, "options": [], "detail": shown[-15:]}

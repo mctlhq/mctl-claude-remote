@@ -136,6 +136,47 @@ print("GOT-KEYS")
 time.sleep(30)
 """
 
+def load_pty():
+    """slot-pty.py as a module. It runs main() at import, which exits on an unknown command;
+    everything above that call is already defined by then."""
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("slot_pty", PTY)
+    mod = importlib.util.module_from_spec(spec)
+    argv = sys.argv; sys.argv = ["slot-pty.py", "--no-such-command"]
+    try: spec.loader.exec_module(mod)
+    except SystemExit: pass
+    finally: sys.argv = argv
+    return mod
+
+class FindPrompt(unittest.TestCase):
+    RULE = "\u2500" * 60
+    ASK = [" Do you want to proceed?", " \u276f 1. Yes", "   2. No"]
+
+    def setUp(self):
+        self.m = load_pty()
+
+    def test_a_rule_on_the_last_scrollback_line_is_the_head_not_a_truncation(self):
+        p = self.m.find_prompt([" Bash command", " git status"] + self.ASK, back=["old output", self.RULE])
+        self.assertFalse(p["truncated"])
+        self.assertEqual(p["detail"], ["Bash command", "git status"])
+
+    def test_no_rule_anywhere_is_truncated(self):
+        p = self.m.find_prompt([" line-1", " line-2"] + self.ASK, back=["out-1", "out-2"])
+        self.assertTrue(p["truncated"])
+        self.assertEqual(p["detail"], ["line-1", "line-2"])
+
+    def test_a_rule_above_an_earlier_prompt_is_not_this_box_head(self):
+        old = [self.RULE, " Bash command", " rm stale", " Do you want to proceed?", " 1. Yes", " 2. No", " out"]
+        p = self.m.find_prompt([" line-1"] + self.ASK, back=old)
+        self.assertTrue(p["truncated"])
+        self.assertNotIn("rm stale", p["detail"])
+
+    def test_a_rule_beyond_the_scan_limit_is_not_taken(self):
+        back = [self.RULE, " Bash command"] + [" x"] * self.m.BACK_LIMIT
+        p = self.m.find_prompt([" line-1"] + self.ASK, back=back)
+        self.assertTrue(p["truncated"])
+        self.assertNotIn("Bash command", p["detail"])
+
 class RenderedScreen(unittest.TestCase):
     def setUp(self):
         self.d = tempfile.mkdtemp(prefix="slotpty-")
