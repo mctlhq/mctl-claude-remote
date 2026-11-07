@@ -71,7 +71,7 @@ export function config(env: Record<string, string | undefined> = process.env): C
     appId: env.MCTL_PUBLISH_APP_ID ?? "5648595",
     installationId: env.MCTL_PUBLISH_INSTALLATION_ID ?? "179394531",
     keyFile: env.MCTL_PUBLISH_KEY_FILE ?? path.join(home, "etc", "codex-github-app.pem"),
-    repos: (env.MCTL_PUBLISH_REPOS ?? "mctlhq/mctl-claude-remote,mctlhq/bridge-step0-sandbox").split(",").filter(Boolean),
+    repos: (env.MCTL_PUBLISH_REPOS ?? "mctlhq/mctl-claude-remote,mctlhq/bridge-step0-sandbox,mctlhq/mctl-telegram,mctlhq/mctl-gitops").split(",").filter(Boolean),
     apiUrl: env.MCTL_PUBLISH_API_URL ?? "https://api.github.com",
     gitBase: env.MCTL_PUBLISH_GIT_BASE ?? "https://github.com",
     timeoutMs: Number(env.MCTL_PUBLISH_TIMEOUT_MS ?? 30_000),
