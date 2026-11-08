@@ -1,0 +1,6 @@
+#!/bin/zsh
+# The orchestrator starts and reads DevLoop itself, as the ZITADEL machine user mctl-api maps to
+# service:mctl-orchestrator-devloop (mctlhq/mctl-api#963). The key stays in a 0600 file that only
+# this CLI reads; see src/devloop.ts.
+H=${MCTL_BRIDGE_HOME:-$HOME/mctl-bridge}
+exec ${BUN:-$HOME/.bun/bin/bun} run --silent --no-env-file --config=$H/plugin/bunfig.toml $H/plugin/src/devloop.ts "$@"

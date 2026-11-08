@@ -67,8 +67,8 @@ CONF
 
 # Code: only what runs. No runtime dependencies.
 rsync -a --delete --exclude node_modules --exclude test --exclude ops "$SRC/" $H/plugin/
-cp $SRC/ops/mctl-bridge $SRC/ops/mctl-codex $SRC/ops/mctl-publish $SRC/ops/slot.sh $SRC/ops/slot-pty.py $SRC/ops/watch.sh $SRC/ops/host-boundary-probe.sh $SRC/ops/host-boundary-probe.py $H/
-chmod 755 $H/mctl-bridge $H/mctl-codex $H/mctl-publish $H/slot.sh $H/watch.sh
+cp $SRC/ops/mctl-bridge $SRC/ops/mctl-codex $SRC/ops/mctl-publish $SRC/ops/mctl-devloop $SRC/ops/slot.sh $SRC/ops/slot-pty.py $SRC/ops/watch.sh $SRC/ops/host-boundary-probe.sh $SRC/ops/host-boundary-probe.py $H/
+chmod 755 $H/mctl-bridge $H/mctl-codex $H/mctl-publish $H/mctl-devloop $H/slot.sh $H/watch.sh
 # Scripts launchd runs on a timer: swap by rename, never overwrite in place, so a run that
 # is executing right now (the updater runs this very script) keeps its old file intact.
 for f in codex-remote-guard.sh bridge-updater.sh wake-state.sh; do
@@ -81,6 +81,7 @@ mkdir -p $HOME/.local/bin
 ln -sfn $H/mctl-bridge $HOME/.local/bin/mctl-bridge
 ln -sfn $H/mctl-codex $HOME/.local/bin/mctl-codex
 ln -sfn $H/mctl-publish $HOME/.local/bin/mctl-publish
+ln -sfn $H/mctl-devloop $HOME/.local/bin/mctl-devloop
 
 # The orchestrator thread may run the bridge CLI without a prompt (see the rules file).
 mkdir -p $HOME/.codex/rules

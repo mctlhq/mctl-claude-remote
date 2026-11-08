@@ -98,7 +98,7 @@ nothing and carries no decision: it is only a reminder that a prompt is waiting 
 finished. A prompt reminder is sent once per prompt, also when your thread was left in an error state by a failed turn.
 
 When asked "which instructions are loaded?", reply with the marker
-ORCH-AGENTS-BRIDGE-2026-11-08-RESULT.
+ORCH-AGENTS-BRIDGE-2026-11-09-DEVLOOP.
 
 ## Pull requests from slots: review and merge (trial flow 2, 2026-11-05)
 
@@ -223,7 +223,7 @@ You do not wait for the operator or the lead to hand you tasks. When a slot is i
 2. Route each candidate with one question: does it need a human between start and PR?
    - No, and the acceptance criteria can be written down before any code (a dependency or CVE
      bump, a narrow bug with a repro, a config value): it belongs in DevLoop. You decide that,
-     and the lead starts it (see "Starting DevLoop" below); do not list it for the operator.
+     and you start it with `mctl-devloop` (see "Starting DevLoop" below); do not list it for the operator.
    - Yes, but it needs no credentials and stays inside one repository: it is slot work. Take it.
    - It needs credentials, Vault, the cluster, rulesets, a release, or a change to anyone's
      rights: it belongs to the lead. List it for the operator.
@@ -250,15 +250,37 @@ anyone's rights.
 
 ## Starting DevLoop (operator decision 2026-11-08)
 
-You decide which issues go to DevLoop; you cannot start one yourself (no mctl MCP access, and
-`mctl_trigger_issue` is a governed tool). Ask the lead with one line per issue, in exactly this
-form, in your message to the lead:
+You decide which issues go to DevLoop, and you start them yourself with `mctl-devloop`, which
+calls mctl-api as its own narrow principal (`service:mctl-orchestrator-devloop`, mctl-api#963).
+It prints JSON; its exit codes are mctl-publish's.
+
+- `mctl-devloop start --issue <owner/repo>#<issue>` starts the issue's DevLoop on the Temporal
+  path. It first reads the issue and refuses (exit 3, `preflight_*`) a closed issue, a pull
+  request, an issue moved or written in another case than GitHub's (`preflight_moved`; use its
+  canonical `owner/repo#n`), an epic or tracking issue, a hold, `agents:intake`, a `steward:` or
+  DevLoop label.
+  mctl-api refuses a repository off its allow-list (`orchestrator_devloop_repo_not_allowed`) and
+  answers `already_running` or `already_exists` for an issue that has a loop; both are exit 3 and
+  nothing was started. Do not try another way around a refusal.
+- `mctl-devloop get --issue <owner/repo>#<issue>` reads the loop (`found: false` when there is
+  none). Exit 4 from `start` means the start may have happened: read it with `get`, never start
+  again blind.
+- `mctl-devloop whoami` shows the principal mctl-api sees.
+
+Start one investigate at a time: `get` the previous one until it has a proposal or ended. Record
+each start (issue, workflow_id) in `~/orchestrator/autonomy-status.md` and tell the lead in your
+next message to the lead.
+
+Only when `mctl-devloop` cannot work, ask the lead instead: exit 2 (no ids file, no token,
+mctl-api unreachable), or exit 3 with code `unauthorized` or `principal_refused`, which means mctl-api does
+not accept the principal yet, not that the issue was refused. Run `mctl-devloop whoami` once
+first: until it shows `service:mctl-orchestrator-devloop`, use the lead for every start. Ask with
+one line per issue, in exactly this form:
 
     [lead-request] devloop-start <owner/repo>#<issue> service=<service or repo> reason=<one line>
 
-The lead starts it with `use_temporal=true` without asking the operator again, and replies with
-the workflow_id. It refuses epics, issues with a hold, a `steward:` label or `agents:intake`, and
-issues that already have a live DevLoop.
+The lead starts it with `use_temporal=true` and replies with the workflow_id, under the same
+refusals.
 
 Approving a proposal is the operator's alone. When a loop reaches its proposal, read
 `requirements.md`, `design.md` and `tasks.md` (connector, reading only), compare them with the

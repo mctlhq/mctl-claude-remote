@@ -18,8 +18,32 @@ partition says. test/test_shards.py proves the partition is exact.
 """
 import subprocess, sys, shutil
 LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'; GUARD='ops/codex-remote-guard.sh'; WAKE='ops/wake-state.sh'; UPD='ops/bridge-updater.sh'; INSTALL='ops/install.sh'; PTY='ops/slot-pty.py'; WATCH='ops/watch.sh'
-CX='src/codexctl.ts'; PB='src/publish.ts'; RC='src/reconcile.ts'; AP='src/appserver.ts'
+CX='src/codexctl.ts'; PB='src/publish.ts'; DL='src/devloop.ts'; RC='src/reconcile.ts'; AP='src/appserver.ts'
 M=[
+ ("devloop preflight trusts a moved or case-folded issue", DL, 'if (d?.html_url !== issue.url) throw', 'if (false) throw', 1),
+ ("devloop follows a redirect with the token", DL, 'redirect: "error", ', '', 1),
+ ("devloop passes any 403 code through", DL, 'code.startsWith("orchestrator_devloop_") ? ', 'code ? ', 1),
+ ("devloop starts an intake issue", DL, 'if (l === "agents:intake") return { code: "preflight_intake", label: n };', '', 1),
+ ("devloop starts a steward issue", DL, 'if (l.startsWith("steward:")) return { code: "preflight_steward", label: n };', '', 1),
+ ("devloop starts an epic", DL, 'if (l === "epic" || l.startsWith("epic:") || l === "tracking") return { code: "preflight_epic", label: n };', '', 1),
+ ("devloop starts a held issue", DL, 'if (l === "hold" || l === "on-hold" || l.startsWith("hold:") || l === "blocked") return { code: "preflight_hold", label: n };', '', 1),
+ ("devloop starts an issue with a DevLoop label", DL, 'if (l.startsWith("devloop") || l.startsWith("dev-loop")) return { code: "preflight_devloop", label: n };', '', 1),
+ ("devloop starts a closed issue", DL, 'if (d?.state !== "open") throw new Refused("preflight_closed"', 'if (false) throw new Refused("preflight_closed"', 1),
+ ("devloop starts a pull request", DL, 'if (d?.pull_request !== undefined) throw new Refused("preflight_pull_request"', 'if (false) throw new Refused("preflight_pull_request"', 1),
+ ("devloop takes a missing label list as none", DL, 'if (!Array.isArray(d?.labels)) throw new Unreadable(`${issue.url}: no label list`);', 'if (!Array.isArray(d?.labels)) d.labels = [];', 1),
+ ("devloop skips the preflight", DL, '  await preflight(gh, issue);\n', '', 1),
+ ("devloop takes a lost start for a refusal", DL, 'throw new OutcomeUnknown(`the start of ${issue.workflowId} may or may not have happened', 'throw new Refused("x", `the start of ${issue.workflowId} may or may not have happened', 1),
+ ("devloop takes a 5xx start for a start", DL, '  throw new OutcomeUnknown(`POST dev-loop/start for', '  return { ok: true, started: true };\n  throw new OutcomeUnknown(`POST dev-loop/start for', 1),
+ ("devloop takes an existing loop for a start", DL, 'throw new Refused(typeof r.data.outcome === "string" ? r.data.outcome : "not_started"', 'return { ok: true, started: false }; throw new Refused(typeof r.data.outcome === "string" ? r.data.outcome : "not_started"', 1),
+ ("devloop believes a reply for another workflow", DL, 'if (r.status === 202 && r.data?.started === true && r.data?.workflow_id === issue.workflowId) {', 'if (r.status === 202 && r.data?.started === true) {', 1),
+ ("devloop takes any 404 as no loop", DL, ' && r.data.error.startsWith("workflow not found")', '', 1),
+ ("devloop assertion names no key", DL, 'typ: "JWT", kid: ids.key_id }', 'typ: "JWT" }', 1),
+ ("devloop asks for no mctl-api audience", DL, 'openid urn:zitadel:iam:org:project:id:${projectId}:aud urn:zitadel', 'openid urn:zitadel', 1),
+ ("devloop takes any ids", DL, ' || !ZITADEL_ID.test(d[k])', '', 1),
+ ("devloop prints unredacted", DL, 'process.stdout.write(`${redact(JSON.stringify(v))}\\n`)', 'process.stdout.write(`${JSON.stringify(v)}\\n`)', 1),
+ ("devloop echoes the token error description", DL, '` (${r.data.error})`', '` (${r.data.error} ${r.data.error_description})`', 1),
+ ("devloop takes another owner's issue", DL, 'const ISSUE_REF = /^mctlhq\\/', 'const ISSUE_REF = /^[a-z]+\\/', 1),
+ ("devloop takes a token-less reply", DL, '|| typeof r.data?.access_token !== "string" || r.data.access_token === ""', '', 1),
  ("reconcile treats unreadable as no prompt", RC, 'this.note("reconcile slot unreadable", {', 'this.waiting.delete(slot); this.note("reconcile slot unreadable", {', 1),
  ("reconcile logs an unreadable slot every pass", RC, 'if (!this.unreadable.has(slot)) {', 'if (true) {', 1),
  ("reconcile restarts the clock on a repeat", RC, 'if (held?.hash === hash) {', 'if (false) {', 1),

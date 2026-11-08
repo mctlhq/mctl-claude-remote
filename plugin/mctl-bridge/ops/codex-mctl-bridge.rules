@@ -20,3 +20,13 @@ prefix_rule(
     match = [["mctl-publish", "status"], ["mctl-publish", "merge", "--repo", "r", "--pr", "1", "--head", "a"]],
     not_match = [["mctl-publish", "approve"], ["mctl-publish-x", "status"], ["cat", "codex-github-app.pem"]],
 )
+
+# The orchestrator starts and reads DevLoop as its own ZITADEL machine user. There is no approve
+# command: approving a proposal is the operator's. Reading the key directly still prompts.
+prefix_rule(
+    pattern = ["mctl-devloop", ["whoami", "start", "get"]],
+    decision = "allow",
+    justification = "mctl-devloop: start and read DevLoop as service:mctl-orchestrator-devloop, never approve",
+    match = [["mctl-devloop", "whoami"], ["mctl-devloop", "start", "--issue", "mctlhq/mctl-api#1"], ["mctl-devloop", "get", "--issue", "mctlhq/mctl-api#1"]],
+    not_match = [["mctl-devloop", "approve"], ["mctl-devloop-x", "start"], ["cat", "mctl-devloop-zitadel.pem"]],
+)
