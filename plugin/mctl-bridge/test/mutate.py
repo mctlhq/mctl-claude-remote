@@ -51,6 +51,7 @@ M=[
  ('publish update takes the first of several PRs', PB, 'if (open.length > 1) throw', 'if (false) throw', 1),
  ('publish update pushes without a PR', PB, 'if (open.length === 0) throw', 'if (false) throw', 1),
  ('publish update creates a missing branch', PB, 'if (present === null) throw new Refused("no_branch"', 'if (false) throw new Refused("no_branch"', 1),
+ ("export_handoff detached head is unexplained", CH, 'throw new ToolError("HEAD is detached: check out the task\'s branch, then export again");', 'throw new ToolError("export failed");', 1),
  ("update-branch takes any PR author", PB, 'if (author !== `${slug}[bot]` || p?.user?.type !== "Bot") throw new Refused("not_own_pr"', 'if (false) throw new Refused("not_own_pr"', 1),
  ("update-branch takes a fork branch", PB, 'if (p?.head?.repo?.full_name !== repo) throw new Refused("not_own_pr"', 'if (false) throw new Refused("not_own_pr"', 1),
  ("update-branch is not pinned to the head", PB, '{ expected_head_sha: head }', '{}', 1),
