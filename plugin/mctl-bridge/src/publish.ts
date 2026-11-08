@@ -542,6 +542,40 @@ export async function ready(cfg: Config, gh: GitHub, repo: string, pr: number, h
 }
 
 /**
+ * Brings the App's own PR up to date with main on GitHub's side, by merging main into the
+ * branch, so that a repository requiring an up-to-date branch can merge it. Pinned to the head
+ * (GitHub refuses if the branch has moved), and only for a PR the App opened itself. The new
+ * head is a different commit: it needs its own review and checks before `merge` takes it.
+ */
+export async function updateBranch(cfg: Config, gh: GitHub, repo: string, pr: number, head: string): Promise<Record<string, unknown>> {
+  checkRepo(cfg, repo);
+  const p = await readPr(gh, repo, pr, head);
+  if (p.state !== "open" || p.merged === true) throw new Refused("not_open", String(p.state));
+  if (p.base?.ref !== "main") throw new Refused("wrong_base", String(p.base?.ref));
+  const slug = (await gh.app())?.slug;
+  if (!slug || typeof slug !== "string") throw new Unreadable("the App has no slug");
+  const author = p?.user?.login;
+  if (!author || typeof author !== "string") throw new Unreadable("the PR has no author");
+  if (author !== `${slug}[bot]` || p?.user?.type !== "Bot") throw new Refused("not_own_pr", `PR #${pr} was opened by ${author}`);
+  if (p?.head?.repo?.full_name !== repo) throw new Refused("not_own_pr", `PR #${pr} comes from another repository`);
+  // Whether it is behind is read, not inferred from mergeable_state, which reports "blocked"
+  // ahead of "behind" and null while GitHub is still computing.
+  const cmp = await gh.read(`/repos/${repo}/compare/main...${head}`);
+  if (typeof cmp?.behind_by !== "number") throw new Unreadable("compare returned no behind_by");
+  if (cmp.behind_by === 0) return { ok: true, pr, head, already: true };
+  let r: Reply;
+  try {
+    r = await gh.write("PUT", `/repos/${repo}/pulls/${pr}/update-branch`, { expected_head_sha: head });
+  } catch (err) {
+    if (err instanceof TransportError) throw new OutcomeUnknown(err.message);
+    throw err;
+  }
+  if (r.status >= 500) throw new OutcomeUnknown(`update-branch: status ${r.status}`);
+  if (r.status !== 202) throw new Refused("update_refused", `status ${r.status}: ${String(r.data?.message)}`);
+  return { ok: true, pr, from: head, behind_by: cmp.behind_by, accepted: true, next: "GitHub merges main into the branch in the background: read the PR's new head, then wait for its review and checks on that head" };
+}
+
+/**
  * The checks the repository itself demands of main. They live in two separate places: a
  * ruleset (`/rules/branches/main`) or classic protection (`/branches/main`), and a repository
  * may use either. A shape this code does not recognise is a failed read, never "no checks".
@@ -682,6 +716,7 @@ const USAGE = `usage: mctl-publish status
        mctl-publish publish --repo R --bundle F --manifest F --allow PATH [--allow PATH ...] --title T --body-file F [--update-from SHA]
        mctl-publish ready --repo R --pr N --head SHA
        mctl-publish merge --repo R --pr N --head SHA
+       mctl-publish update-branch --repo R --pr N --head SHA
 Exit: 0 ok, 1 usage, 2 unreadable, 3 refused, 4 outcome unknown.`;
 
 export async function main(argv: string[], cfg: Config = config()): Promise<number> {
@@ -719,6 +754,11 @@ export async function main(argv: string[], cfg: Config = config()): Promise<numb
       case "merge": {
         const p = prArgs(rest);
         print(await merge(cfg, gh, p.repo, p.pr, p.head));
+        return 0;
+      }
+      case "update-branch": {
+        const p = prArgs(rest);
+        print(await updateBranch(cfg, gh, p.repo, p.pr, p.head));
         return 0;
       }
       default:

@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { GitHub, OutcomeUnknown, Refused, Unreadable, allowed, config, main, merge, parseManifest, parseRaw, publish, ready } from "../src/publish.ts";
+import { GitHub, OutcomeUnknown, Refused, Unreadable, allowed, config, main, merge, parseManifest, parseRaw, publish, ready, updateBranch } from "../src/publish.ts";
 import type { Config, Manifest } from "../src/publish.ts";
 
 const REPO = "mctlhq/r";
@@ -36,6 +36,9 @@ type Fake = {
   dropMerge: boolean;
   dropPull: boolean;
   mergeReply: { status: number; body: any };
+  behindBy: number | null;
+  updateReply: { status: number; body: any };
+  dropUpdate: boolean;
   tokenSeen: string[];
   app: any;
 };
@@ -69,6 +72,11 @@ function handle(req: Request, url: URL, body: any): Response {
   if (key === "PUT /repos/mctlhq/r/pulls/7/merge") {
     if (fake.dropMerge) throw new Error("drop");
     return J(fake.mergeReply.body, fake.mergeReply.status);
+  }
+  if (key === `GET /repos/mctlhq/r/compare/main...${HEAD}`) return J(fake.behindBy === null ? {} : { behind_by: fake.behindBy, ahead_by: 1 });
+  if (key === "PUT /repos/mctlhq/r/pulls/7/update-branch") {
+    if (fake.dropUpdate) throw new Error("drop");
+    return J(fake.updateReply.body, fake.updateReply.status);
   }
   if (key === "POST /graphql") return J({ data: {} });
   if (key === "GET /repos/mctlhq/r/rules/branches/main") return J(fake.rules);
@@ -114,6 +122,9 @@ beforeEach(() => {
     prLater: null,
     prReads: 0,
     mergeReply: { status: 200, body: { merged: true, sha: "m".repeat(40) } },
+    behindBy: 3,
+    updateReply: { status: 202, body: { message: "Updating pull request branch." } },
+    dropUpdate: false,
   };
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "publish-")));
   fs.writeFileSync(path.join(tmp, "key.pem"), PEM, { mode: 0o600 });
@@ -532,6 +543,60 @@ describe("listing", () => {
     await expect(g.list("/x")).rejects.toThrow(Unreadable);
     (g as any).raw = async () => ({ status: 200, data: [], next: "http://x/2" });
     await expect(g.list("/x")).rejects.toThrow(Unreadable);
+  });
+});
+
+describe("update-branch", () => {
+  const own = () => {
+    fake.pr.user = { login: "mctl-codex[bot]", type: "Bot" };
+    fake.pr.head.repo = { full_name: REPO };
+  };
+  const updates = () => fake.calls.filter((c) => c.path === "/repos/mctlhq/r/pulls/7/update-branch");
+
+  test("merges main into the App's own PR, pinned to the head, only when it is behind", async () => {
+    own();
+    expect(await updateBranch(cfg, gh, REPO, 7, HEAD)).toMatchObject({ ok: true, accepted: true, from: HEAD, behind_by: 3 });
+    expect(updates().map((c) => [c.method, c.body])).toEqual([["PUT", { expected_head_sha: HEAD }]]);
+    fake.behindBy = 0;
+    expect(await updateBranch(cfg, gh, REPO, 7, HEAD)).toMatchObject({ ok: true, already: true });
+    expect(updates()).toHaveLength(1);
+  });
+
+  test("never on someone else's PR, another repository's branch, a moved head or a closed PR", async () => {
+    own();
+    fake.pr.user = { login: "mashkovd", type: "User" };
+    await refused(updateBranch(cfg, gh, REPO, 7, HEAD), "not_own_pr");
+    fake.pr.user = { login: "mctl-codex[bot]", type: "User" };
+    await refused(updateBranch(cfg, gh, REPO, 7, HEAD), "not_own_pr");
+    own();
+    fake.pr.head.repo = { full_name: "someone/fork" };
+    await refused(updateBranch(cfg, gh, REPO, 7, HEAD), "not_own_pr");
+    own();
+    fake.pr.head.sha = "b".repeat(40);
+    await refused(updateBranch(cfg, gh, REPO, 7, HEAD), "head_moved");
+    fake.pr.head.sha = HEAD;
+    fake.pr.state = "closed";
+    await refused(updateBranch(cfg, gh, REPO, 7, HEAD), "not_open");
+    fake.pr.state = "open";
+    fake.pr.base.ref = "release";
+    await refused(updateBranch(cfg, gh, REPO, 7, HEAD), "wrong_base");
+    await refused(updateBranch(cfg, gh, "mctlhq/api", 7, HEAD), "repo_not_allowed");
+    expect(updates()).toHaveLength(0);
+  });
+
+  test("an unreadable compare is a failed read, a refusal is refused, a lost reply is unknown", async () => {
+    own();
+    fake.pr.user = {};
+    await expect(updateBranch(cfg, gh, REPO, 7, HEAD)).rejects.toThrow(Unreadable);
+    own();
+    fake.behindBy = null;
+    await expect(updateBranch(cfg, gh, REPO, 7, HEAD)).rejects.toThrow(Unreadable);
+    expect(updates()).toHaveLength(0);
+    fake.behindBy = 2;
+    fake.updateReply = { status: 422, body: { message: "expected head sha didn't match current head ref." } };
+    await refused(updateBranch(cfg, gh, REPO, 7, HEAD), "update_refused");
+    fake.dropUpdate = true;
+    await expect(updateBranch(cfg, gh, REPO, 7, HEAD)).rejects.toThrow(OutcomeUnknown);
   });
 });
 

@@ -97,6 +97,14 @@ describe.skipIf(requiresValkey)("export_handoff", () => {
     await expect(t.adapter.call("export_handoff", { task_id: t.taskId })).rejects.toThrow(/no handoff directory/);
   });
 
+  test("a detached HEAD is refused with a message the slot can act on", async () => {
+    const s = await setup();
+    await s.adapter.call("ack_task", { task_id: s.taskId, attempt_id: s.attemptId });
+    execFileSync("git", ["checkout", "-q", "--detach"], { cwd: s.repo });
+    await expect(s.adapter.call("export_handoff", { task_id: s.taskId })).rejects.toThrow(/HEAD is detached/);
+    expect(fs.readdirSync(s.root)).toEqual([]);
+  });
+
   test("the repository comes only from a github.com origin", () => {
     expect(repoFromRemote("https://github.com/mctlhq/mctl-api.git")).toBe("mctlhq/mctl-api");
     expect(repoFromRemote("git@github.com:mctlhq/mctl-api.git")).toBe("mctlhq/mctl-api");

@@ -102,6 +102,7 @@ admin rights:
     mctl-publish publish --repo R --bundle F --manifest F --allow PATH --title T --body-file F --update-from SHA
     mctl-publish ready --repo R --pr N --head SHA
     mctl-publish merge --repo R --pr N --head SHA
+    mctl-publish update-branch --repo R --pr N --head SHA
 
 Use the GitHub connector for reading only. It acts as the owner with admin rights and can
 bypass branch protection, so never write through it: no merge, ref update, commit, review
@@ -111,6 +112,13 @@ do not work around it: report the exact output with `[operator-question]`. Exit 
 outcome is unknown: read the state, never repeat the call blindly.
 
 `--allow` comes from the task's allowed files, never from the slot's manifest.
+
+`update-branch` merges main into the App's own PR on GitHub, for a repository that only merges
+an up-to-date branch (`merge` refuses with `not_mergeable ... behind`). It is the last step
+before a merge, never while the slot still adds commits to that branch: the slot's local branch
+does not have the merge, so its next `--update-from` would be refused. The new head is a merge
+commit by `mctl-codex[bot]`; claude-review runs on it by itself, and `merge` needs that approval
+and green checks on the new head like on any other.
 
 `--update-from SHA` adds a slot's follow-up commits to a PR that `mctl-publish` opened itself
 (author `mctl-codex[bot]`, same repository, base `main`). SHA is the full head GitHub shows for

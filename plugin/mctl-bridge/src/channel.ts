@@ -369,11 +369,17 @@ export class Adapter {
       try {
         return execFileSync("git", ["-c", "core.fsmonitor=false", ...a], { cwd: this.cfg.cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
       } catch (err) {
-        throw new ToolError(`git ${a.join(" ")} failed: ${String((err as { stderr?: string }).stderr ?? err).trim().slice(0, 300)}`);
+        const stderr = String((err as { stderr?: string }).stderr ?? "").trim();
+        throw new ToolError(`git ${a.join(" ")} failed: ${(stderr || (err instanceof Error ? err.message : String(err))).slice(0, 300)}`);
       }
     };
     const repoPath = git("rev-parse", "--show-toplevel");
-    const branch = git("symbolic-ref", "--quiet", "--short", "HEAD");
+    let branch: string;
+    try {
+      branch = git("symbolic-ref", "--short", "HEAD");
+    } catch {
+      throw new ToolError("HEAD is detached: check out the task's branch, then export again");
+    }
     const headSha = git("rev-parse", "--verify", "HEAD^{commit}");
     const baseSha = git("merge-base", "HEAD", "refs/remotes/origin/main");
     const repo = repoFromRemote(git("remote", "get-url", "origin"));
