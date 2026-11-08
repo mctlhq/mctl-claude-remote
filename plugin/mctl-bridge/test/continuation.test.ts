@@ -165,13 +165,16 @@ describe.skipIf(requiresValkey)("continuation after a planned restart", () => {
       "no GitHub push, merge, deploy or lifecycle actions",
     ])
       expect(sec).toContain(rule);
-    // the interim publishing rule for slot PRs stays explicit until the handoff protocol exists
+    // slot PRs come from the slot's own handoff directory, checked by path and task id
     const flat = md.replace(/\s+/g, " ");
-    expect(flat).toContain("INTERIM: until the slot handoff directories in issue #127 exist");
+    expect(flat).not.toContain("INTERIM");
+    expect(flat).toContain("Use them only when both lie directly in that slot's own directory `/Users/mctl-slot-<slot>/.mctl-bridge/handoff/`");
+    expect(flat).toContain("`<task id>.bundle` and `<task id>.manifest.json` for the task the slot reported on");
+    expect(flat).toContain("you do not publish: ask the operator.");
     expect(flat).toContain("Every GitHub write goes through `mctl-publish`");
     expect(flat).toContain("so never write through it");
     expect(flat).toContain("`--allow` comes from the task's allowed files, never from the slot's manifest");
     // the marker line the orchestrator answers with is untouched
-    expect(md).toContain("ORCH-AGENTS-BRIDGE-2026-11-08.");
+    expect(md).toContain("ORCH-AGENTS-BRIDGE-2026-11-08-HANDOFF.");
   });
 });

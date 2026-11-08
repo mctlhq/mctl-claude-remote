@@ -95,7 +95,23 @@ case $cmd in
     (( n < MAX )) || { echo "already $n slots running (limit $MAX)" >&2; exit 1; }
     d=$D
     sh_home=${U:+$HOME_ROOT/$U}; sh_home=${sh_home:-$HOME}
-    as_ mkdir -p -m 700 "$d" "$d/log"
+    as_ mkdir -p -m 700 "$d" "$d/log" "$d/handoff"
+    # The slot's handoff directory (#127): the channel's export_handoff writes the bundle and
+    # manifest there, and mctl-publish, running as the operator, reads them from there. Owned by
+    # the slot user, mode 700, so no other slot can enter it. Behind the user boundary the slot
+    # grants the operator, and only the operator, an ACL: search (pass through) on its home and
+    # on $d, list and search on handoff/. The exporter writes files 644, so that is enough to read
+    # them, and another slot still cannot reach them: it has no way through this slot's home.
+    # -a before +a keeps one entry per start. A failure is reported, not fatal: publish then
+    # refuses with handoff_unreadable, which is loud.
+    as_ chmod 700 "$d/handoff"
+    if (( BOUNDARY )); then
+      op=$(/usr/bin/id -un)
+      for acl in "$sh_home|$op allow search" "$d|$op allow search" "$d/handoff|$op allow list,search"; do
+        as_ /bin/chmod -a "${acl#*|}" "${acl%%|*}" 2>/dev/null || true
+        as_ /bin/chmod +a "${acl#*|}" "${acl%%|*}" 2>/dev/null || echo "handoff: could not grant ${acl#*|} on ${acl%%|*}; mctl-publish will not be able to read this slot's handoff" >&2
+      done
+    fi
     # The slot user reads the plugin code; it must not be able to change it (operator-owned).
     chmod -R go-w,a+rX $H/plugin
     chmod go-w,a+rx $PTY
@@ -133,7 +149,7 @@ case $cmd in
     fi
     put $d/mcp.json 600 <<JSON
 {"mcpServers":{"mctl-bridge":{"command":$(json "$bun"),"args":["run","--silent","--no-env-file",$(json "--config=$H/plugin/bunfig.toml"),$(json "$H/plugin/src/channel.ts")],
- "env":{"MCTL_BRIDGE_SLOT":$(json "$s"),"MCTL_BRIDGE_TRANSPORT":"rpc","MCTL_BRIDGE_VALKEY_URL":$(json "redis://bridge_slot_$s@127.0.0.1:$port/0"),"MCTL_BRIDGE_VALKEY_PASSWORD_FILE":$(json "$d/slot.pw")}}}}
+ "env":{"MCTL_BRIDGE_SLOT":$(json "$s"),"MCTL_BRIDGE_TRANSPORT":"rpc","MCTL_BRIDGE_VALKEY_URL":$(json "redis://bridge_slot_$s@127.0.0.1:$port/0"),"MCTL_BRIDGE_VALKEY_PASSWORD_FILE":$(json "$d/slot.pw"),"MCTL_BRIDGE_HANDOFF_ROOT":$(json "$d/handoff")}}}}
 JSON
     hook=$(json "/usr/bin/python3 ${(qq)H}/plugin/hooks/state.py")
     # Permission rules. allow = local, reversible work inside the slot's own checkout: reading,
@@ -192,7 +208,7 @@ JSON
     # to [a-z0-9-], and the name is zsh-quoted anyway.
     rc=; rcname=${MCTL_BRIDGE_RC_PREFIX:-mctl-slot-}${(U)s}
     [[ ${MCTL_BRIDGE_REMOTE_CONTROL:-1} == 0 ]] || rc="--remote-control ${(qq)rcname} "
-    tools=mcp__mctl-bridge__ack_task,mcp__mctl-bridge__ack_reply,mcp__mctl-bridge__ask_orchestrator,mcp__mctl-bridge__report_result,mcp__mctl-bridge__bridge_status
+    tools=mcp__mctl-bridge__ack_task,mcp__mctl-bridge__ack_reply,mcp__mctl-bridge__ask_orchestrator,mcp__mctl-bridge__report_result,mcp__mctl-bridge__export_handoff,mcp__mctl-bridge__bridge_status
     # In run.sh below the unlock goes through security's interactive mode on stdin: the password
     # never reaches argv, and without -p a plain unlock would read /dev/tty (the session's pty)
     # and wedge the slot. (No backticks in the heredoc: it is expanded when written.)
