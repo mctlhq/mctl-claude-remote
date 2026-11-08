@@ -1,0 +1,153 @@
+{
+  "version": "attention-fixtures-89/v1",
+  "status": "design fixtures only; synthetic data; no implementation exists; derived from docs/attention-decision-integration-89.md",
+  "conventions": {
+    "group": "g1",
+    "resource_notation": "repo#number",
+    "state_notation": "{digest, revision, head}; null = absent",
+    "authoritative": "attn-ack record (only suppression source)",
+    "pending": "attn-pend record (never suppresses)",
+    "ack_entry": "adapter XACKs the stream entry itself",
+    "wake": "a notification is emitted to the session"
+  },
+  "cases": [
+    {
+      "id": "known_unchanged",
+      "given": {"authoritative": {"o/r#1": {"digest": "d1", "revision": 5, "head": "aaa"}}, "event": {"id": "e1", "type": "github.pull_request.updated", "resource": "o/r#1"}, "observation": {"known": true, "digest": "d1", "revision": 6, "head": "aaa"}},
+      "expect": {"decision": "IGNORE", "basis": "rule", "reason": "unchanged", "wake": false, "ack_entry": true, "dedup_marker": true, "authoritative_after": {"o/r#1": {"digest": "d1", "revision": 5, "head": "aaa"}}, "pending_after": [], "note": "known digest retained, not advanced to revision 6"}
+    },
+    {
+      "id": "first_known_state",
+      "given": {"authoritative": {}, "event": {"id": "e2", "type": "github.pull_request.opened", "resource": "o/r#2"}, "observation": {"known": true, "digest": "d1", "revision": 1, "head": "aaa"}},
+      "expect": {"decision": "NOTIFY", "basis": "rule", "reason": "first_state", "wake": true, "ack_entry": false, "authoritative_after": {}, "pending_after": [{"event": "e2", "resource": "o/r#2", "digest": "d1", "revision": 1}], "note": "authoritative digest does not move at emit"}
+    },
+    {
+      "id": "same_head_pending_to_failed",
+      "given": {"authoritative": {"o/r#3": {"digest": "d-pending", "revision": 7, "head": "aaa"}}, "event": {"id": "e3", "type": "github.pull_request.updated", "resource": "o/r#3", "note": "fresh observation of an already-routed PR event; not new CI routing"}, "observation": {"known": true, "digest": "d-failed", "revision": 8, "head": "aaa"}},
+      "expect": {"decision": "NOTIFY", "basis": "rule", "reason": "digest_changed", "wake": true, "ack_entry": false, "authoritative_after": {"o/r#3": {"digest": "d-pending", "revision": 7, "head": "aaa"}}, "pending_after": [{"event": "e3", "digest": "d-failed", "revision": 8}]}
+    },
+    {
+      "id": "unknown_observation",
+      "given": {"authoritative": {"o/r#4": {"digest": "d1", "revision": 5, "head": "aaa"}}, "event": {"id": "e4", "type": "github.pull_request.updated", "resource": "o/r#4"}, "observation": {"known": false, "unknown_reason": "timeout"}},
+      "expect": {"decision": "NOTIFY", "basis": "rule", "reason": "unknown:timeout", "wake": true, "ack_entry": false, "dedup_marker": false, "authoritative_after": {"o/r#4": {"digest": "d1", "revision": 5, "head": "aaa"}}, "pending_after": [], "note": "never unchanged, never auto-acked; nothing staged because there is no digest"}
+    },
+    {
+      "id": "malformed_A_valid_B_same_batch",
+      "given": {"authoritative": {"o/r#10": {"digest": "dB", "revision": 2, "head": "bbb"}}, "batch": [
+        {"id": "eA", "type": "github.pull_request.updated", "resource": "o/r#9", "observation": {"known": true, "digest": null, "revision": 3, "head": "aaa", "defect": "known without digest"}},
+        {"id": "eB", "type": "github.pull_request.updated", "resource": "o/r#10", "observation": {"known": true, "digest": "dB2", "revision": 3, "head": "bbb"}}]},
+      "expect": {"results": {
+        "eA": {"decision": "NOTIFY", "reason": "unknown:malformed_observation", "wake": true},
+        "eB": {"decision": "NOTIFY", "reason": "digest_changed", "wake": true}},
+        "note": "bad A never suppresses B; per-resource refusal"}
+    },
+    {
+      "id": "malformed_envelope_without_resource_identity",
+      "given": {"authoritative": {"o/r#10": {"digest": "dB", "revision": 2, "head": "bbb"}}, "batch": [
+        {"id": "eX", "raw_entry": "routed github.pull_request.updated missing subject.number"},
+        {"id": "eB", "type": "github.pull_request.updated", "resource": "o/r#10", "observation": {"known": true, "digest": "dB", "revision": 3, "head": "bbb"}}]},
+      "expect": {"results": {
+        "eX": {"outcome": "rejected", "ack_entry": true, "resource_state_touched": false, "wake": false},
+        "eB": {"decision": "IGNORE", "reason": "unchanged", "wake": false}},
+        "note": "existing audited rejection path for X; B unaffected"}
+    },
+    {
+      "id": "duplicate_and_reordered_events",
+      "given": {"authoritative": {}, "in_flight": [], "batch": [
+        {"id": "e7b", "resource": "o/r#7", "observation": {"known": true, "digest": "d2", "revision": 2, "head": "aaa"}},
+        {"id": "e7a", "resource": "o/r#7", "observation": {"known": true, "digest": "d2", "revision": 2, "head": "aaa"}},
+        {"id": "e7a", "resource": "o/r#7", "note": "producer duplicate of e7a"}]},
+      "expect": {"wakes": 1, "covered_event_ids": ["e7b", "e7a"], "pending_after": [{"resource": "o/r#7", "digest": "d2", "revision": 2, "covers": ["e7b", "e7a"]}], "duplicate_entries": "attached to the in-flight item and acked with it; observation memoised once per resource per batch", "note": "order of arrival does not change the decision; decision uses the observation, not event order"}
+    },
+    {
+      "id": "failed_emit",
+      "given": {"authoritative": {"o/r#8": {"digest": "d1", "revision": 1, "head": "aaa"}}, "event": {"id": "e8", "resource": "o/r#8"}, "observation": {"known": true, "digest": "d2", "revision": 2, "head": "aaa"}, "emit": "raises BrokenPipeError"},
+      "expect": {"wake": false, "ack_entry": false, "attempt_released": true, "authoritative_after": {"o/r#8": {"digest": "d1", "revision": 1, "head": "aaa"}}, "retry_decision": "NOTIFY", "note": "entry stays pending; old digest means redelivery notifies"}
+    },
+    {
+      "id": "emit_ok_then_crash_before_model_ack",
+      "given": {"authoritative": {"o/r#11": {"digest": "d1", "revision": 1, "head": "aaa"}}, "event": {"id": "e11", "resource": "o/r#11"}, "observation": {"known": true, "digest": "d2", "revision": 2, "head": "aaa"}, "crash": "after successful emit, before ack_event"},
+      "expect": {"authoritative_after_crash": {"o/r#11": {"digest": "d1", "revision": 1, "head": "aaa"}}, "pending_after_crash": [{"event": "e11", "digest": "d2"}], "on_restart": {"decision": "NOTIFY", "attempt": 2, "wake": true}, "note": "emit is not acknowledgement; no suppression"}
+    },
+    {
+      "id": "failed_ack_write",
+      "given": {"in_flight": [{"event": "e12", "resource": "o/r#12", "staged": {"digest": "d2", "revision": 2}}], "authoritative": {"o/r#12": {"digest": "d1", "revision": 1, "head": "aaa"}}, "ack_event": {"outcome": "handled"}, "fault": "atomic CAS+marker write fails"},
+      "expect": {"tool_result": "error", "in_flight_retained": true, "authoritative_after": {"o/r#12": {"digest": "d1", "revision": 1, "head": "aaa"}}, "retry": "retried ack_event completes: CAS + marker, then XACK", "crash_between_marker_and_xack": "redelivery found by dedup marker and acked silently; model had already reported handled"}
+    },
+    {
+      "id": "outcome_failed_does_not_advance",
+      "given": {"in_flight": [{"event": "e13", "resource": "o/r#13", "staged": {"digest": "d2", "revision": 2}}], "authoritative": {"o/r#13": {"digest": "d1", "revision": 1, "head": "aaa"}}, "ack_event": {"outcome": "failed"}},
+      "expect": {"event_consumed": true, "authoritative_after": {"o/r#13": {"digest": "d1", "revision": 1, "head": "aaa"}}, "next_same_observation_decision": "NOTIFY"}
+    },
+    {
+      "id": "outcome_handled_advances",
+      "given": {"in_flight": [{"event": "e14", "resource": "o/r#14", "staged": {"digest": "d2", "revision": 2, "head": "aaa"}}], "authoritative": {"o/r#14": {"digest": "d1", "revision": 1, "head": "aaa"}}, "ack_event": {"outcome": "handled"}},
+      "expect": {"authoritative_after": {"o/r#14": {"digest": "d2", "revision": 2, "head": "aaa"}}, "kind": "handled", "next_same_observation_decision": "IGNORE"}
+    },
+    {
+      "id": "outcome_model_ignored_is_not_deterministic_ignore",
+      "given": {"in_flight": [{"event": "e15", "resource": "o/r#15", "staged": {"digest": "d2", "revision": 2, "head": "aaa"}}], "authoritative": {"o/r#15": {"digest": "d1", "revision": 1, "head": "aaa"}}, "ack_event": {"outcome": "ignored"}},
+      "expect": {"event_consumed": true, "authoritative_after": {"o/r#15": {"digest": "d1", "revision": 1, "head": "aaa"}}, "next_same_observation_decision": "NOTIFY", "note": "proposal; operator gate on whether model-ignored may commit with kind=model_ignored"}
+    },
+    {
+      "id": "late_ack_after_newer_observation",
+      "given": {"in_flight": [{"event": "eOld", "resource": "o/r#16", "staged": {"digest": "d2", "revision": 2, "head": "aaa"}}, {"event": "eNew", "resource": "o/r#16", "staged": {"digest": "d3", "revision": 3, "head": "aaa"}}], "authoritative": {"o/r#16": {"digest": "d1", "revision": 1, "head": "aaa"}}, "sequence": ["ack eNew handled", "ack eOld handled"]},
+      "expect": {"authoritative_after": {"o/r#16": {"digest": "d3", "revision": 3, "head": "aaa"}}, "note": "CAS on revision: late ack of the older event does not regress; both events consumed; newer pending was never suppressed by the older ack"}
+    },
+    {
+      "id": "stale_revision_snapshot",
+      "given": {"authoritative": {"o/r#17": {"digest": "d5", "revision": 9, "head": "ccc"}}, "event": {"id": "e17", "resource": "o/r#17"}, "observation": {"known": true, "digest": "d5", "revision": 4, "head": "ccc"}},
+      "expect": {"decision": "NOTIFY", "reason": "unknown:stale_revision", "wake": true, "ack_entry": false, "authoritative_after": {"o/r#17": {"digest": "d5", "revision": 9, "head": "ccc"}}, "note": "equal digest but older revision is not proof of unchanged"}
+    },
+    {
+      "id": "stale_head_digest_conflict_equal_revision",
+      "given": {"authoritative": {"o/r#18": {"digest": "d5", "revision": 9, "head": "ccc"}}, "event": {"id": "e18", "resource": "o/r#18"}, "observation": {"known": true, "digest": "d6", "revision": 9, "head": "aaa"}},
+      "expect": {"decision": "NOTIFY", "reason": "unknown:revision_conflict", "wake": true, "authoritative_after": {"o/r#18": {"digest": "d5", "revision": 9, "head": "ccc"}}, "note": "head SHA is bound inside the digest and compared by equality only, never ordered"}
+    },
+    {
+      "id": "head_changed_back_to_older_sha_with_higher_revision",
+      "given": {"authoritative": {"o/r#19": {"digest": "d5", "revision": 9, "head": "fff"}}, "event": {"id": "e19", "resource": "o/r#19"}, "observation": {"known": true, "digest": "d7", "revision": 10, "head": "000"}},
+      "expect": {"decision": "NOTIFY", "reason": "digest_changed", "wake": true, "note": "no lexicographic SHA ordering"}
+    },
+    {
+      "id": "check_event_routing_unchanged",
+      "given": {"policy_routes": [{"stream": "mctl:events:github", "sources": ["github"], "types": ["github.pull_request.*"]}], "event": {"id": "e20", "type": "github.check_run.completed", "resource": "o/r#20"}},
+      "expect": {"routed": false, "outcome": "skipped", "ack_entry": true, "wake": false, "observation_called": false, "note": "policy has no check routes; this fixture does not claim every deployment policy rejects these types; no new routes proposed"}
+    },
+    {
+      "id": "aar_pointer",
+      "given": {"authoritative": {"o/r#21": {"digest": "d1", "revision": 1, "head": "aaa"}}, "event": {"id": "e21", "type": "github.pull_request.updated", "resource": "o/r#21"}, "observation": {"known": true, "digest": "d2", "revision": 2, "head": "aaa", "aar_ref": "aar_abc123"}},
+      "expect": {"decision": "REQUIRE_APPROVAL", "basis": "rule", "wake": true, "meta": {"attention_aar": "aar_abc123"}, "approval_created": false, "approval_consumed": false, "policy_checkpoint_touched": false, "note": "pointer only"}
+    },
+    {
+      "id": "aar_ref_malformed",
+      "given": {"authoritative": {}, "event": {"id": "e22", "resource": "o/r#22"}, "observation": {"known": true, "digest": "d1", "revision": 1, "head": "aaa", "aar_ref": "not an aar"}},
+      "expect": {"decision": "NOTIFY", "reason": "unknown:malformed_observation", "wake": true, "meta_has_attention_aar": false}
+    },
+    {
+      "id": "expiry_and_restart_replay",
+      "given": {"authoritative": {"o/r#23": "expired (TTL elapsed)"}, "restart": true, "replayed_old_event": {"id": "e23", "resource": "o/r#23"}, "observation": {"known": true, "digest": "d1", "revision": 50, "head": "aaa"}},
+      "expect": {"decision": "NOTIFY", "reason": "first_state", "wake": true, "note": "expired state is absent, never proof of unchanged; replay does not reclassify as handled (unless the event dedup marker is still live, then it is acked as a duplicate)"}
+    },
+    {
+      "id": "independent_resources_A_and_B",
+      "given": {"authoritative": {"o/r#30": {"digest": "dA", "revision": 1, "head": "aaa"}, "o/r#31": {"digest": "dB", "revision": 1, "head": "bbb"}}, "in_flight": [{"event": "eB", "resource": "o/r#31", "staged": {"digest": "dB2", "revision": 2}}], "ack_event": {"event": "eA-older", "resource": "o/r#30", "outcome": "handled", "staged": {"digest": "dA2", "revision": 2}}},
+      "expect": {"authoritative_after": {"o/r#30": {"digest": "dA2", "revision": 2, "head": "aaa"}, "o/r#31": {"digest": "dB", "revision": 1, "head": "bbb"}}, "pending_after": [{"event": "eB", "resource": "o/r#31"}], "note": "acking A never suppresses or advances B"}
+    },
+    {
+      "id": "capacity_exhausted_is_unknown",
+      "given": {"tracked_resources": "at MAX_TRACKED_RESOURCES", "authoritative": {"o/r#40": "evicted (oldest expiry)"}, "event": {"id": "e40", "resource": "o/r#40"}, "observation": {"known": true, "digest": "d1", "revision": 3, "head": "aaa"}},
+      "expect": {"decision": "NOTIFY", "reason": "first_state", "wake": true, "note": "eviction == absent; never unchanged"}
+    },
+    {
+      "id": "observation_budget_exceeded",
+      "given": {"batch": "MAX_OBSERVE_PER_BATCH + 1 distinct resources, all with known unchanged digests"},
+      "expect": {"first_n": "decided normally (IGNORE)", "overflow_resource": {"decision": "NOTIFY", "reason": "unknown:observation_budget", "wake": true}}
+    },
+    {
+      "id": "no_provider_configured",
+      "given": {"provider": null, "event": {"id": "e50", "type": "github.pull_request.updated", "resource": "o/r#50"}},
+      "expect": {"decision": "NOTIFY", "reason": "unknown:no_provider", "wake": true, "note": "equals today's behaviour; deployment not attention-ready"}
+    }
+  ]
+}
