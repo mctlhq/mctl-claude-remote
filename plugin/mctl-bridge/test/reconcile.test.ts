@@ -6,12 +6,20 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { Reconciler, StateUnreadable, parseState, slotShReader } from "../src/reconcile.ts";
+import { Reconciler, StateUnreadable, parseState, promptHash, slotShReader } from "../src/reconcile.ts";
 import type { Alert, AlertOutcome, PromptAlert, SlotState } from "../src/reconcile.ts";
 import { Bridge, key } from "../src/store.ts";
 import { ValkeyServer, requiresValkey } from "./support.ts";
 
 const PROMPT = { kind: "permission", question: "Proceed?", detail: ["secret-looking command"] };
+
+// The hash the waker names in a [bridge] reminder must be the one slot-pty.py prints for the
+// orchestrator (prompt_hash). Both tests pin the same value on the same prompt, so either side
+// drifting fails one of them (test/test_slot_pty.py has the twin).
+const PROMPT_FIXTURE = {"kind": "permission", "question": "Do you want to proceed?", "options": [{"n": 1, "text": "Yes"}, {"n": 2, "text": "Yes, and don’t ask again for: golangci-lint run *"}, {"n": 4, "text": "No"}], "detail": ["Bash command", "golangci-lint run ./internal/api/... \u001b é \"q\" \\ /", "This command requires approval"], "truncated": false};
+test("promptHash matches slot-pty.py's prompt_hash on the shared fixture", () => {
+  expect(promptHash(PROMPT_FIXTURE)).toBe("a0459369c629");
+});
 
 describe("parseState", () => {
   test("reads what slot.sh state prints", () => {

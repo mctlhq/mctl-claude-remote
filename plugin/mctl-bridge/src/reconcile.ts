@@ -40,6 +40,7 @@ export function parseState(raw: string): SlotState {
   return { alive: true, prompt: d.prompt };
 }
 
+/** Must stay byte for byte equal to prompt_hash in ops/slot-pty.py, which prints it for the orchestrator. */
 export function promptHash(prompt: Record<string, unknown>): string {
   return crypto.createHash("sha256").update(JSON.stringify(prompt)).digest("hex").slice(0, 12);
 }

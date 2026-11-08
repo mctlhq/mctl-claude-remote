@@ -10,13 +10,14 @@ session and read its output:
   slot-pty.py show  <dir> [lines]           last lines of the RENDERED screen (a small terminal emulator
                                             applies cursor moves, so redraws and spaces survive)
   slot-pty.py prompt <dir>                  JSON: is a permission prompt or dialog waiting, with its
-                                            question, options and the full command/detail text
+                                            question, options and the full command/detail text, and
+                                            its hash (the one the waker's [bridge] reminder names)
   slot-pty.py state <dir>                   JSON: alive, seconds since the last output, and the prompt
                                             (what Claude is doing; the adapter heartbeat is not)
   slot-pty.py stop  <dir>                   ask the child to end (SIGTERM), then SIGKILL
 The socket is only reachable by the slot user (and root); nothing here reads credentials.
 """
-import codecs, fcntl, json, os, pty, re, select, signal, socket, struct, sys, termios, time, unicodedata
+import codecs, fcntl, hashlib, json, os, pty, re, select, signal, socket, struct, sys, termios, time, unicodedata
 
 def sock_path(d): return os.path.join(d, "ctl.sock")
 
@@ -215,6 +216,15 @@ def find_prompt(lines, back=()):
         return {"kind": "dialog", "question": None, "options": [], "detail": shown[-15:]}
     return None
 
+def prompt_hash(p):
+    """The prompt's identity, byte for byte the waker's promptHash (src/reconcile.ts): sha256 of
+    the compact JSON of the prompt object, as JSON.stringify writes it, first 12 hex digits. The
+    orchestrator compares a [bridge] reminder against this field; until 2026-11-08 nothing printed
+    it, so the orchestrator hashed the prompt its own way, saw a mismatch and left a slot waiting."""
+    if p is None:
+        return None
+    return hashlib.sha256(json.dumps(p, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
+
 def read_prompt(d):
     """find_prompt over the live screen, with the scrollback for a box taller than the screen.
     Two reads ('V', then 'R': both answered by hosts started before this change). The
@@ -344,13 +354,13 @@ def main():
         print("\n".join(lines[-n:]))
     elif cmd == "prompt":
         p = read_prompt(sys.argv[2])
-        print(json.dumps({"pending": p is not None, "prompt": p}, ensure_ascii=False))
+        print(json.dumps({"pending": p is not None, "prompt": p, "hash": prompt_hash(p)}, ensure_ascii=False))
     elif cmd == "state":
         st = json.loads(query(sys.argv[2], b"A"))
         p = read_prompt(sys.argv[2])
         # What the adapter reports (heartbeat, busy) only says its own process is alive. Progress
         # of the Claude session is: output on the screen (idle_s) or a prompt waiting for a decision.
-        print(json.dumps({**st, "prompt_pending": p is not None, "prompt": p}, ensure_ascii=False))
+        print(json.dumps({**st, "prompt_pending": p is not None, "prompt": p, "hash": prompt_hash(p)}, ensure_ascii=False))
     elif cmd == "stop":
         try: call(sys.argv[2], b"Q", timeout=15)
         except OSError: pass

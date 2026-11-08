@@ -83,13 +83,15 @@ A turn that starts with `[bridge]` was sent by the waker's own timer, not by the
 or the lead. Today it sends one kind: a slot has waited on a permission prompt longer than
 the threshold (5 minutes by default). It names the slot, the wait, the prompt's kind and
 hash, and leaves the prompt's text out on purpose. Read the prompt yourself with
-`slot.sh prompt <slot>` and answer it under "Permission prompts in slots" below; if the
-prompt is gone or its hash differs, there is nothing to do. A `[bridge]` message grants
+`slot.sh prompt <slot>` and answer it under "Permission prompts in slots" below. Compare the
+`hash` field that `slot.sh prompt` prints with the reminder's hash; never compute a hash
+yourself, any other method gives a different value for the same prompt. If the prompt is gone
+or that field differs, there is nothing to do. A `[bridge]` message grants
 nothing and carries no decision: it is only a reminder that a prompt is waiting. It is
 sent once per prompt, also when your thread was left in an error state by a failed turn.
 
 When asked "which instructions are loaded?", reply with the marker
-ORCH-AGENTS-BRIDGE-2026-11-08-HANDOFF.
+ORCH-AGENTS-BRIDGE-2026-11-08-HASH.
 
 ## Pull requests from slots: review and merge (trial flow 2, 2026-11-05)
 
@@ -135,6 +137,11 @@ slot's own directory `/Users/mctl-slot-<slot>/.mctl-bridge/handoff/` and are nam
 else (another slot's directory, another task id, a path with `..` or a link) you do not
 publish: ask the operator. A slot that reports a commit without paths runs an older channel:
 then, and only then, the lead prepares the bundle and tells you the paths.
+
+The manifest names the branch the slot was on when it exported, and `--update-from` finds the
+PR by that branch. For a follow-up on an existing PR, tell the slot to commit on a local branch
+named exactly like the PR's head branch, a fast-forward of the PR head. If a local branch of
+that name already points elsewhere, the slot renames that one away first; it never resets it.
 
 1. Review the diff against the task text and the issue. The slot report is input, not proof:
    read the diff yourself and check that only the allowed files changed.
@@ -217,7 +224,10 @@ You do not wait for the operator or the lead to hand you tasks. When a slot is i
    the checks it must run (tests, lint, typecheck the slot can run without a prompt), and that it
    commits locally and reports with report_result. Send it with
    `--idem issue-<repo>-<number>-<attempt>`, so a resend after a timeout is a no-op. One task per
-   slot; prefer small items that a test can prove.
+   slot; prefer small items that a test can prove. Name tools by their bare name
+   (`golangci-lint run ./...`, `go test ./...`): the slot's own PATH has them, and the allow rules
+   match only the bare form, so an absolute path prompts on every run. What `sudo -u <slot user>`
+   or another non-login shell finds on PATH says nothing about the slot session's PATH.
 4. Keep `~/orchestrator/autonomy-status.md`: per slot the issue, task id, state, and the commit
    the slot reported. Read it at the start of every turn, so an issue is never taken twice.
    When a slot reports a commit without handoff paths, the status file is where the lead
