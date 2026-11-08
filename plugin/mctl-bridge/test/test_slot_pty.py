@@ -148,6 +148,16 @@ def load_pty():
     finally: sys.argv = argv
     return mod
 
+class PromptHash(unittest.TestCase):
+    # Twin of the promptHash test in test/reconcile.test.ts: same prompt, same pinned value.
+    FIXTURE = json.loads('{"kind": "permission", "question": "Do you want to proceed?", "options": [{"n": 1, "text": "Yes"}, {"n": 2, "text": "Yes, and don’t ask again for: golangci-lint run *"}, {"n": 4, "text": "No"}], "detail": ["Bash command", "golangci-lint run ./internal/api/... \\u001b é \\"q\\" \\\\ /", "This command requires approval"], "truncated": false}')
+
+    def test_matches_the_waker(self):
+        mod = load_pty()
+        self.assertEqual(mod.prompt_hash(self.FIXTURE), "a0459369c629")
+        self.assertIsNone(mod.prompt_hash(None))
+
+
 class FindPrompt(unittest.TestCase):
     RULE = "\u2500" * 60
     ASK = [" Do you want to proceed?", " \u276f 1. Yes", "   2. No"]
@@ -249,7 +259,11 @@ class RenderedScreen(unittest.TestCase):
     def test_a_waiting_permission_prompt_is_reported_whole(self):
         self.start("permission")
         self.assertTrue(wait_for(lambda: self.prompt()["pending"]), "a visible prompt was not seen")
-        p = self.prompt()["prompt"]
+        out = self.prompt()
+        p = out["prompt"]
+        # the printed hash is the prompt's own, the value a [bridge] reminder names
+        self.assertEqual(out["hash"], load_pty().prompt_hash(p))
+        self.assertRegex(out["hash"], r"^[0-9a-f]{12}$")
         self.assertEqual(p["kind"], "permission")
         self.assertEqual(p["question"], "Do you want to proceed?")
         self.assertEqual([o["n"] for o in p["options"]], [1, 2, 3])
@@ -273,7 +287,7 @@ class RenderedScreen(unittest.TestCase):
     def test_an_answered_prompt_in_the_scrollback_is_not_pending(self):
         self.start("answered")
         self.assertTrue(wait_for(lambda: "out-59" in run("show", self.d).stdout))
-        self.assertEqual(self.prompt(), {"pending": False, "prompt": None})
+        self.assertEqual(self.prompt(), {"pending": False, "prompt": None, "hash": None})
 
     def test_reading_a_prompt_never_answers_it(self):
         self.start("permission")
@@ -292,12 +306,12 @@ class RenderedScreen(unittest.TestCase):
     def test_a_question_with_a_single_numbered_line_is_not_a_permission_prompt(self):
         self.start("single")
         self.assertTrue(wait_for(lambda: "1. Yes" in run("show", self.d).stdout))
-        self.assertEqual(self.prompt(), {"pending": False, "prompt": None})
+        self.assertEqual(self.prompt(), {"pending": False, "prompt": None, "hash": None})
 
     def test_no_prompt_is_not_reported_as_pending(self):
         self.start("plain")
         self.assertTrue(wait_for(lambda: "Working on it" in run("show", self.d).stdout))
-        self.assertEqual(self.prompt(), {"pending": False, "prompt": None})
+        self.assertEqual(self.prompt(), {"pending": False, "prompt": None, "hash": None})
 
     def test_state_says_what_the_screen_does_not_what_the_adapter_claims(self):
         self.start("plain")

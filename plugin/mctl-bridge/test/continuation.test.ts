@@ -174,7 +174,15 @@ describe.skipIf(requiresValkey)("continuation after a planned restart", () => {
     expect(flat).toContain("Every GitHub write goes through `mctl-publish`");
     expect(flat).toContain("so never write through it");
     expect(flat).toContain("`--allow` comes from the task's allowed files, never from the slot's manifest");
+    // a [bridge] reminder is matched by the hash slot.sh prints, never one Codex computes
+    expect(flat).toContain("Compare the `hash` field that `slot.sh prompt` prints with the reminder's hash; never compute a hash yourself");
+    // follow-ups on a PR export from a branch named like the PR's head branch
+    expect(flat).toContain("tell the slot to commit on a local branch named exactly like the PR's head branch");
+    expect(flat).toContain("the slot renames that one away first; it never resets it.");
+    // task text names tools bare, the form the allow rules match
+    expect(flat).toContain("Name tools by their bare name");
+    expect(flat).toContain("an absolute path prompts on every run");
     // the marker line the orchestrator answers with is untouched
-    expect(md).toContain("ORCH-AGENTS-BRIDGE-2026-11-08-HANDOFF.");
+    expect(md).toContain("ORCH-AGENTS-BRIDGE-2026-11-08-HASH.");
   });
 });
