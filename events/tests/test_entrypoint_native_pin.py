@@ -468,7 +468,7 @@ class NativePinTest(unittest.TestCase):
 
     def test_bad_candidate_is_probed_once_and_the_warning_reuses_the_result(self) -> None:
         cases = [
-            ("hang", "sleep 60\necho \"2.1.280 (Claude Code)\"\n", "1", "timed out after 1s"),
+            ("hang", "sleep 60\necho \"2.1.280 (Claude Code)\"\n", "3", "timed out after 3s"),
             ("fail", 'echo "libfoo.so: cannot open shared object" >&2\nexit 3\n', "10",
              "exited with status 3; stderr: libfoo.so: cannot open shared object"),
             ("blank", 'echo "   "\n', "10", "exited 0 with empty stdout"),
