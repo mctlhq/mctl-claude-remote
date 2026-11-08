@@ -381,7 +381,7 @@ test("the orchestrator's rules let Codex pick slot work itself, inside the same 
   const flat = fs.readFileSync(path.join(import.meta.dir, "..", "ops", "orchestrator-AGENTS.md"), "utf8").replace(/\s+/g, " ");
   expect(flat).toContain("You do not wait for the operator or the lead to hand you tasks.");
   expect(flat).toContain("does it need a human between start and PR?");
-  expect(flat).toContain("You cannot start DevLoop; list it for the operator");
+  expect(flat).toContain("You decide that, and the lead starts it");
   expect(flat).toContain("an issue is never taken twice");
   expect(flat).toContain("you never restart slots, release, tag, deploy, or widen anyone's rights.");
   expect(flat).toContain("Never run `slot.sh start` or `slot.sh stop` yourself.");
