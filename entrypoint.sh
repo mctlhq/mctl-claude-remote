@@ -495,23 +495,55 @@ TARGET_VER=$(printf '%s' "$BUNDLED_VER" | awk '{print $1}')
 # existing install/fallback path and a hung binary is never "current".
 NATIVE_VERSION_TIMEOUT="${NATIVE_VERSION_TIMEOUT:-20}"
 printf '%s' "$NATIVE_VERSION_TIMEOUT" | grep -qE '^[1-9][0-9]*$' || NATIVE_VERSION_TIMEOUT=20
-bounded_ver() {
-  _vo=$(mktemp /tmp/claude-version.XXXXXX 2>/dev/null) || return 0
-  if timeout -k 2 "$NATIVE_VERSION_TIMEOUT" "$1" --version >"$_vo" 2>/dev/null </dev/null; then
-    head -n 1 "$_vo" 2>/dev/null || true
+#
+# One probe = one run of the binary. probe_ver sets, in the caller's shell (not a
+# `$(...)` subshell, so the result survives): PROBE_LINE (first stdout line, only
+# when the probe succeeded), PROBE_TAG (its first field) and PROBE_WHY (why it
+# yielded no version: timeout, exit status, empty stdout, plus a bounded stderr
+# snippet; empty when it did). Every decision below reuses the result of the
+# probe of an UNCHANGED binary instead of running it again just to log a failure;
+# the native result is dropped (native_forget) wherever the binary can change.
+# `ulimit -f` caps what a runaway child can write into the two capture files.
+probe_ver() {
+  PROBE_LINE=""; PROBE_TAG=""; PROBE_WHY=""
+  _vo=$(mktemp /tmp/claude-version.XXXXXX 2>/dev/null) || { PROBE_WHY="could not create a probe file"; return 0; }
+  _ve=$(mktemp /tmp/claude-version.XXXXXX 2>/dev/null) || _ve=/dev/null
+  _vrc=0
+  ( ulimit -f 16 2>/dev/null || true
+    exec timeout -k 2 "$NATIVE_VERSION_TIMEOUT" "$1" --version >"$_vo" 2>"$_ve" </dev/null ) || _vrc=$?
+  if [ "$_vrc" -eq 0 ]; then
+    PROBE_LINE=$(head -n 1 "$_vo" 2>/dev/null || true)
+    PROBE_TAG=$(printf '%s' "$PROBE_LINE" | awk '{print $1}')
+    [ -n "$PROBE_TAG" ] || PROBE_WHY="exited 0 with empty stdout"
+  elif [ "$_vrc" -eq 124 ] || [ "$_vrc" -eq 137 ]; then
+    PROBE_WHY="timed out after ${NATIVE_VERSION_TIMEOUT}s"
+  else
+    PROBE_WHY="exited with status $_vrc"
   fi
+  if [ -n "$PROBE_WHY" ] && [ "$_ve" != /dev/null ]; then
+    _vs=$(head -c 200 "$_ve" 2>/dev/null | tr '\n\r\t' '   ' | awk '{$1=$1}1' || true)
+    [ -z "$_vs" ] || PROBE_WHY="$PROBE_WHY; stderr: $_vs"
+  fi
+  [ -n "$PROBE_TAG" ] || PROBE_LINE=""
   rm -f "$_vo" 2>/dev/null || true
+  [ "$_ve" = /dev/null ] || rm -f "$_ve" 2>/dev/null || true
   return 0
 }
-native_ver() { bounded_ver "$NATIVE_CLAUDE"; }
 # Version equality is what decides which binary the session runs, so it is
 # the version *number* (first field) that is compared, never the whole line:
 # a suffix the native build prints and the npm-global one does not would
 # otherwise disable the native binary on every device forever. The full
 # line is still what the log shows.
-native_tag() { native_ver | awk '{print $1}'; }
-if [ -x "$NATIVE_CLAUDE" ] && [ -n "$TARGET_VER" ] && [ "$(native_tag)" = "$TARGET_VER" ]; then
-  echo "[entrypoint] native claude already current ($(native_ver)); skipping install"
+NATIVE_PROBED=0
+native_probe() {
+  [ "$NATIVE_PROBED" -eq 0 ] || return 0
+  probe_ver "$NATIVE_CLAUDE"
+  NATIVE_LINE=$PROBE_LINE; NATIVE_TAG=$PROBE_TAG; NATIVE_WHY=$PROBE_WHY; NATIVE_PROBED=1
+}
+native_forget() { NATIVE_PROBED=0; }
+native_probe
+if [ -x "$NATIVE_CLAUDE" ] && [ -n "$TARGET_VER" ] && [ "$NATIVE_TAG" = "$TARGET_VER" ]; then
+  echo "[entrypoint] native claude already current ($NATIVE_LINE); skipping install"
 else
   # Install the bundled (pinned) version, not `latest` — otherwise the runtime
   # harness floats past the image pin on every restart. Fall back to latest
@@ -542,6 +574,10 @@ else
   fi
   [ "$_install_log" = /dev/null ] || rm -f "$_install_log" 2>/dev/null || true
   chmod +x "$NATIVE_CLAUDE" 2>/dev/null || true
+  # The installer (and the chmod) may have replaced the native binary: the
+  # earlier result describes a binary that may no longer exist.
+  native_forget
+  native_probe
   # `claude install <ver> --force` is not enough on its own. Observed on
   # 2026-09-23 (0.12.4, #66): it downloaded versions/2.1.280 and left the
   # regular file at ~/.local/bin/claude untouched (2.1.274, restored from
@@ -550,9 +586,12 @@ else
   # pinned build is put in place here, from the installer's own download,
   # so what the session runs is decided by this script and not by what the
   # installer chose to do with a pre-existing file.
-  if [ -n "$TARGET_VER" ] && [ "$(native_tag)" != "$TARGET_VER" ] && [ -f "$NATIVE_VERSIONS/$TARGET_VER" ]; then
+  if [ -n "$TARGET_VER" ] && [ "$NATIVE_TAG" != "$TARGET_VER" ] && [ -f "$NATIVE_VERSIONS/$TARGET_VER" ]; then
     chmod +x "$NATIVE_VERSIONS/$TARGET_VER" 2>/dev/null || true
-    if [ "$(bounded_ver "$NATIVE_VERSIONS/$TARGET_VER" | awk '{print $1}')" = "$TARGET_VER" ]; then
+    # The candidate is probed ONCE; the promotion decision and the WARN below
+    # both read this result.
+    probe_ver "$NATIVE_VERSIONS/$TARGET_VER"
+    if [ "$PROBE_TAG" = "$TARGET_VER" ]; then
       # Copy, not symlink: the workspace is mirrored to MinIO by the s3-sync
       # sidecar and restored by an init container, and a symlink does not
       # survive that round trip as a symlink. `.tmp` so the mirror skips the
@@ -575,14 +614,15 @@ else
       elif cp -f "$NATIVE_VERSIONS/$TARGET_VER" "$NATIVE_CLAUDE.tmp" && chmod +x "$NATIVE_CLAUDE.tmp" \
          && mv -f "$NATIVE_CLAUDE.tmp" "$NATIVE_CLAUDE"; then
         echo "[entrypoint] native claude replaced with versions/$TARGET_VER"
+        native_forget
       else
         rm -rf "$NATIVE_CLAUDE.tmp" 2>/dev/null || true
         echo "[entrypoint] WARN could not replace native claude with versions/$TARGET_VER" >&2
       fi
     else
-      echo "[entrypoint] WARN versions/$TARGET_VER reports '$(bounded_ver "$NATIVE_VERSIONS/$TARGET_VER")', not $TARGET_VER; not promoting it" >&2
+      echo "[entrypoint] WARN versions/$TARGET_VER reports '$PROBE_LINE', not $TARGET_VER; not promoting it${PROBE_WHY:+ ($PROBE_WHY)}" >&2
     fi
-  elif [ -n "$TARGET_VER" ] && [ "$(native_tag)" != "$TARGET_VER" ]; then
+  elif [ -n "$TARGET_VER" ] && [ "$NATIVE_TAG" != "$TARGET_VER" ]; then
     # Nothing at the path this script promotes from. After a failed install
     # that is expected and the line above already says why; after a
     # successful one it means the installer's on-disk layout (a fact
@@ -605,8 +645,9 @@ fi
 # there is no pin to enforce and `claude install` has nothing to run with,
 # so a native binary that does run is the only thing that can start a
 # session. It is used, behind a WARN naming the missing pin.
-NATIVE_NOW=$(native_ver || true)
-NATIVE_NOW_TAG=$(printf '%s' "$NATIVE_NOW" | awk '{print $1}')  # same rule as native_tag and TARGET_VER
+native_probe  # reuses the last result unless the binary was replaced since
+NATIVE_NOW=$NATIVE_LINE
+NATIVE_NOW_TAG=$NATIVE_TAG  # same first-field rule as TARGET_VER
 if [ -x "$NATIVE_CLAUDE" ] && [ -n "$NATIVE_NOW" ] && [ -n "$TARGET_VER" ] && [ "$NATIVE_NOW_TAG" = "$TARGET_VER" ]; then
   export PATH="/workspace/.local/bin:$PATH"
   echo "[entrypoint] using native claude: $NATIVE_NOW"
@@ -619,6 +660,7 @@ else
   # not un-PATH them. At the end of PATH the npm-global claude in
   # /usr/local/bin still wins the lookup.
   export PATH="$PATH:/workspace/.local/bin"
+  [ -z "$NATIVE_WHY" ] || echo "[entrypoint] WARN native claude version probe: $NATIVE_WHY" >&2
   echo "[entrypoint] WARN native claude is '$NATIVE_NOW', image pins '$BUNDLED_VER'; using npm-global claude: $(claude --version 2>&1 | head -n 1)" >&2
 fi
 
