@@ -188,9 +188,13 @@ describe.skipIf(requiresValkey)("continuation after a planned restart", () => {
     // DevLoop: Codex decides, the lead starts, only the operator approves
     expect(flat).toContain("[lead-request] devloop-start <owner/repo>#<issue> service=<service or repo> reason=<one line>");
     expect(flat).toContain("Approving a proposal is the operator's alone.");
+    expect(flat).toContain("you start them yourself with `mctl-devloop`");
+    expect(flat).toContain("Exit 4 from `start` means the start may have happened: read it with `get`, never start again blind.");
+    expect(flat).toContain("Do not try another way around a refusal.");
+    expect(flat).toContain("Only when `mctl-devloop` cannot work (exit 2");
     expect(flat).toContain("Never approve, and never ask the lead to approve.");
     expect(flat).not.toContain("You cannot start DevLoop; list it for the operator");
     // the marker line the orchestrator answers with is untouched
-    expect(md).toContain("ORCH-AGENTS-BRIDGE-2026-11-08-RESULT.");
+    expect(md).toContain("ORCH-AGENTS-BRIDGE-2026-11-09-DEVLOOP.");
   });
 });
