@@ -71,7 +71,8 @@ beforeAll(() => {
         return J({ token: GH_TOKEN }, 201);
       }
       if (key === "DELETE /installation/token") return new Response(null, { status: 204 });
-      if (key === "GET /repos/mctlhq/mctl-api/issues/42") return auth === GH_TOKEN ? J(fake.issue) : J({}, 401);
+      // GitHub matches owner and repo case-insensitively, as here.
+      if (key.toLowerCase() === "get /repos/mctlhq/mctl-api/issues/42") return auth === GH_TOKEN ? J(fake.issue) : J({}, 401);
       if (auth !== ACCESS) return J({ error: "unauthorized" }, 401);
       if (key === "GET /api/v1/whoami") return J(fake.whoami.body, fake.whoami.status);
       if (key === "POST /api/v1/agents/dev-loop/start") {
@@ -97,7 +98,7 @@ beforeEach(() => {
   fake = {
     calls: [],
     assertions: [],
-    issue: { state: "open", labels: [{ name: "bug" }] },
+    issue: { html_url: "https://github.com/mctlhq/mctl-api/issues/42", state: "open", labels: [{ name: "bug" }] },
     tokenReply: { status: 200, body: { access_token: ACCESS, token_type: "Bearer", expires_in: 300 } },
     start: { status: 202, body: { workflow_id: WF, run_id: "r-1", started: true, outcome: "started" } },
     read: { status: 200, body: { workflow_id: WF, status: "Running" } },
@@ -163,15 +164,24 @@ describe("mctl-devloop", () => {
     expect(fake.calls.some((c) => c.path.includes("/approve") || c.path.includes("/operations/"))).toBe(false);
   });
 
+  test("start: a ref whose case differs from GitHub's is refused, not started under another id", async () => {
+    fake.calls = [];
+    const r = await run("start", "--issue", "mctlhq/MCTL-API#42");
+    expect({ code: r.code, out: r.out?.code }).toEqual({ code: 3, out: "preflight_moved" });
+    expect(starts()).toBe(0);
+  });
+
   test("start: the preflight refuses before anything is started", async () => {
     const cases: [any, string][] = [
-      [{ state: "open", labels: [{ name: "agents:intake" }] }, "preflight_intake"],
-      [{ state: "open", labels: [{ name: "steward:escalated" }] }, "preflight_steward"],
-      [{ state: "open", labels: [{ name: "epic" }] }, "preflight_epic"],
-      [{ state: "open", labels: [{ name: "hold" }] }, "preflight_hold"],
-      [{ state: "open", labels: [{ name: "devloop:running" }] }, "preflight_devloop"],
-      [{ state: "closed", labels: [] }, "preflight_closed"],
-      [{ state: "open", labels: [], pull_request: {} }, "preflight_pull_request"],
+      [{ html_url: "https://github.com/mctlhq/mctl-api/issues/42", state: "open", labels: [{ name: "agents:intake" }] }, "preflight_intake"],
+      [{ html_url: "https://github.com/mctlhq/mctl-api/issues/42", state: "open", labels: [{ name: "steward:escalated" }] }, "preflight_steward"],
+      [{ html_url: "https://github.com/mctlhq/mctl-api/issues/42", state: "open", labels: [{ name: "epic" }] }, "preflight_epic"],
+      [{ html_url: "https://github.com/mctlhq/mctl-api/issues/42", state: "open", labels: [{ name: "hold" }] }, "preflight_hold"],
+      [{ html_url: "https://github.com/mctlhq/mctl-api/issues/42", state: "open", labels: [{ name: "devloop:running" }] }, "preflight_devloop"],
+      [{ html_url: "https://github.com/mctlhq/mctl-api/issues/42", state: "closed", labels: [] }, "preflight_closed"],
+      [{ html_url: "https://github.com/mctlhq/mctl-api/issues/42", state: "open", labels: [], pull_request: {} }, "preflight_pull_request"],
+      [{ html_url: "https://github.com/mctlhq/mctl-agents/issues/7", state: "open", labels: [] }, "preflight_moved"],
+      [{ state: "open", labels: [] }, "preflight_moved"],
     ];
     for (const [issue, code] of cases) {
       fake.calls = [];
@@ -188,10 +198,10 @@ describe("mctl-devloop", () => {
     expect(r.code).toBe(2);
     expect(starts()).toBe(0);
     delete fake.fail["GET /repos/mctlhq/mctl-api/issues/42"];
-    fake.issue = { state: "open" };
+    fake.issue = { html_url: "https://github.com/mctlhq/mctl-api/issues/42", state: "open" };
     r = await run("start", "--issue", "mctlhq/mctl-api#42");
     expect(r.code).toBe(2);
-    fake.issue = { state: "open", labels: [{}] };
+    fake.issue = { html_url: "https://github.com/mctlhq/mctl-api/issues/42", state: "open", labels: [{}] };
     r = await run("start", "--issue", "mctlhq/mctl-api#42");
     expect(r.code).toBe(2);
     expect(starts()).toBe(0);

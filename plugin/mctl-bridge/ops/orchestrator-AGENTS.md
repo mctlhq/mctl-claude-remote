@@ -256,7 +256,9 @@ It prints JSON; its exit codes are mctl-publish's.
 
 - `mctl-devloop start --issue <owner/repo>#<issue>` starts the issue's DevLoop on the Temporal
   path. It first reads the issue and refuses (exit 3, `preflight_*`) a closed issue, a pull
-  request, an epic or tracking issue, a hold, `agents:intake`, a `steward:` or DevLoop label.
+  request, an issue moved or written in another case than GitHub's (`preflight_moved`; use its
+  canonical `owner/repo#n`), an epic or tracking issue, a hold, `agents:intake`, a `steward:` or
+  DevLoop label.
   mctl-api refuses a repository off its allow-list (`orchestrator_devloop_repo_not_allowed`) and
   answers `already_running` or `already_exists` for an issue that has a loop; both are exit 3 and
   nothing was started. Do not try another way around a refusal.

@@ -235,6 +235,10 @@ export function blockingLabel(names: string[]): { code: string; label: string } 
 export async function preflight(gh: GitHub, issue: Issue): Promise<void> {
   const d = await gh.read(`/repos/mctlhq/${issue.repo}/issues/${issue.number}`);
   if (d?.pull_request !== undefined) throw new Refused("preflight_pull_request", `${issue.url} is a pull request`);
+  // GitHub follows a transferred issue or a renamed repository and matches
+  // the repo name case-insensitively, so the issue read may not be the one
+  // whose URL and workflow id start would use. Only its canonical URL counts.
+  if (d?.html_url !== issue.url) throw new Refused("preflight_moved", `${issue.url} is at ${String(d?.html_url)}`);
   if (d?.state !== "open") throw new Refused("preflight_closed", `${issue.url} is ${String(d?.state)}`);
   if (!Array.isArray(d?.labels)) throw new Unreadable(`${issue.url}: no label list`);
   const names = d.labels.map((l: any) => (typeof l === "string" ? l : l?.name));
