@@ -86,11 +86,11 @@ describe.skipIf(!usable)("launcher scripts", () => {
     // an allow rule must never cover a denied command family by prefix
     for (const a of allow) for (const bad of ["git push", "gh ", "curl", "wget", "ssh", "sudo", "security"]) expect(a.startsWith(`Bash(${bad}`)).toBe(false);
     // build, typecheck and Go tests run without a prompt (operator decision 2026-11-07)
-    for (const r of ["Bash(go build:*)", "Bash(go test:*)", "Bash(go vet:*)", "Bash(bun run typecheck)", "Bash(bun run --cwd plugin/mctl-bridge typecheck)", "Bash(git rebase origin/main)", "Bash(git rebase --continue)"]) expect(allow).toContain(r);
+    for (const r of ["Bash(go build:*)", "Bash(go test:*)", "Bash(go vet:*)", "Bash(golangci-lint run:*)", "Bash(bun run typecheck)", "Bash(bun run --cwd plugin/mctl-bridge typecheck)", "Bash(git rebase origin/main)", "Bash(git rebase --continue)"]) expect(allow).toContain(r);
     // ...but nothing that runs a program of the command line's choosing: no general bun run, go run,
     // go generate, go mod or go get, and no rebase form that would take --exec
-    for (const bad of ["Bash(bun run:", "Bash(go run", "Bash(go generate", "Bash(go mod", "Bash(go get", "Bash(go install", "Bash(git rebase:", "Bash(git merge", "Bash(gofmt -w", "Bash(gofmt:"]) expect(allow.some((a) => a.startsWith(bad))).toBe(false);
-    for (const r of ["Bash(go *-exec*)", "Bash(go *-toolexec*)", "Bash(go *-vettool*)"]) expect(deny).toContain(r);
+    for (const bad of ["Bash(bun run:", "Bash(go run", "Bash(go generate", "Bash(go mod", "Bash(go get", "Bash(go install", "Bash(git rebase:", "Bash(git merge", "Bash(gofmt -w", "Bash(gofmt:", "Bash(golangci-lint:", "Bash(golangci-lint fmt", "Bash(golangci-lint custom"]) expect(allow.some((a) => a.startsWith(bad))).toBe(false);
+    for (const r of ["Bash(go *-exec*)", "Bash(go *-toolexec*)", "Bash(go *-vettool*)", "Bash(golangci-lint *--fix*)"]) expect(deny).toContain(r);
     // a rebase that stops on a conflict must not open an editor in a terminal nobody sees
     expect(settings.env).toEqual({ GIT_EDITOR: "true" });
 
@@ -442,7 +442,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(allowLine).not.toBeNull();
     const allowed = [...allowLine![1]!.matchAll(/"Bash\(([^"]*)\)"/g)].map((m) => m[1]!);
     const matches = (cmd: string): boolean => allowed.some((r) => (r.endsWith(":*") ? cmd.startsWith(r.slice(0, -2)) : cmd === r));
-    const promised = ["go build ./...", "go test ./...", "go vet ./...", "bun run --cwd plugin/mctl-bridge typecheck", "git fetch origin", "git rebase origin/main", "git add", "git rebase --continue"];
+    const promised = ["go build ./...", "go test ./...", "go vet ./...", "golangci-lint run ./...", "bun run --cwd plugin/mctl-bridge typecheck", "git fetch origin", "git rebase origin/main", "git add", "git rebase --continue"];
     for (const cmd of promised) {
       expect(INSTRUCTIONS).toContain(cmd);
       expect([cmd, matches(cmd)]).toEqual([cmd, true]);
