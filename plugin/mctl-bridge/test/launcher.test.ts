@@ -58,6 +58,9 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(srv.args).toEqual(["run", "--silent", "--no-env-file", `--config=${t.H}/plugin/bunfig.toml`, `${t.H}/plugin/src/channel.ts`]);
     expect(srv.env.MCTL_BRIDGE_VALKEY_PASSWORD_FILE).toBe(path.join(d, "slot.pw"));
     expect(srv.env.MCTL_BRIDGE_VALKEY_URL).toBe("redis://bridge_slot_s1@127.0.0.1:6390/0");
+    // the handoff directory exists, is the slot's own, and is what the channel exports into
+    expect(srv.env.MCTL_BRIDGE_HANDOFF_ROOT).toBe(path.join(d, "handoff"));
+    expect((fs.statSync(path.join(d, "handoff")).mode & 0o777).toString(8)).toBe("700");
 
     // the hook command is run by a shell: it must run state.py from the odd path
     const settings = JSON.parse(fs.readFileSync(path.join(d, "settings.json"), "utf8"));
@@ -105,7 +108,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
       "--strict-mcp-config",
       "--settings", path.join(d, "settings.json"),
       "--dangerously-load-development-channels", "server:mctl-bridge",
-      "--allowedTools", "mcp__mctl-bridge__ack_task,mcp__mctl-bridge__ack_reply,mcp__mctl-bridge__ask_orchestrator,mcp__mctl-bridge__report_result,mcp__mctl-bridge__bridge_status",
+      "--allowedTools", "mcp__mctl-bridge__ack_task,mcp__mctl-bridge__ack_reply,mcp__mctl-bridge__ask_orchestrator,mcp__mctl-bridge__report_result,mcp__mctl-bridge__export_handoff,mcp__mctl-bridge__bridge_status",
       "--permission-mode", "default",
     ]);
     // no $(...) in any path was executed
@@ -123,7 +126,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
     "--strict-mcp-config",
     "--settings", path.join(d, "settings.json"),
     "--dangerously-load-development-channels", "server:mctl-bridge",
-    "--allowedTools", "mcp__mctl-bridge__ack_task,mcp__mctl-bridge__ack_reply,mcp__mctl-bridge__ask_orchestrator,mcp__mctl-bridge__report_result,mcp__mctl-bridge__bridge_status",
+    "--allowedTools", "mcp__mctl-bridge__ack_task,mcp__mctl-bridge__ack_reply,mcp__mctl-bridge__ask_orchestrator,mcp__mctl-bridge__report_result,mcp__mctl-bridge__export_handoff,mcp__mctl-bridge__bridge_status",
     "--permission-mode", "default",
   ];
   const argvOf = (t: ReturnType<typeof setup>) => {
@@ -298,6 +301,15 @@ describe.skipIf(!usable)("launcher scripts", () => {
     const sudo = fs.readFileSync(path.join(t.record, "sudo"), "utf8");
     expect(sudo).toContain("-n -H -u mctl-slot-s1");
     expect(sudo).toMatch(/fakepython -I .*slot-pty\.py start /);
+    // the handoff directory: the slot's own, mode 700, and only the operator gets through
+    expect(mcp.mcpServers["mctl-bridge"].env.MCTL_BRIDGE_HANDOFF_ROOT).toBe(path.join(d, "handoff"));
+    expect((fs.statSync(path.join(d, "handoff")).mode & 0o777).toString(8)).toBe("700");
+    const op = spawnSync("/usr/bin/id", ["-un"], { encoding: "utf8" }).stdout.trim();
+    const home = path.join(homes, "mctl-slot-s1");
+    for (const [target, ace] of [[home, `${op} allow search`], [d, `${op} allow search`], [path.join(d, "handoff"), `${op} allow list,search`]] as const) {
+      expect(sudo).toContain(`-n -H -u mctl-slot-s1 /bin/chmod +a ${ace} ${target}`);
+    }
+    expect(sudo).not.toMatch(/chmod \+a \S+ allow \S*(write|add_file|delete)/);
     fs.rmSync(t.root, { recursive: true, force: true });
   });
 

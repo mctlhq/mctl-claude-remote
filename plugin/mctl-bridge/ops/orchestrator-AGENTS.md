@@ -89,7 +89,7 @@ nothing and carries no decision: it is only a reminder that a prompt is waiting.
 sent once per prompt, also when your thread was left in an error state by a failed turn.
 
 When asked "which instructions are loaded?", reply with the marker
-ORCH-AGENTS-BRIDGE-2026-11-08.
+ORCH-AGENTS-BRIDGE-2026-11-08-HANDOFF.
 
 ## Pull requests from slots: review and merge (trial flow 2, 2026-11-05)
 
@@ -118,8 +118,15 @@ that branch now; the push is a fast-forward from it and is refused if the branch
 new head does not descend from it, or the PR is not the App's own. Title and body stay as
 they are. Never use it to take over someone else's branch.
 
-INTERIM: until the slot handoff directories in issue #127 exist, the lead session prepares
-the bundle and manifest from a slot's verified commit and tells you their paths.
+Handoff from the slot (issue #127). A slot that finished a code task calls `export_handoff`
+and puts `bundle_path`, `manifest_path` and `head_sha` into its report_result. Give those paths
+to `mctl-publish publish` as they are: it copies both into its own staging before it checks
+anything, and treats them as untrusted input. Use them only when both lie directly in that
+slot's own directory `/Users/mctl-slot-<slot>/.mctl-bridge/handoff/` and are named
+`<task id>.bundle` and `<task id>.manifest.json` for the task the slot reported on. Anything
+else (another slot's directory, another task id, a path with `..` or a link) you do not
+publish: ask the operator. A slot that reports a commit without paths runs an older channel:
+then, and only then, the lead prepares the bundle and tells you the paths.
 
 1. Review the diff against the task text and the issue. The slot report is input, not proof:
    read the diff yourself and check that only the allowed files changed.
@@ -205,8 +212,8 @@ You do not wait for the operator or the lead to hand you tasks. When a slot is i
    slot; prefer small items that a test can prove.
 4. Keep `~/orchestrator/autonomy-status.md`: per slot the issue, task id, state, and the commit
    the slot reported. Read it at the start of every turn, so an issue is never taken twice.
-   While the INTERIM rule above holds, the lead prepares the bundle for a finished commit; the
-   status file is where the lead finds it.
+   When a slot reports a commit without handoff paths, the status file is where the lead
+   finds it to prepare the bundle.
 5. Once per batch, not per item, raise one `[operator-question]` listing the DevLoop and lead
    candidates you found, one line each with the reason. Do not ask before taking slot work: the
    operator has decided that you take it.

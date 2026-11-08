@@ -11,9 +11,24 @@ itself. What the exporter returns describes files; it is not evidence of anythin
 publisher independently checks the audit trail and admission, the remote base, the allowed
 scope, the hash, the bundle and its own ledger.
 
-This change is code only. Creating the per-slot handoff directories, verifying that one slot
-cannot read or write another's, and installing the exporter on the slots are a separate
-operator stage; until then the lead's interim bundles stay in effect.
+## Runtime (2026-11-08)
+
+- **Directory.** `slot.sh start` creates `<slot home>/.mctl-bridge/handoff`, owned by the slot
+  user, mode 700, and passes it to the channel as `MCTL_BRIDGE_HANDOFF_ROOT`. Behind the user
+  boundary the slot grants the operator, and only the operator, ACL entries: `search` on its
+  home and on `.mctl-bridge`, `list,search` on `handoff/`. The exporter writes its files 644.
+  Another slot cannot read them because it cannot pass through this slot's home. The operator
+  can read them but cannot write into the directory.
+- **Export.** The channel tool `export_handoff(task_id)` runs the exporter as the slot user. The
+  attempt comes from the slot's admission for that task, the root from the launcher, the
+  repository from origin's github.com URL, the head and branch from the checkout, and the base
+  from `git merge-base HEAD origin/main`. The model chooses none of them. The slot puts
+  `bundle_path`, `manifest_path` and `head_sha` into report_result (channel rule 4).
+- **Publish.** The orchestrator passes the paths to `mctl-publish publish` only when they lie in
+  the reporting slot's own directory and carry its task id (orchestrator AGENTS.md). Publish
+  copies both into its own 0700 staging before checking anything.
+- A slot started before this change has no root and gets a refusal from `export_handoff`. For
+  such a slot, and only then, the lead still prepares the bundle.
 
 ## Use
 
