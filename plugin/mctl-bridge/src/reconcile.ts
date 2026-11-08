@@ -1,9 +1,14 @@
 // The waker's timer: notices what nobody is waiting for. Between Codex turns no one sees a
 // slot stop on a permission prompt, or a task result that nobody collects.
 //
-// First stage, log only: it starts no turn and presses nothing. Its log says how long slots
-// really wait, which is what a later stage has to act on. Slot screens can hold secrets, so
-// a prompt is logged by kind and hash, never by its text.
+// It presses nothing. It logs how long slots really wait, and once a prompt has waited
+// `alertAfterMs` it tells the orchestrator, which is the one that answers prompts: one alert per
+// prompt, by slot, kind, hash and wait. Slot screens can hold secrets, so a prompt reaches the
+// log and the alert by kind and hash, never by its text; the orchestrator reads the text itself.
+//
+// An alert that was definitely not sent (the thread is busy, the start was refused) is tried
+// again on a later pass. One whose outcome is unknown is not: a second copy is worse than a
+// late one, and the log says which happened.
 //
 // A slot whose state could not be read is unknown: the prompt's clock keeps running, because
 // not seeing a prompt is not seeing it gone. Only a state that says so clears it.
@@ -42,10 +47,23 @@ export function promptHash(prompt: Record<string, unknown>): string {
 export type ReadState = (slot: string) => Promise<SlotState>;
 export type Note = (msg: string, fields?: Record<string, unknown>) => void;
 
+export type AlertOutcome = "sent" | "not_sent" | "unknown";
+export interface PromptAlert {
+  slot: string;
+  hash: string;
+  kind: unknown;
+  waited_s: number;
+}
+/** Tell the orchestrator about a waiting prompt. `detail` says why it was not sent. */
+export type Alert = (a: PromptAlert) => Promise<{ outcome: AlertOutcome; detail?: string }>;
+
 export interface ReconcileConfig {
   slots: string[];
   /** A prompt still waiting is logged again this often. */
   waitingEveryMs: number;
+  /** Alert the orchestrator once a prompt has waited this long. Absent or 0: log only. */
+  alertAfterMs?: number;
+  alert?: Alert;
 }
 
 interface Waiting {
@@ -53,6 +71,9 @@ interface Waiting {
   kind: unknown;
   since: number;
   lastNote: number;
+  /** sent or unknown: never alerted again. not_sent: tried again on the next pass. */
+  alert: AlertOutcome | null;
+  lastAlertDetail?: string;
 }
 
 const RESULT_PAGE = 100;
@@ -107,11 +128,49 @@ export class Reconciler {
         held.lastNote = now;
         this.note("reconcile prompt waiting", { slot, hash, kind: held.kind, waited_s: Math.round((now - held.since) / 1000) });
       }
+      await this.maybeAlert(slot, held, now);
       return;
     }
     if (held) this.note("reconcile prompt cleared", { slot, hash: held.hash, waited_s: Math.round((now - held.since) / 1000), slot_alive: st.alive });
-    this.waiting.set(slot, { hash, kind: st.prompt.kind, since: now, lastNote: now });
+    const fresh: Waiting = { hash, kind: st.prompt.kind, since: now, lastNote: now, alert: null };
+    this.waiting.set(slot, fresh);
     this.note("reconcile prompt seen", { slot, hash, kind: st.prompt.kind });
+    await this.maybeAlert(slot, fresh, now);
+  }
+
+  /** Only after a read that shows the prompt still there: an unreadable slot never alerts. */
+  private async maybeAlert(slot: string, w: Waiting, now: number): Promise<void> {
+    const after = this.cfg.alertAfterMs ?? 0;
+    if (!this.cfg.alert || after <= 0) return;
+    if (w.alert === "sent" || w.alert === "unknown") return;
+    if (now - w.since < after) return;
+    const a: PromptAlert = { slot, hash: w.hash, kind: w.kind, waited_s: Math.round((now - w.since) / 1000) };
+    let r: { outcome: AlertOutcome; detail?: string };
+    try {
+      r = await this.cfg.alert(a);
+    } catch (err) {
+      // The alert function reports an outcome; a throw is a bug in it, and nothing says
+      // whether a turn started, so it is treated as unknown rather than retried.
+      r = { outcome: "unknown", detail: err instanceof Error ? err.message : String(err) };
+    }
+    w.alert = r.outcome;
+    if (r.outcome === "not_sent") {
+      // Logged when the reason changes, not on every pass while the thread stays busy.
+      if (w.lastAlertDetail !== r.detail) this.note("reconcile prompt alert not sent", { ...a, detail: r.detail ?? null });
+      w.lastAlertDetail = r.detail;
+      return;
+    }
+    this.note(r.outcome === "sent" ? "reconcile prompt alert sent" : "reconcile prompt alert outcome unknown", { ...a, ...(r.detail ? { detail: r.detail } : {}) });
+  }
+
+  /** What the orchestrator reads: slot, kind, hash and wait, never the prompt's text. */
+  static alertText(a: PromptAlert): string {
+    const min = Math.floor(a.waited_s / 60);
+    return [
+      `Slot ${a.slot} has waited ${min >= 1 ? `${min} min` : `${a.waited_s} s`} on a ${String(a.kind)} prompt (hash ${a.hash}).`,
+      `Read it with \`slot.sh prompt ${a.slot}\` and answer it under "Permission prompts in slots" in your AGENTS.md.`,
+      "This is the bridge's timer: it is not the operator or the lead, it grants nothing, and the prompt's text is left out on purpose.",
+    ].join(" ");
   }
 
   /** Each finished task once, from a cursor that survives a restart. A failed read throws. */

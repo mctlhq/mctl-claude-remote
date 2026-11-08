@@ -37,6 +37,7 @@ type Fake = {
   dropPull: boolean;
   mergeReply: { status: number; body: any };
   tokenSeen: string[];
+  app: any;
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -54,7 +55,7 @@ function handle(req: Request, url: URL, body: any): Response {
     return J({ token: TOKEN }, 201);
   }
   if (key === "DELETE /installation/token") return new Response(null, { status: 204 });
-  if (key === "GET /app") return J({ slug: "mctl-codex", permissions: { contents: "write" } });
+  if (key === "GET /app") return J(fake.app);
   fake.tokenSeen.push(auth);
   if (key === "GET /installation/repositories") return J({ total_count: 1, repositories: [{ full_name: REPO }] });
   if (key === "GET /repos/mctlhq/r/pulls") return J(fake.pulls);
@@ -102,7 +103,7 @@ const HEAD = "a".repeat(40);
 
 beforeEach(() => {
   fake = {
-    calls: [], pulls: [], tokenSeen: [], fail: {}, dropMerge: false, dropPull: false,
+    calls: [], pulls: [], tokenSeen: [], app: { slug: "mctl-codex", permissions: { contents: "write" } }, fail: {}, dropMerge: false, dropPull: false,
     pr: { state: "open", draft: false, node_id: "N1", head: { sha: HEAD }, base: { ref: "main" }, mergeable: true, mergeable_state: "clean" },
     reviews: [{ user: { login: "claude[bot]" }, state: "APPROVED", commit_id: HEAD }],
     runs: [{ id: 10, name: "validate", status: "completed", conclusion: "success" }, { id: 11, name: "docker", status: "completed", conclusion: "skipped" }],
@@ -275,6 +276,26 @@ describe("publish", () => {
     commit("src/a.txt", "c\n");
     git(work, "merge", "-q", "--no-ff", "-m", "merge", "side");
     await refused(publish(cfg, gh, opts(seal("feat/y", base, ["src/a.txt", "src/s.txt"]))), "merge_commit");
+  });
+
+  test("a Co-Authored-By trailer on any commit is refused before anything is pushed", async () => {
+    git(work, "checkout", "-q", "-B", "feat/y", base);
+    fs.writeFileSync(path.join(work, "src/a.txt"), "c\n");
+    git(work, "add", "-A");
+    git(work, "commit", "-qm", "feat: y\n\nAgent: claude\nco-authored-by: Someone <noreply@example.com>");
+    commit("src/a.txt", "d\n"); // a clean commit on top does not hide the earlier one
+    await refused(publish(cfg, gh, opts(seal("feat/y", base, ["src/a.txt"]))), "co_authored_by");
+    expect(remoteRefs()).not.toContain("feat/y");
+    expect(writes()).toEqual([]);
+  });
+
+  test("a commit that only mentions the trailer mid-line is not refused", async () => {
+    git(work, "checkout", "-q", "-B", "feat/y", base);
+    fs.writeFileSync(path.join(work, "src/a.txt"), "c\n");
+    git(work, "add", "-A");
+    git(work, "commit", "-qm", "fix: refuse the Co-Authored-By: trailer\n\nAgent: claude");
+    const r = await publish(cfg, gh, opts(seal("feat/y", base, ["src/a.txt"])));
+    expect((r as { ok: boolean }).ok).toBe(true);
   });
 
   test("a directory link planted above a handoff file is refused", async () => {
@@ -606,7 +627,199 @@ describe("ready and the CLI", () => {
   test("defaults point at the real App and the repositories slots work on", () => {
     const c = config({ MCTL_BRIDGE_HOME: "/h" });
     expect(c.keyFile).toBe("/h/etc/codex-github-app.pem");
-    expect(c.repos).toEqual(["mctlhq/mctl-claude-remote", "mctlhq/bridge-step0-sandbox", "mctlhq/mctl-telegram", "mctlhq/mctl-gitops"]);
+    expect(c.repos).toEqual(["mctlhq/mctl-claude-remote", "mctlhq/bridge-step0-sandbox", "mctlhq/mctl-telegram", "mctlhq/mctl-gitops", "mctlhq/mctl-api", "mctlhq/mctl-agents", "mctlhq/mctl-agent", "mctlhq/mctl-web", "mctlhq/mctl-docs", "mctlhq/mctl-academy", "mctlhq/mctl-alice", "mctlhq/mctl-support", "mctlhq/seerrsense"]);
+    expect(c.repos).not.toContain("mctlhq/.github");
+  });
+});
+
+describe("publish --update-from", () => {
+  /** Publish feat/x once as a new PR, then add a commit on top: the update to hand off. */
+  async function published(): Promise<{ first: string }> {
+    const h = handoff();
+    await publish(cfg, gh, opts(h));
+    return { first: h.m.head_sha };
+  }
+  const own = (head: string, over: any = {}) => ({
+    number: 7, html_url: "https://x/7", draft: false, user: { login: "mctl-codex[bot]", type: "Bot" },
+    head: { sha: head, ref: "feat/x", repo: { full_name: REPO } }, base: { ref: "main" }, ...over,
+  });
+  const next = (): { bundle: string; manifest: string; head: string } => {
+    commit("src/a.txt", "c\n");
+    const y = seal("feat/x", base, ["src/a.txt"]);
+    return { ...y, head: git(work, "rev-parse", "HEAD") };
+  };
+  const pulls = () => writes().filter((w) => w.endsWith("/pulls")).length;
+
+  test("fast-forwards the App's own open PR to the new head, opens no PR, and is idempotent", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first)];
+    const r = await publish(cfg, gh, { ...opts(y), updateFrom: first });
+    expect(r).toMatchObject({ ok: true, pr: 7, head: y.head, branch: "feat/x", updated_from: first });
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${y.head}`);
+    expect(pulls()).toBe(1);
+    fake.pulls = [own(y.head)];
+    expect(await publish(cfg, gh, { ...opts(y), updateFrom: first })).toMatchObject({ ok: true, duplicate: true, pr: 7 });
+    expect(pulls()).toBe(1);
+  });
+
+  test("without --update-from an occupied branch is still refused", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first)];
+    await refused(publish(cfg, gh, opts(y)), "branch_taken");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("the branch must be exactly at the expected head, on GitHub and on the PR", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: base }), "branch_moved");
+    fake.pulls = [own(base)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "branch_moved");
+    // The PR listing can lag behind the branch: it still shows the expected head while the
+    // branch itself has moved on. The branch read alone has to refuse this.
+    fake.pulls = [own(base)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: base }), "branch_moved");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("a head that does not descend from the current one is never pushed", async () => {
+    const { first } = await published();
+    git(work, "checkout", "-q", "-B", "feat/x", base);
+    commit("src/a.txt", "other\n");
+    const y = seal("feat/x", base, ["src/a.txt"]);
+    fake.pulls = [own(first)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "not_fast_forward");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("a run resumed after its push still checks ancestry and the PR head", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first)];
+    await publish(cfg, gh, { ...opts(y), updateFrom: first });
+    // The push landed but the ledger never reached "done": the next run resumes.
+    const dir = path.join(cfg.home, "publish/ledger");
+    const resume = () => {
+      for (const f of fs.readdirSync(dir)) {
+        const file = path.join(dir, f);
+        const l = JSON.parse(fs.readFileSync(file, "utf8"));
+        if (l.head === y.head) fs.writeFileSync(file, JSON.stringify({ ...l, state: "intent" }));
+      }
+    };
+    resume();
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: "1".repeat(40) }), "not_fast_forward");
+    resume();
+    fake.pulls = [own(base)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "branch_moved");
+    for (const prHead of [y.head, first]) {
+      resume();
+      fake.pulls = [own(prHead)];
+      expect(await publish(cfg, gh, { ...opts(y), updateFrom: first })).toMatchObject({ ok: true, pr: 7, updated_from: first });
+    }
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${y.head}`);
+  });
+
+  test("no refs from the bundle stay behind after an update", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first)];
+    await publish(cfg, gh, { ...opts(y), updateFrom: first });
+    expect(git(path.join(cfg.home, "publish/cache/mctlhq__r.git"), "for-each-ref", "refs/publish/")).toBe("");
+  });
+
+  test("a refused push is push_refused, and an unreadable branch after it is outcome unknown", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first)];
+    const hook = path.join(remote, "hooks/pre-receive");
+    fs.writeFileSync(hook, "#!/bin/sh\nexit 1\n", { mode: 0o755 });
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "push_refused");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+    // The hook moves the repository away and then refuses: the read-back cannot happen.
+    fs.writeFileSync(hook, `#!/bin/sh\nmv "${remote}" "${remote}.gone"\nexit 1\n`, { mode: 0o755 });
+    const err = await publish(cfg, gh, { ...opts(y), updateFrom: first }).catch((e) => e);
+    fs.renameSync(`${remote}.gone`, remote);
+    expect(err).toBeInstanceOf(OutcomeUnknown);
+    fs.rmSync(hook);
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("only the App's own PR from this repository, on main, is updated", async () => {
+    const { first } = await published();
+    const y = next();
+    const cases: [any, string][] = [
+      [own(first, { user: { login: "mashkovd", type: "User" } }), "not_own_pr"],
+      [own(first, { user: { login: "dependabot[bot]", type: "Bot" } }), "not_own_pr"],
+      [own(first, { user: { login: "mctl-codex[bot]", type: "User" } }), "not_own_pr"],
+      [own(first, { head: { sha: first, ref: "feat/x", repo: { full_name: "someone/fork" } } }), "not_own_pr"],
+      [own(first, { base: { ref: "release" } }), "wrong_base"],
+    ];
+    for (const [pr, code] of cases) {
+      fake.pulls = [pr];
+      await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), code);
+    }
+    fake.pulls = [];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "no_open_pr");
+    fake.pulls = [own(first), own(first, { number: 8 })];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "ambiguous_pr");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("there must be a branch to update", async () => {
+    const h = handoff();
+    fake.pulls = [own(base)];
+    await refused(publish(cfg, gh, { ...opts(h), updateFrom: base }), "no_branch");
+    expect(remoteRefs()).not.toContain("refs/heads/feat/x");
+  });
+
+  test("the commit checks still run on the whole range before anything is pushed", async () => {
+    const { first } = await published();
+    fs.writeFileSync(path.join(work, "src/a.txt"), "c\n");
+    git(work, "add", "-A");
+    git(work, "commit", "-qm", "fix: c\n\nCo-Authored-By: x <x@x>");
+    const y = seal("feat/x", base, ["src/a.txt"]);
+    fake.pulls = [own(first)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "co_authored_by");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("an unreadable App slug or PR author is a failed read, not permission", async () => {
+    const { first } = await published();
+    const y = next();
+    fake.pulls = [own(first, { user: {} })];
+    expect(await publish(cfg, gh, { ...opts(y), updateFrom: first }).catch((e) => e)).toBeInstanceOf(Unreadable);
+    fake.pulls = [own(first)];
+    for (const app of [{}, { slug: "" }, { slug: 7 }]) {
+      fake.app = app;
+      expect(await publish(cfg, gh, { ...opts(y), updateFrom: first }).catch((e) => e)).toBeInstanceOf(Unreadable);
+    }
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("the CLI takes --update-from only as a full SHA", async () => {
+    const { first } = await published();
+    const y = next();
+    const body = path.join(tmp, "body.md");
+    fs.writeFileSync(body, "b");
+    const writeErr = process.stderr.write;
+    const writeOut = process.stdout.write;
+    let out = "";
+    (process.stderr as any).write = () => true;
+    (process.stdout as any).write = (s: string) => ((out += s), true);
+    const argv = ["publish", "--repo", REPO, "--bundle", y.bundle, "--manifest", y.manifest, "--allow", "src/", "--title", "t", "--body-file", body];
+    try {
+      expect(await main([...argv, "--update-from", first.slice(0, 12)], cfg)).toBe(1);
+      fake.pulls = [own(first)];
+      expect(await main([...argv, "--update-from", first], cfg)).toBe(0);
+    } finally {
+      (process.stderr as any).write = writeErr;
+      (process.stdout as any).write = writeOut;
+    }
+    expect(out).toContain(`"updated_from":"${first}"`);
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${y.head}`);
   });
 });
 

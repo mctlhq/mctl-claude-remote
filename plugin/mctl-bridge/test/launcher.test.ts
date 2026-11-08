@@ -48,6 +48,8 @@ describe.skipIf(!usable)("launcher scripts", () => {
     const t = setup();
     const r = spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo], { env: t.env, encoding: "utf8" });
     expect(r.status).toBe(0);
+    // the default model is Sonnet, and the start line says which model the slot got
+    expect(r.stdout).toContain(" on model sonnet ");
     const d = path.join(t.H, "slots", "s1");
 
     const mcp = JSON.parse(fs.readFileSync(path.join(d, "mcp.json"), "utf8"));
@@ -83,6 +85,14 @@ describe.skipIf(!usable)("launcher scripts", () => {
     for (const r of ["Bash(rm -fr:*)", "Bash(rm -r -f:*)"]) expect(deny).toContain(r);
     // an allow rule must never cover a denied command family by prefix
     for (const a of allow) for (const bad of ["git push", "gh ", "curl", "wget", "ssh", "sudo", "security"]) expect(a.startsWith(`Bash(${bad}`)).toBe(false);
+    // build, typecheck and Go tests run without a prompt (operator decision 2026-11-07)
+    for (const r of ["Bash(go build:*)", "Bash(go test:*)", "Bash(go vet:*)", "Bash(bun run typecheck)", "Bash(bun run --cwd plugin/mctl-bridge typecheck)", "Bash(git rebase origin/main)", "Bash(git rebase --continue)"]) expect(allow).toContain(r);
+    // ...but nothing that runs a program of the command line's choosing: no general bun run, go run,
+    // go generate, go mod or go get, and no rebase form that would take --exec
+    for (const bad of ["Bash(bun run:", "Bash(go run", "Bash(go generate", "Bash(go mod", "Bash(go get", "Bash(go install", "Bash(git rebase:", "Bash(git merge", "Bash(gofmt -w", "Bash(gofmt:"]) expect(allow.some((a) => a.startsWith(bad))).toBe(false);
+    for (const r of ["Bash(go *-exec*)", "Bash(go *-toolexec*)", "Bash(go *-vettool*)"]) expect(deny).toContain(r);
+    // a rebase that stops on a conflict must not open an editor in a terminal nobody sees
+    expect(settings.env).toEqual({ GIT_EDITOR: "true" });
 
     expect(spawnSync("zsh", ["-n", path.join(d, "run.sh")]).status).toBe(0);
     const run = spawnSync(path.join(d, "run.sh"), [], { env: t.env, cwd: t.root, encoding: "utf8" });
@@ -90,7 +100,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(fs.readFileSync(path.join(t.record, "cwd"), "utf8").trim()).toBe(t.repo);
     expect(fs.readFileSync(path.join(t.record, "argv"), "utf8").split("\0").slice(0, -1)).toEqual([
       "--remote-control", "mctl-slot-S1",
-      "--model", "haiku",
+      "--model", "sonnet",
       "--mcp-config", path.join(d, "mcp.json"),
       "--strict-mcp-config",
       "--settings", path.join(d, "settings.json"),
@@ -108,7 +118,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
   const SID = "0f8fad5b-d9cb-469f-a165-70867728950e";
   const BASE_ARGV = (d: string) => [
     "--remote-control", "mctl-slot-S1",
-    "--model", "haiku",
+    "--model", "sonnet",
     "--mcp-config", path.join(d, "mcp.json"),
     "--strict-mcp-config",
     "--settings", path.join(d, "settings.json"),
@@ -137,7 +147,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
     const d = path.join(t.H, "slots", "s1");
     expect(spawnSync("zsh", ["-n", path.join(d, "run.sh")]).status).toBe(0);
     // the id is zsh-quoted in the generated script like every other value
-    expect(fs.readFileSync(path.join(d, "run.sh"), "utf8")).toContain(`--model 'haiku' --resume '${SID}' --mcp-config`);
+    expect(fs.readFileSync(path.join(d, "run.sh"), "utf8")).toContain(`--model 'sonnet' --resume '${SID}' --mcp-config`);
     const base = BASE_ARGV(d);
     expect(argvOf(t)).toEqual([...base.slice(0, 4), "--resume", SID, ...base.slice(4)]);
     fs.rmSync(t.root, { recursive: true, force: true });
@@ -291,6 +301,53 @@ describe.skipIf(!usable)("launcher scripts", () => {
     fs.rmSync(t.root, { recursive: true, force: true });
   });
 
+  test("kill is allowed only behind the slot user boundary, never in the trusted experiment", () => {
+    const allowOf = (file: string): string[] => JSON.parse(fs.readFileSync(file, "utf8")).permissions.allow;
+    const t = setup();
+    expect(spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo], { env: t.env, encoding: "utf8" }).status).toBe(0);
+    const trusted = allowOf(path.join(t.H, "slots", "s1", "settings.json"));
+    expect(trusted).toContain("Bash(ps -o pid,ppid,stat,lstart,command -p:*)");
+    expect(trusted).not.toContain("Bash(kill:*)");
+    const homes = path.join(t.root, "homes");
+    fs.mkdirSync(path.join(homes, "mctl-slot-s2"), { recursive: true });
+    stub(path.join(t.root, "bin", "id"), "exit 0");
+    stub(path.join(t.root, "bin", "sudo"), `[ "$1 $2 $3" = "-n -H -u" ] || exit 99\nshift 4\nexec "$@"`);
+    const env = { ...t.env, MCTL_BRIDGE_TRUSTED_EXPERIMENT: "0", MCTL_BRIDGE_SLOT_HOME_ROOT: homes };
+    expect(spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s2", t.repo], { env, encoding: "utf8" }).status).toBe(0);
+    const bounded = allowOf(path.join(homes, "mctl-slot-s2", ".mctl-bridge", "settings.json"));
+    expect(bounded).toContain("Bash(kill:*)");
+    expect(bounded.filter((r) => r !== "Bash(kill:*)")).toEqual(trusted);
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
+  test("start installs packages from each committed lockfile, frozen and without scripts, and a failure does not stop it", () => {
+    const t = setup();
+    for (const d of ["plugin/a", "node_modules/dep", "deep/x/y/z"]) fs.mkdirSync(path.join(t.repo, d), { recursive: true });
+    for (const f of ["plugin/a/bun.lock", "node_modules/dep/bun.lock", "deep/x/y/z/bun.lock"]) fs.writeFileSync(path.join(t.repo, f), "{}");
+    const calls = path.join(t.record, "bun");
+    const bun = path.join(t.root, "bin", "fakebun");
+    stub(bun, `printf '%s|%s\\n' "$(pwd -P)" "$*" >> ${JSON.stringify(calls)}\n[ -e ${JSON.stringify(path.join(t.root, "fail"))} ] && { echo "lockfile had changes"; exit 1; }\nexit 0`);
+    const run = (extra: Record<string, string> = {}) =>
+      spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo], { env: { ...t.env, BUN: bun, ...extra }, encoding: "utf8" });
+    let r = run();
+    expect(r.status).toBe(0);
+    // only the lockfile within three levels, not the one inside node_modules nor the one four deep
+    expect(fs.readFileSync(calls, "utf8")).toBe(`${path.join(t.repo, "plugin/a")}|install --frozen-lockfile --ignore-scripts\n`);
+    expect(r.stdout).toContain("deps: installed in");
+    fs.rmSync(calls);
+    fs.writeFileSync(path.join(t.root, "fail"), "");
+    r = run();
+    expect(r.status).toBe(0);
+    expect(r.stderr).toContain("deps: bun install failed in");
+    expect(r.stderr).toContain("lockfile had changes");
+    expect(fs.existsSync(path.join(t.H, "slots", "s1", "run.sh"))).toBe(true);
+    fs.rmSync(calls);
+    r = run({ MCTL_BRIDGE_SLOT_DEPS: "0" });
+    expect(r.status).toBe(0);
+    expect(fs.existsSync(calls)).toBe(false);
+    fs.rmSync(t.root, { recursive: true, force: true });
+  });
+
   test("the boundary probe refuses duplicate or single slots instead of passing with nothing to check", () => {
     const t = setup();
     stub(path.join(t.root, "bin", "sudo"), `echo called >> "${t.record}/sudo"; exit 0`);
@@ -368,5 +425,50 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(INSTRUCTIONS).toContain("For a temporary mutation check: commit first, edit with the Edit tool, run the test, undo with");
     expect(INSTRUCTIONS).toContain("git restore <file>, and confirm with git status or git diff.");
     expect(INSTRUCTIONS).toContain("Never copy backups to a temp dir");
+  });
+
+  // 2026-11-07: of 115 approved slot prompts, at least 41 used a shell variable, 32 used git -C
+  // and 14 began with export PATH: commands the allow rules could never match.
+  test("channel instructions forbid the command shapes the allow rules cannot match", () => {
+    expect(INSTRUCTIONS).toContain("never start one with export, a VAR=value assignment or a");
+    expect(INSTRUCTIONS).toContain("PATH already holds bun and valkey-server.");
+    expect(INSTRUCTIONS).toContain("never git -C <dir> and never an absolute path into another");
+    expect(INSTRUCTIONS).toContain("call report_result with failed and say so");
+    expect(INSTRUCTIONS).toContain("ends with the trailer Agent: claude. Never add Co-Authored-By");
+    expect(INSTRUCTIONS).toContain("never with pkill -f");
+    // every command rule 14 promises runs without a prompt is matched by slot.sh's allow list
+    const sh = fs.readFileSync(path.join(import.meta.dir, "..", "ops", "slot.sh"), "utf8");
+    const allowLine = sh.match(/^\s*allow='(.*)'$/m);
+    expect(allowLine).not.toBeNull();
+    const allowed = [...allowLine![1]!.matchAll(/"Bash\(([^"]*)\)"/g)].map((m) => m[1]!);
+    const matches = (cmd: string): boolean => allowed.some((r) => (r.endsWith(":*") ? cmd.startsWith(r.slice(0, -2)) : cmd === r));
+    const promised = ["go build ./...", "go test ./...", "go vet ./...", "bun run --cwd plugin/mctl-bridge typecheck", "git fetch origin", "git rebase origin/main", "git add", "git rebase --continue"];
+    for (const cmd of promised) {
+      expect(INSTRUCTIONS).toContain(cmd);
+      expect([cmd, matches(cmd)]).toEqual([cmd, true]);
+    }
+    expect(INSTRUCTIONS).toContain("Never git merge: mctl-publish refuses merge commits.");
+    expect(matches("git merge origin/main")).toBe(false);
+    // rule 10: one command per call; a status suffix such as ; echo exit=$? holds a variable and prompts
+    expect(INSTRUCTIONS).toContain("Run one");
+    expect(INSTRUCTIONS).toContain("no ; echo exit=$? and no && or ; chains");
+    // rule 15: ps by PID and date run in both modes; kill is added only behind the user boundary
+    expect(INSTRUCTIONS).toContain("ps -o pid,ppid,stat,lstart,command -p <pid>");
+    expect(matches("ps -o pid,ppid,stat,lstart,command -p 10436")).toBe(true);
+    expect(matches("ps aux")).toBe(false);
+    expect(matches("date -u")).toBe(true);
+    expect(matches("kill 10436")).toBe(false);
+    const denyLine = sh.match(/^\s*deny='(.*)'$/m);
+    const denied = [...denyLine![1]!.matchAll(/"Bash\(([^"]*)\)"/g)].map((m) => m[1]!);
+    expect(denied).toContain("pkill:*");
+    expect(denied).toContain("killall:*");
+    // ps forms that print process environments are denied, and the deny does not catch the rule-15 form
+    const glob = (r: string): RegExp => new RegExp("^" + r.split("*").map((x) => x.replace(/[.+?^${}()|[\]\\]/g, "\\$&")).join(".*") + "$", "s");
+    const globDenied = (cmd: string): boolean => denied.some((r) => r.includes("*") && !r.endsWith(":*") && glob(r).test(cmd));
+    for (const env of ["ps eww", "ps -E", "ps auxe", "ps -ww -E -p 1", "ps -o pid,ppid,stat,lstart,command -p 10436 -e", "ps -o pid,ppid,stat,lstart,command -p 1 e"]) expect([env, globDenied(env)]).toEqual([env, true]);
+    expect(globDenied("ps -o pid,ppid,stat,lstart,command -p 10436")).toBe(false);
+    // rules are numbered without gaps, so a later edit cannot silently drop one
+    const nums = [...INSTRUCTIONS.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
+    expect(nums).toEqual(nums.map((_, i) => i + 1));
   });
 });

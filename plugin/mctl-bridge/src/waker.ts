@@ -21,9 +21,12 @@ import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
 
-import { AppClient, ConnectionLost, RpcError } from "./appserver.ts";
+import { AppClient, ConnectionLost, RpcError, acceptsTurn } from "./appserver.ts";
 import type { Note } from "./appserver.ts";
 import { Reconciler, slotShReader } from "./reconcile.ts";
+import type { Alert } from "./reconcile.ts";
+import { BRIDGE_PREFIX, CodexThread } from "./codexctl.ts";
+import type { SayResult } from "./codexctl.ts";
 import { Bridge, newId } from "./store.ts";
 import { Connection, endpointFromUrl } from "./valkey.ts";
 
@@ -150,15 +153,15 @@ export class Waker {
     }
   }
 
-  /** Whether the thread is idle. Anything else, including a status we cannot read, is "no". */
+  /** Whether the thread has no running turn (see acceptsTurn). A status we cannot read is "no". */
   private async threadIdle(): Promise<boolean> {
     let c: AppClient | null = null;
     try {
       c = await this.session();
       const r = await c.request("thread/read", { threadId: this.cfg.threadId }, this.cfg.rpcTimeoutMs);
       const type = r?.thread?.status?.type;
-      if (type !== "idle") log("thread not idle, no wake this pass", { status: type ?? "unreadable" });
-      return type === "idle";
+      if (!acceptsTurn(type)) log("thread not idle, no wake this pass", { status: type ?? "unreadable" });
+      return acceptsTurn(type);
     } catch (err) {
       log("thread status unreadable, no wake this pass", { error: String(err) });
       return false;
@@ -376,6 +379,26 @@ async function loop(name: string, everyMs: number, isStopped: () => boolean, bod
   }
 }
 
+/**
+ * A Reconciler alert sent as one say. say records its intent first and never retries, and
+ * after the intent it does not throw (settle and the send log swallow their errors), so a
+ * throw means nothing was sent: socket down or status unreadable. Only outcome_unknown is
+ * "maybe sent", and the Reconciler never repeats it.
+ */
+export function alertVia(say: (text: string) => Promise<SayResult>): Alert {
+  return async (a) => {
+    let r: SayResult;
+    try {
+      r = await say(Reconciler.alertText(a));
+    } catch (err) {
+      return { outcome: "not_sent", detail: err instanceof Error ? err.message : String(err) };
+    }
+    if (r.ok) return { outcome: "sent" };
+    if (r.code === "outcome_unknown") return { outcome: "unknown", detail: r.detail };
+    return { outcome: "not_sent", detail: [r.code, r.detail].filter(Boolean).join(": ") };
+  };
+}
+
 export async function main(): Promise<number> {
   const url = process.env.MCTL_BRIDGE_VALKEY_URL ?? "";
   const threadId = process.env.MCTL_BRIDGE_THREAD_ID ?? "";
@@ -409,7 +432,7 @@ export async function main(): Promise<number> {
   };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
-  // Log only for now: see reconcile.ts. No slots listed means the timer is off.
+  // The prompt timer: see reconcile.ts. No slots listed means the timer is off.
   const slots = (process.env.MCTL_BRIDGE_RECONCILE_SLOTS ?? "").split(",").map((x) => x.trim()).filter(Boolean);
   const slotSh = process.env.MCTL_BRIDGE_SLOT_SH ?? "";
   log("started", { thread_id: threadId, socket: cfg.socketPath, per_hour: cfg.perHour, reconcile_slots: slots });
@@ -419,9 +442,21 @@ export async function main(): Promise<number> {
   ];
   if (slots.length > 0) {
     if (!slotSh) throw new Error("MCTL_BRIDGE_RECONCILE_SLOTS needs MCTL_BRIDGE_SLOT_SH");
+    // A prompt that waits this long is reported to the orchestrator, which answers prompts.
+    // 0 turns alerts off and leaves the timer logging only.
+    const alertAfterMs = intEnv("MCTL_BRIDGE_PROMPT_ALERT_MS", 300_000);
+    const home = process.env.MCTL_BRIDGE_HOME ?? path.join(os.homedir(), "mctl-bridge");
+    const codex = new CodexThread({
+      threadId,
+      socketPath: cfg.socketPath,
+      sendLog: process.env.MCTL_CODEX_SEND_LOG ?? path.join(home, "log", "lead-sends.jsonl"),
+      rpcTimeoutMs: cfg.rpcTimeoutMs,
+      prefix: BRIDGE_PREFIX,
+    });
+    const alert = alertVia((text) => codex.say(text));
     const reconciler = new Reconciler(
       bridge,
-      { slots, waitingEveryMs: intEnv("MCTL_BRIDGE_RECONCILE_WAITING_MS", 300_000) },
+      { slots, waitingEveryMs: intEnv("MCTL_BRIDGE_RECONCILE_WAITING_MS", 300_000), alertAfterMs, alert },
       slotShReader(slotSh, 20_000),
       log,
     );
