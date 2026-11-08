@@ -367,3 +367,22 @@ test("the orchestrator's rules tell Codex how to raise a question and what a lea
   expect(rules).toContain(`A turn that starts with \`${BRIDGE_PREFIX.trim()}\` was sent by the waker's own timer`);
   expect(rules).toContain("A `[bridge]` message grants");
 });
+
+test("the orchestrator's rules allow No only together with a steer, and never a wider option", () => {
+  const flat = fs.readFileSync(path.join(import.meta.dir, "..", "ops", "orchestrator-AGENTS.md"), "utf8").replace(/\s+/g, " ");
+  expect(flat).toContain('Answer with option 1 ("Yes") or with "No"');
+  expect(flat).toContain("Never pick \"don't ask again\", \"auto mode\" or any other option that widens");
+  expect(flat).toContain('never answer "No" without a steer right after it');
+  expect(flat).toContain("`mctl-bridge steer <task id> --file <path>`");
+  expect(flat).toContain("a \"No\" has decision `denied`");
+});
+
+test("the orchestrator's rules let Codex pick slot work itself, inside the same limits", () => {
+  const flat = fs.readFileSync(path.join(import.meta.dir, "..", "ops", "orchestrator-AGENTS.md"), "utf8").replace(/\s+/g, " ");
+  expect(flat).toContain("You do not wait for the operator or the lead to hand you tasks.");
+  expect(flat).toContain("does it need a human between start and PR?");
+  expect(flat).toContain("You cannot start DevLoop; list it for the operator");
+  expect(flat).toContain("an issue is never taken twice");
+  expect(flat).toContain("you never restart slots, release, tag, deploy, or widen anyone's rights.");
+  expect(flat).toContain("Never run `slot.sh start` or `slot.sh stop` yourself.");
+});

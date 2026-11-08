@@ -23,6 +23,8 @@ const USAGE = `usage: mctl-bridge <command> [options]
   claim QID [--lease MS]                 take the right to reply
   renew QID --token T [--lease MS]
   reply QID --token T (--text T | --stdin | --file PATH)
+  steer TASK_ID (--text T | --stdin | --file PATH)   a note to the slot's in-flight task, for
+                                         when it asked nothing (after a refused prompt)
   resolve ID --as completed|failed|cancelled|closed|requeue (--reason R | --stdin | --file PATH) [--author A] [--force]
   resolve WAKE_ID (--reason R | --stdin | --file PATH) [--author A]   close a wake (w-...)
 
@@ -216,6 +218,8 @@ export async function run(argv: string[], b: Bridge): Promise<{ code: number; ou
     case "reply":
       if (!values.token) throw new Usage("--token is required");
       return result(await b.reply(positional(positionals, "QID"), values.token, readText(values, "text")));
+    case "steer":
+      return result(await b.steer(positional(positionals, "TASK_ID"), readText(values, "text")));
     case "resolve": {
       const id = positional(positionals, "ID");
       const author = values.author || process.env.USER || "";

@@ -186,6 +186,31 @@ describe.skipIf(requiresValkey)("mctl-bridge CLI", () => {
     expect(cli(["resolve", "t-1", "--as", "failed", "--author", "op"]).code).toBe(2);
   });
 
+  test("steer sends a note from a file to the in-flight task, and Codex may run it without a prompt", async () => {
+    const b = new Bridge(server.client());
+    const reg = must(await b.register({ slot: "s", uuid: "u2", conn_id: "k2", pid: 2, pid_start: "s", cwd: "/w" }));
+    const c = { slot: "s", conn_id: "k2", epoch: reg.epoch };
+    must(await b.heartbeat(c, false));
+    const sent = cli(["send", "--slot", "s", "--text", "run the tests"]);
+    expect(cli(["steer", sent.out.id, "--text", "x"])).toMatchObject({ code: 1, out: { ok: false, code: "not_acked" } });
+    const next = must(await b.next(c));
+    must(await b.emitted(c, next.id));
+    must(await b.ackTask(c, next.id, next.attempt_id));
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "steer-"));
+    const note = "Your `golangci-lint run --fix` was refused: run it without --fix.\n";
+    fs.writeFileSync(path.join(dir, "note.txt"), note);
+    const st = cli(["steer", next.id, "--file", path.join(dir, "note.txt")]);
+    expect(st).toMatchObject({ code: 0, out: { ok: true, task_id: next.id } });
+    const got = must(await b.next(c));
+    expect(got).toMatchObject({ kind: "reply", task_id: next.id, payload: note.slice(0, -1) });
+    expect(cli(["steer"]).code).toBe(2);
+    fs.rmSync(dir, { recursive: true });
+
+    const rules = fs.readFileSync(path.join(path.dirname(CLI), "..", "ops", "codex-mctl-bridge.rules"), "utf8");
+    const allowed = rules.match(/pattern = \["mctl-bridge", \[([^\]]*)\]\]/)![1]!;
+    expect(allowed.split(",").map((x) => x.trim().replace(/"/g, ""))).toContain("steer");
+  });
+
   test("usage errors exit 2", () => {
     expect(cli(["send"]).code).toBe(2);
     expect(cli(["nope"]).code).toBe(2);

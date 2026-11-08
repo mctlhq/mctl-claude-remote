@@ -24,7 +24,7 @@
 -- Every function returns a JSON object: {"ok":true,...} or {"ok":false,"code":...}.
 -- Rejections are data, not errors: a fenced or stale caller is an expected event.
 
-local VERSION = '5'
+local VERSION = '6'
 local P = 'mctl:bridge:'
 local MAX_PAYLOAD = 16384
 local MAX_HOP = 4
@@ -36,6 +36,7 @@ local FEED_MAXLEN = 10000
 local LATE_MAXLEN = 100
 local MSG_AUDIT_MAXLEN = 200
 local EXPIRED_REPLY = '[mctl-bridge] No reply arrived before the question expired.'
+local STEER_QUESTION = '[mctl-bridge] No question was asked: this is a note from the orchestrator.'
 
 -- Terminal states leave every open index and start the retention clock.
 local TERMINAL = {
@@ -559,6 +560,48 @@ local function reply(keys, a)
   return ok({ question_id = qid, reply_id = reply_id })
 end
 
+-- ARGV: question_id, task_id, reply_id, payload
+-- A note from the orchestrator to the task a slot is working on, without a question from
+-- the slot. Needed after the orchestrator answers a permission prompt with "No": Claude Code
+-- then stops its turn and waits for input, which in a slot only a channel event can give.
+-- The note is stored as a question that already has its reply, so delivery, ack, fencing,
+-- abandon, repair and the closing of the task are exactly the reply's. It is refused while
+-- the slot has a question of its own open (answer that one with `reply`), and for a task
+-- that is not the slot's current, acknowledged attempt.
+local function steer(keys, a)
+  local qid, task_id, reply_id, payload = a[1], a[2], a[3], a[4]
+  if keys[1] ~= ORCH or not valid_id(qid) or not valid_id(task_id) or not valid_id(reply_id)
+      or not valid_payload(payload) then
+    return no('bad_request')
+  end
+  local m = hgetall(mkey(task_id))
+  if m.kind ~= 'task' then return no('unknown_task') end
+  if m.state ~= 'acked' then return no('not_acked', { state = m.state or '' }) end
+  local s = hgetall(skey(m.slot))
+  if s.conn_id == nil or s.conn_id == '' or s.inflight ~= task_id
+      or s.inflight_attempt ~= m.attempt_id or s.epoch ~= m.emit_epoch then
+    return no('not_inflight')
+  end
+  if m.open_question and m.open_question ~= '' then
+    local st = redis.call('HGET', mkey(m.open_question), 'state')
+    if st and not TERMINAL[st] then return no('question_open', { question_id = m.open_question }) end
+  end
+  if redis.call('EXISTS', mkey(qid)) == 1 then return no('duplicate_id') end
+  local now = now_ms()
+  redis.call('HSET', mkey(qid), 'kind', 'question', 'state', 'reply_committed', 'steer', '1',
+    'slot', m.slot, 'task_id', task_id, 'attempt_id', m.attempt_id, 'uuid', s.uuid,
+    'epoch', s.epoch, 'conn_id', s.conn_id, 'payload', STEER_QUESTION, 'hop', m.hop or '0',
+    'reply_id', reply_id, 'reply', payload, 'replied_ms', now, 'reply_by', 'orch',
+    'created_ms', now, 'updated_ms', now, 'expires_ms', 0)
+  audit(qid, '', 'reply_committed', 'orch', 'steer', now)
+  redis.call('SADD', OPEN, qid)
+  redis.call('SADD', slot_open_key(m.slot), qid)
+  redis.call('HSET', mkey(task_id), 'open_question', qid)
+  redis.call('ZADD', ready_key(m.slot), redis.call('INCR', SEQ), qid)
+  ring(m.slot, qid, now)
+  return ok({ question_id = qid, reply_id = reply_id, task_id = task_id })
+end
+
 -- ARGV: id, as, reason, author
 -- The manual way out of delivery_unknown (and of anything not yet terminal).
 -- requeue readdresses a task to the slot's current registration as a new attempt.
@@ -996,6 +1039,7 @@ reg('bridge_send', send)
 reg('bridge_claim', claim)
 reg('bridge_renew', renew)
 reg('bridge_reply', reply)
+reg('bridge_steer', steer)
 reg('bridge_resolve', resolve)
 reg('bridge_expire', expire)
 reg('bridge_slot_stale', slot_stale)
