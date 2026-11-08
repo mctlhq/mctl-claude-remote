@@ -332,6 +332,15 @@ Fixes P1-d.
   by that task. Unrelated tasks still wait.
 - End-to-end criterion: the slot acknowledges the `reply_id` and then finishes the
   original task with `report_result` under the **same** `attempt_id`.
+- **Steer** (library 6, 2026-11-08). `mctl-bridge steer <task id>` lets the orchestrator
+  write to a task that asked nothing. It is needed after a "No" on a slot's permission
+  prompt: Claude Code then ends the turn and waits for input, and the slot's only input is
+  the channel. A steer is stored as a question that already holds its reply
+  (`reply_committed`, `steer=1`), so delivery, ack, fencing, abandon, repair and closing
+  with the task are the reply's own code paths. It is refused unless the task is `acked`
+  and is the slot's current `inflight` attempt of the current epoch, and while the task
+  has a question of its own open (`question_open`: answer that one instead). It never
+  rings the waker, because nothing waits for the orchestrator.
 
 ### Claims
 

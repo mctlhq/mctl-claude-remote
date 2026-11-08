@@ -13,7 +13,7 @@ import { ValkeyConnectionError, ValkeyError } from "./valkey.ts";
 import type { Arg, Executor, Reply } from "./valkey.ts";
 
 export const PREFIX = "mctl:bridge:";
-export const LIBRARY_VERSION = "5";
+export const LIBRARY_VERSION = "6";
 export const LIBRARY_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "bridge.lua");
 export const MAX_PAYLOAD = 16384;
 
@@ -262,6 +262,11 @@ export class Bridge implements SlotApi {
 
   reply(questionId: string, token: string, payload: string, replyId: string = newId("r")) {
     return this.call("bridge_reply", key.orch, [questionId, token, replyId, payload]);
+  }
+
+  /** A note to the slot's in-flight task without a question from it (see bridge.lua `steer`). */
+  steer(taskId: string, payload: string, o: { question_id?: string; reply_id?: string } = {}) {
+    return this.call("bridge_steer", key.orch, [o.question_id ?? newId("q"), taskId, o.reply_id ?? newId("r"), payload]);
   }
 
   /** `force` requeues even though late evidence shows an earlier attempt acted. */

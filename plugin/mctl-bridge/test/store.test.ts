@@ -185,6 +185,67 @@ describe.skipIf(requiresValkey)("bridge state machine", () => {
     expect(must(await b.next(a)).id).toBe(other.id);
   });
 
+  test("a steer reaches only the current acknowledged attempt, as a reply with the attempt kept", async () => {
+    const a = await register("a");
+    const sent = must(await b.send({ slot: "a", payload: "do it" }));
+    expect(await b.steer(sent.id, "early")).toMatchObject({ ok: false, code: "not_acked" });
+    const next = must(await b.next(a));
+    must(await b.emitted(a, sent.id));
+    expect(await b.steer(sent.id, "before ack")).toMatchObject({ ok: false, code: "not_acked" });
+    const admission = must(await b.ackTask(a, sent.id, next.attempt_id)).admission as Admission;
+    expect(await b.steer("t-nope", "x")).toMatchObject({ ok: false, code: "unknown_task" });
+    const st = must(await b.steer(sent.id, "use go test ./internal/api/... instead"));
+    expect(await b.message(st.question_id)).toMatchObject({ kind: "question", state: "reply_committed", steer: "1", task_id: sent.id });
+    // The waker is not rung: no question waits for the orchestrator.
+    expect((await b.askedQuestions()).map((q) => q.id)).not.toContain(st.question_id);
+    const got = must(await b.next(a));
+    expect(got).toMatchObject({ kind: "reply", id: st.question_id, reply_id: st.reply_id, task_id: sent.id, attempt_id: admission.attempt_id, payload: "use go test ./internal/api/... instead" });
+    must(await b.emitted(a, st.question_id));
+    must(await b.ackReply(a, st.question_id, st.reply_id));
+    expect(await state(st.question_id)).toBe("reply_acknowledged");
+    expect((await b.slotInfo("a")).inflight).toBe(sent.id);
+    // The attempt still reports as usual; a finished task takes no more steers.
+    must(await b.result("a", admission, "completed", "done"));
+    expect(await b.steer(sent.id, "late")).toMatchObject({ ok: false, code: "not_acked" });
+  });
+
+  test("a steer is refused while the slot's own question is open, and never doubles up", async () => {
+    const a = await register("a");
+    const { id, admission } = await admitted(a);
+    const q = must(await b.ask("a", admission, "which branch?"));
+    expect(await b.steer(id, "x")).toMatchObject({ ok: false, code: "question_open", question_id: q.question_id });
+    const c = must(await b.claim(q.question_id));
+    must(await b.reply(q.question_id, c.claim_token, "main"));
+    expect(await b.steer(id, "x")).toMatchObject({ ok: false, code: "question_open" }); // the reply is not delivered yet
+    must(await b.next(a));
+    must(await b.emitted(a, q.question_id));
+    must(await b.ackReply(a, q.question_id, (await b.message(q.question_id)).reply_id));
+    const first = must(await b.steer(id, "one"));
+    expect(await b.steer(id, "two")).toMatchObject({ ok: false, code: "question_open", question_id: first.question_id });
+    expect(await b.steer(id, "dup", { question_id: first.question_id })).toMatchObject({ ok: false });
+  });
+
+  test("a steer for an old registration is refused, and an undelivered one goes to delivery_unknown", async () => {
+    const a = await register("a");
+    const { id } = await admitted(a);
+    const st = must(await b.steer(id, "note"));
+    await sleep(30);
+    await b.sweep(10); // the adapter went silent before it took the note
+    expect(await state(st.question_id)).toBe("delivery_unknown");
+    const a2 = await register("a");
+    expect(await b.steer(id, "again")).toMatchObject({ ok: false });
+    expect(await b.next(a2)).toMatchObject({ ok: false, code: "empty" });
+  });
+
+  test("a task that finishes closes its undelivered steer", async () => {
+    const a = await register("a");
+    const { admission } = await admitted(a);
+    const st = must(await b.steer(admission.task_id, "note"));
+    must(await b.result("a", admission, "completed", "done before the note"));
+    expect(await b.message(st.question_id)).toMatchObject({ state: "closed", reason: "task_finished" });
+    expect(await b.next(a)).toMatchObject({ ok: false, code: "empty" });
+  });
+
   test("a committed reply survives a lost inbox stream and goes out with its reply_id", async () => {
     const a = await register("a");
     const { admission } = await admitted(a);

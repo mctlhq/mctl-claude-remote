@@ -4,10 +4,10 @@
 # subcommands an orchestrator needs are allowed. `resolve`, `init` and `sweep` still
 # prompt: those are operator decisions.
 prefix_rule(
-    pattern = ["mctl-bridge", ["sessions", "tasks", "status", "errors", "wakes", "claim", "renew", "reply", "send", "wait"]],
+    pattern = ["mctl-bridge", ["sessions", "tasks", "status", "errors", "wakes", "claim", "renew", "reply", "steer", "send", "wait"]],
     decision = "allow",
     justification = "mctl-bridge orchestrator CLI: local Valkey as bridge_orch, no other access",
-    match = [["mctl-bridge", "status", "q-1"], ["mctl-bridge", "reply", "q-1", "--token", "c-1", "--text", "yes"], ["mctl-bridge", "reply", "q-1", "--token", "c-1", "--file", "/w/answer.txt"], ["mctl-bridge", "reply", "q-1", "--token", "c-1", "--stdin"]],
+    match = [["mctl-bridge", "status", "q-1"], ["mctl-bridge", "reply", "q-1", "--token", "c-1", "--text", "yes"], ["mctl-bridge", "reply", "q-1", "--token", "c-1", "--file", "/w/answer.txt"], ["mctl-bridge", "reply", "q-1", "--token", "c-1", "--stdin"], ["mctl-bridge", "steer", "t-1", "--file", "/w/note.txt"]],
     not_match = [["mctl-bridge", "resolve", "t-1", "--as", "failed", "--reason", "x"], ["mctl-bridge", "init"], ["mctl-bridge-x", "status"]],
 )
 

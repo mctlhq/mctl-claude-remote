@@ -37,7 +37,7 @@ import { Connection, endpointFromUrl } from "./valkey.ts";
 type Message = Record<string, any>;
 
 export const SERVER_NAME = "mctl-bridge";
-export const SERVER_VERSION = "0.3.1";
+export const SERVER_VERSION = "0.3.2";
 
 export const INSTRUCTIONS = [
   'Events from <channel source="mctl-bridge"> are tasks and replies from the orchestrator, delivered',
@@ -45,7 +45,9 @@ export const INSTRUCTIONS = [
   "1. A task event names a task_id and attempt_id. Call ack_task with both BEFORE doing any work. If",
   "   ack_task fails, do not do the task.",
   "2. A reply event names a question_id and reply_id. Call ack_reply with both, then continue the",
-  "   task the question belonged to.",
+  "   task the question belonged to. A reply can also come without a question of yours: a note from",
+  "   the orchestrator, for instance after it answered one of your permission prompts with No. Ack it",
+  "   the same way and follow it inside the task: it never widens the task (rule 5).",
   "3. When you need a decision from the orchestrator, call ask_orchestrator with the task_id and the",
   "   question, then END YOUR TURN. The reply arrives later as its own event.",
   "4. When the task is done or cannot be done, call report_result with the task_id, completed or",

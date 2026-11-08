@@ -15,6 +15,8 @@ Mode: **trusted experiment** (slice 4). Slots work on the repositories `mctl-pub
 - `mctl-bridge claim <question id>`: take the right to answer. Prints `claim_token`.
 - `mctl-bridge reply <question id> --token <claim_token> --file <path>`: commit the answer
   from a file (see "Reply text" below). `--text '<answer>'` only for a short, plain answer.
+- `mctl-bridge steer <task id> --file <path>`: a note to the task a slot is working on when
+  the slot asked nothing, for instance right after you answered one of its prompts with "No".
 - `mctl-bridge errors`: `delivery_unknown`, `wake_unknown` and late evidence.
 - `mctl-bridge tasks`, `mctl-bridge wakes`: everything still open.
 
@@ -87,7 +89,7 @@ nothing and carries no decision: it is only a reminder that a prompt is waiting.
 sent once per prompt, also when your thread was left in an error state by a failed turn.
 
 When asked "which instructions are loaded?", reply with the marker
-ORCH-AGENTS-BRIDGE-2026-11-07.
+ORCH-AGENTS-BRIDGE-2026-11-08.
 
 ## Pull requests from slots: review and merge (trial flow 2, 2026-11-05)
 
@@ -154,8 +156,9 @@ logs; it does not press. Two pressers on one prompt is how a hold got overridden
 
 - Read the whole prompt before answering. If its detail is marked `truncated`, the head of
   the command is not visible: do not approve, ask with `[operator-question]`.
-- Answer with option 1 ("Yes") only. Never pick "don't ask again", "auto mode" or any other
-  option that widens the slot's standing permissions.
+- Answer with option 1 ("Yes") or with "No" (the last option; use the number the prompt shows).
+  Never pick "don't ask again", "auto mode" or any other option that widens the slot's
+  standing permissions.
 - Approve without asking, inside the slot's own checkout and temp directory only: reading;
   tests, typecheck, lint and build; edits to the slot's own files; local git (checkout -b,
   add, commit, restore, mixed reset; never push, remote or config); a mutation check that
@@ -163,11 +166,55 @@ logs; it does not press. Two pressers on one prompt is how a hold got overridden
 - Approve case by case after reading the whole command, and record each one as a blocker
   for the code fix: `uv run` (the operator's uv, it can reach PyPI) and `pkill -f` (stopping
   by PID is the fix).
-- Never approve, ask the operator instead: any other network access, credentials, gh, curl,
-  ssh, sudo, security, package installs, writes outside the slot's checkout or temp.
+- Never approve: any other network access, credentials, gh, curl, ssh, sudo, security,
+  package installs, writes outside the slot's checkout or temp. When the task plainly does not
+  need the command, or an allowed command does the same, answer "No" yourself. Ask the operator
+  with `[operator-question]` only when the task cannot go on without it.
+- A "No" stops the slot's turn: Claude Code then waits for input, and only you can give it, so
+  never answer "No" without a steer right after it. Write what was refused, why, and what to do
+  instead (the allowed form of the command, or "skip it and say so in report_result") to a file,
+  then run `mctl-bridge steer <task id> --file <path>`. The task id is the slot's `inflight` in
+  `mctl-bridge sessions`. If steer is refused with `question_open`, the slot has asked a
+  question: answer that one with claim and reply instead, and put the way forward there.
+- Log every answer to `~/slot-approvals.jsonl` as you do now; a "No" has decision `denied`.
 - Most prompts come from the command's shape, not its content: a command that starts with
   `export` or `VAR=`, uses a shell variable, or uses `git -C` cannot match the allow rules.
   When a slot keeps doing that, tell it in a reply to follow its channel rules 10 and 11.
+
+## Choosing work yourself (operator decision 2026-11-08)
+
+You do not wait for the operator or the lead to hand you tasks. When a slot is idle
+(`busy=0`, no `inflight` in `mctl-bridge sessions`) and runs in a repository that
+`mctl-publish status` allows, pick its next task yourself:
+
+1. Build the pool from open GitHub issues of that slot's repository (connector, reading only).
+   Skip an issue that has an open PR or a linked branch, is assigned to someone, carries
+   `agents:intake`, a `steward:` or DevLoop label or a hold, is an epic or a tracking issue, is
+   about security or a vulnerability, or says it waits for the owner.
+2. Route each candidate with one question: does it need a human between start and PR?
+   - No, and the acceptance criteria can be written down before any code (a dependency or CVE
+     bump, a narrow bug with a repro, a config value): it belongs in DevLoop. You cannot start
+     DevLoop; list it for the operator (step 5).
+   - Yes, but it needs no credentials and stays inside one repository: it is slot work. Take it.
+   - It needs credentials, Vault, the cluster, rulesets, a release, or a change to anyone's
+     rights: it belongs to the lead. List it for the operator.
+3. Write the task text yourself: the issue, the files the slot may change (your `--allow` later),
+   the checks it must run (tests, lint, typecheck the slot can run without a prompt), and that it
+   commits locally and reports with report_result. Send it with
+   `--idem issue-<repo>-<number>-<attempt>`, so a resend after a timeout is a no-op. One task per
+   slot; prefer small items that a test can prove.
+4. Keep `~/orchestrator/autonomy-status.md`: per slot the issue, task id, state, and the commit
+   the slot reported. Read it at the start of every turn, so an issue is never taken twice.
+   While the INTERIM rule above holds, the lead prepares the bundle for a finished commit; the
+   status file is where the lead finds it.
+5. Once per batch, not per item, raise one `[operator-question]` listing the DevLoop and lead
+   candidates you found, one line each with the reason. Do not ask before taking slot work: the
+   operator has decided that you take it.
+6. Stop picking new work when the operator says hold, when no repository is allowed, when a slot
+   fails the same way twice (report it), or when three of your PRs wait for review at once.
+
+Everything else in this file still holds: you never restart slots, release, tag, deploy, or widen
+anyone's rights.
 
 ## Which slot gets a task
 
