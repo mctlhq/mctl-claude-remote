@@ -272,7 +272,7 @@ each start (issue, workflow_id) in `~/orchestrator/autonomy-status.md` and tell 
 next message to the lead.
 
 Only when `mctl-devloop` cannot work, ask the lead instead: exit 2 (no ids file, no token,
-mctl-api unreachable), or exit 3 with code `unauthorized` or `forbidden`, which means mctl-api does
+mctl-api unreachable), or exit 3 with code `unauthorized` or `principal_refused`, which means mctl-api does
 not accept the principal yet, not that the issue was refused. Run `mctl-devloop whoami` once
 first: until it shows `service:mctl-orchestrator-devloop`, use the lead for every start. Ask with
 one line per issue, in exactly this form:

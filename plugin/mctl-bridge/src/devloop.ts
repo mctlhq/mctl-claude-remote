@@ -132,7 +132,7 @@ export class MctlApi {
   private async fetchJson(method: string, url: string, init: { headers: Record<string, string>; body?: string }): Promise<Reply> {
     let res: Response;
     try {
-      res = await fetch(url, { method, headers: { "user-agent": "mctl-devloop", ...init.headers }, body: init.body, signal: AbortSignal.timeout(this.cfg.timeoutMs) });
+      res = await fetch(url, { method, headers: { "user-agent": "mctl-devloop", ...init.headers }, body: init.body, redirect: "error", signal: AbortSignal.timeout(this.cfg.timeoutMs) });
     } catch (err) {
       throw new TransportError(`${method} ${url}: ${(err as Error).message}`);
     }
@@ -191,11 +191,19 @@ export class MctlApi {
   }
 }
 
-/** mctl-api's refusal of this principal: a 401 or 403 with nothing changed. */
+/**
+ * mctl-api's refusal, a 401 or 403 with nothing changed. Only the
+ * orchestrator gate's own codes (orchestrator_devloop_*) are a refusal of
+ * the request; any other 403 means mctl-api does not treat this caller as
+ * the orchestrator principal, which Codex must tell apart (it falls back to
+ * the lead), so it gets one local code whatever mctl-api called it.
+ */
 function refusal(r: Reply): Refused | null {
+  const msg = typeof r.data?.error === "string" ? r.data.error : `status ${r.status}`;
   if (r.status === 401) return new Refused("unauthorized", "mctl-api did not accept the token");
-  if (r.status === 403) return new Refused(typeof r.data?.code === "string" ? r.data.code : "forbidden", typeof r.data?.error === "string" ? r.data.error : "status 403");
-  return null;
+  if (r.status !== 403) return null;
+  const code = typeof r.data?.code === "string" ? r.data.code : "";
+  return code.startsWith("orchestrator_devloop_") ? new Refused(code, msg) : new Refused("principal_refused", `${code || "no code"}: ${msg}`);
 }
 
 export async function whoami(api: MctlApi): Promise<Record<string, unknown>> {

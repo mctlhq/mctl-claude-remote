@@ -77,6 +77,7 @@ beforeAll(() => {
       if (key === "GET /api/v1/whoami") return J(fake.whoami.body, fake.whoami.status);
       if (key === "POST /api/v1/agents/dev-loop/start") {
         if (fake.start === "drop") return new Response("{", { status: 202 });
+        if ((fake.start as any).location) return new Response(null, { status: fake.start.status, headers: { location: (fake.start as any).location } });
         return J(fake.start.body, fake.start.status);
       }
       if (key === `GET /api/v1/agents/dev-loop/${WF}`) return J(fake.read.body, fake.read.status);
@@ -219,6 +220,22 @@ describe("mctl-devloop", () => {
     const r = await run("start", "--issue", "mctlhq/mctl-api#42");
     expect(r.code).toBe(3);
     expect(r.out.code).toBe("orchestrator_devloop_repo_not_allowed");
+  });
+
+  test("start: a 403 that is not the orchestrator gate's is principal_refused", async () => {
+    for (const body of [{ code: "permission_denied", error: "admin only" }, { error: "forbidden" }]) {
+      fake.start = { status: 403, body } as any;
+      const r = await run("start", "--issue", "mctlhq/mctl-api#42");
+      expect({ code: r.code, out: r.out.code }).toEqual({ code: 3, out: "principal_refused" });
+    }
+  });
+
+  test("start: a redirect is never followed with the token", async () => {
+    fake.calls = [];
+    fake.start = { status: 307, body: {}, location: "/sink" } as any;
+    const r = await run("start", "--issue", "mctlhq/mctl-api#42");
+    expect({ code: r.code, out: r.out.code }).toEqual({ code: 4, out: "outcome_unknown" });
+    expect(fake.calls.filter((c) => c.path === "/sink").length).toBe(0);
   });
 
   test("start: a lost reply, a 5xx or a reply for another workflow is outcome unknown", async () => {

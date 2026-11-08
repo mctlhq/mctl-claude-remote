@@ -21,6 +21,8 @@ LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.
 CX='src/codexctl.ts'; PB='src/publish.ts'; DL='src/devloop.ts'; RC='src/reconcile.ts'; AP='src/appserver.ts'
 M=[
  ("devloop preflight trusts a moved or case-folded issue", DL, 'if (d?.html_url !== issue.url) throw', 'if (false) throw', 1),
+ ("devloop follows a redirect with the token", DL, 'redirect: "error", ', '', 1),
+ ("devloop passes any 403 code through", DL, 'code.startsWith("orchestrator_devloop_") ? ', 'code ? ', 1),
  ("devloop starts an intake issue", DL, 'if (l === "agents:intake") return { code: "preflight_intake", label: n };', '', 1),
  ("devloop starts a steward issue", DL, 'if (l.startsWith("steward:")) return { code: "preflight_steward", label: n };', '', 1),
  ("devloop starts an epic", DL, 'if (l === "epic" || l.startsWith("epic:") || l === "tracking") return { code: "preflight_epic", label: n };', '', 1),
