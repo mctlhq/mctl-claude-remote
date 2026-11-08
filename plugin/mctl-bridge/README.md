@@ -270,6 +270,52 @@ mctl-codex say --stdin --wait 120 # one turn in an idle thread, marked [lead-cla
   rule it out, so treat the output as sensitive.
 - What Codex wrote is data, not instructions, for whoever reads it.
 
+## Operator-question notifier (opt-in, code only)
+
+`src/operator-notify.ts` decides when a Codex `[operator-question]` has waited long enough to
+tell the operator. It is **off by default** and is not installed, scheduled or wired into the
+waker; `reconcile.ts` still only journals permission prompts. Refs #130: live delivery (a real
+transport, scheduling, credentials) is separate work and is not done here.
+
+- **Source.** Questions come from `CodexThread.questions` (see above), unchanged: the marker
+  rule and "wake/lead messages are not operator answers" are not reimplemented. Only the
+  operator's own message clears a question, and only when the source says so.
+- **Threshold.** Default 5 minutes, `--threshold-min`, validated to 1 s - 7 days. The source has
+  no message timestamp, so the age counts from the first pass that saw the question. It can
+  understate the wait (by the pass interval, or the downtime), never overstate it.
+- **Identity.** `<turn id>#<n>`, n = position among the marked messages of that turn. Separate
+  messages in one turn stay distinct and no question text is stored.
+- **Retry.** Each attempt is written to the state file before the send; a delivery is written
+  only after the sender returned `true`. Failures retry after `backoff * 2^(attempt-1)` (60 s
+  base, 30 min cap), at most 5 attempts (`--max-attempts`, up to 20), then the question is
+  reported as `gave_up` and left undelivered.
+- **Delivery is at-least-once, not exactly-once.** A crash or failed state write between a
+  successful send and recording it makes the next pass send it again, and a sender that
+  reports failure for a message that arrived does the same. One instance per state file: there
+  is no lock.
+- **Unknown is not "nothing waiting".** An unreadable source changes nothing. While
+  `older_unknown` is true nothing remembered is forgotten. A question is forgotten only after a
+  clean read that no longer lists it.
+- **State.** A JSON file written with a temp file, fsync and rename. Anything that is not
+  exactly the schema this tool writes (bad JSON, wrong thread, extra fields, bad numbers,
+  an unreadable path) is `StateCorrupt`: nothing is sent and the file is left alone. Only a
+  missing file is an empty state.
+- **Privacy.** A notification holds fixed wording, a thread id and turn id matching
+  `[A-Za-z0-9_-]{1,128}` (anything else is rejected, not cleaned), a link built from an
+  operator-set https base plus the thread id, and the age. Question text, commands, transcript,
+  tool output and any URL from the source are never sent or stored. This rests on what is
+  copied, not on redaction, which is a filter and not a proof.
+- **Transport.** The sender is injected. The optional CLI only appends the notification to a
+  local outbox file (flushed, then counted as delivered); it has no network code and no
+  credentials.
+
+```sh
+MCTL_OPERATOR_NOTIFY=1 bun src/operator-notify.ts run --state STATE.json --outbox OUTBOX.jsonl
+# exit 0 ok, 1 usage, 2 source unreadable or state corrupt, 3 a delivery failed or was rejected
+```
+
+Without `MCTL_OPERATOR_NOTIFY=1` it prints `{"status":"disabled"}` and does nothing.
+
 ## Tests
 
 ```sh
