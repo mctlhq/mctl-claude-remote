@@ -24,7 +24,7 @@ import fs from "node:fs";
 import { AppClient, ConnectionLost, RpcError, acceptsTurn } from "./appserver.ts";
 import type { Note } from "./appserver.ts";
 import { Reconciler, slotShReader } from "./reconcile.ts";
-import type { Alert } from "./reconcile.ts";
+import type { Alert, AlertOutcome, ResultAlertFn } from "./reconcile.ts";
 import { BRIDGE_PREFIX, CodexThread } from "./codexctl.ts";
 import type { SayResult } from "./codexctl.ts";
 import { Bridge, newId } from "./store.ts";
@@ -386,16 +386,33 @@ async function loop(name: string, everyMs: number, isStopped: () => boolean, bod
  * "maybe sent", and the Reconciler never repeats it.
  */
 export function alertVia(say: (text: string) => Promise<SayResult>): Alert {
+  return sayAlert(say, Reconciler.alertText);
+}
+
+/** The same contract for any alert: render the text, say it once, map the outcome. */
+export function sayAlert<T>(say: (text: string) => Promise<SayResult>, render: (a: T) => string): (a: T) => Promise<{ outcome: AlertOutcome; detail?: string }> {
   return async (a) => {
     let r: SayResult;
     try {
-      r = await say(Reconciler.alertText(a));
+      r = await say(render(a));
     } catch (err) {
       return { outcome: "not_sent", detail: err instanceof Error ? err.message : String(err) };
     }
     if (r.ok) return { outcome: "sent" };
     if (r.code === "outcome_unknown") return { outcome: "unknown", detail: r.detail };
     return { outcome: "not_sent", detail: [r.code, r.detail].filter(Boolean).join(": ") };
+  };
+}
+
+/**
+ * The timer's two alerts, both said into the orchestrator's thread. A finished task is reported
+ * too, so the orchestrator collects the result without a nudge (BLOCKERS B12); `resultAlert` 0
+ * turns that off and leaves results logged only.
+ */
+export function reconcileAlerts(say: (text: string) => Promise<SayResult>, resultAlert: number): { alert: Alert; resultAlert?: ResultAlertFn } {
+  return {
+    alert: alertVia(say),
+    resultAlert: resultAlert > 0 ? sayAlert(say, Reconciler.resultText) : undefined,
   };
 }
 
@@ -453,10 +470,10 @@ export async function main(): Promise<number> {
       rpcTimeoutMs: cfg.rpcTimeoutMs,
       prefix: BRIDGE_PREFIX,
     });
-    const alert = alertVia((text) => codex.say(text));
+    const { alert, resultAlert } = reconcileAlerts((text) => codex.say(text), intEnv("MCTL_BRIDGE_RESULT_ALERT", 1));
     const reconciler = new Reconciler(
       bridge,
-      { slots, waitingEveryMs: intEnv("MCTL_BRIDGE_RECONCILE_WAITING_MS", 300_000), alertAfterMs, alert },
+      { slots, waitingEveryMs: intEnv("MCTL_BRIDGE_RECONCILE_WAITING_MS", 300_000), alertAfterMs, alert, resultAlert },
       slotShReader(slotSh, 20_000),
       log,
     );

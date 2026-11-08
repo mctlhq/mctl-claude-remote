@@ -8,7 +8,7 @@ import path from "node:path";
 import { AppClient } from "../src/appserver.ts";
 import { Bridge, key, newId } from "../src/store.ts";
 import type { Result, SlotConn } from "../src/store.ts";
-import { Waker, alertVia, marker } from "../src/waker.ts";
+import { Waker, alertVia, marker, reconcileAlerts } from "../src/waker.ts";
 import type { WakerConfig } from "../src/waker.ts";
 import { FakeApp } from "./fakeapp.ts";
 import { ValkeyConnectionError } from "../src/valkey.ts";
@@ -455,5 +455,25 @@ describe("alertVia", () => {
     expect(await via(() => { throw new Error("socket down"); })(a)).toEqual({ outcome: "not_sent", detail: "socket down" });
     expect(texts[0]).toContain("slot.sh prompt b");
     expect(texts[0]).toContain("6 min");
+  });
+});
+
+describe("reconcileAlerts", () => {
+  test("a finished task is said into the thread by default, and 0 turns it off (B12)", async () => {
+    const texts: string[] = [];
+    const say = async (t: string) => (texts.push(t), { ok: true } as any);
+    const on = reconcileAlerts(say, 1);
+    expect(on.resultAlert).toBeDefined();
+    expect(await on.resultAlert!({ task_id: "t-1", slot: "b", state: "completed" })).toEqual({ outcome: "sent" });
+    expect(texts).toEqual(["Task t-1 on slot b finished with state completed. " + texts[0].split("completed. ")[1]]);
+    expect(texts[0]).toContain("mctl-bridge status t-1");
+    expect(reconcileAlerts(say, 0).resultAlert).toBeUndefined();
+    expect(reconcileAlerts(say, 0).alert).toBeDefined();
+  });
+  test("a lost result alert is unknown, a refused one is not sent", async () => {
+    const lost = reconcileAlerts(async () => ({ ok: false, code: "outcome_unknown", detail: "x" }) as any, 1);
+    expect((await lost.resultAlert!({ task_id: "t", slot: "a", state: "completed" })).outcome).toBe("unknown");
+    const busy = reconcileAlerts(async () => ({ ok: false, code: "thread_not_idle" }) as any, 1);
+    expect((await busy.resultAlert!({ task_id: "t", slot: "a", state: "completed" })).outcome).toBe("not_sent");
   });
 });
