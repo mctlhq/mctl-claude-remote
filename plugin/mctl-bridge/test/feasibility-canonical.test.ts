@@ -1,0 +1,457 @@
+// MCTL-CJ1 canonical encoding, strict parsing and domain-separated digests (design section 4,
+// docs/dispatch-feasibility-146.md). Pure: only fixture files are read by this harness; the library
+// under test reads nothing. Vectors A and B are design vectors, not a cross-language equivalence claim (G6).
+
+import { describe, expect, test } from "bun:test";
+import fs from "node:fs";
+
+import { CanonicalError, DOMAINS, canonicalize, digest, digestInput, parseStrict } from "../src/feasibility/canonical.ts";
+
+const VECTOR_A_BODY = '{"a":"é\\"\\u0001","b":[2,1],"c":true}';
+const VECTOR_A_SHA = "cf21d3e7ed6c38229e8e4158b19a7c8d0bb0352e7c0a225b3c205ebc35ac3fc9";
+const VECTOR_B_BODY =
+  '{"advisory":{"est_changed_files":2,"est_minutes":20},"allowed_files":["docs/example-146.md"],"attempt_id":"a-00000000-0000-4000-8000-000000000002","authority_ref":{"id":"decision-0001","kind":"operator_decision"},"base":{"base_sha":"0123456789abcdef0123456789abcdef01234567","branch":"main"},"bounds":{"max_changed_files":3,"max_wall_ms":3600000},"dependencies":[],"expected":{"artifact_kind":"handoff_bundle","branch":"docs/example-146","trailer":"Agent: claude"},"expires_at_ms":1790000000000,"fixtures":["fixture:synthetic-a"],"repo":"example-org/example-repo","required_commands":["cmd:git-diff-check"],"schema":"mctl.task-envelope/1","slot":"slot-x","slot_epoch":"7","task_id":"t-00000000-0000-4000-8000-000000000001","worktree_label":"wt-1"}';
+const VECTOR_B_SHA = "43e77d4fafa97cc56fe831d1bdcb145468f821b940bdf1519a074157c9527880";
+
+const SET_FIELDS = new Set(["allowed_files", "required_commands", "fixtures", "mandatory_writes"]);
+const opts = { setFields: SET_FIELDS };
+
+function codeOf(fn: () => unknown): string {
+  try {
+    fn();
+  } catch (e) {
+    expect(e).toBeInstanceOf(CanonicalError);
+    return (e as CanonicalError).code;
+  }
+  return "NO_THROW";
+}
+
+const enc = new TextEncoder();
+
+describe("published vectors", () => {
+  test("vector A: body bytes, 68-byte digest input, sha256", () => {
+    const value = JSON.parse('{"a":"é\\"\\u0001","b":[2,1],"c":true}');
+    const body = canonicalize(value);
+    expect(body).toBe(VECTOR_A_BODY);
+    expect(enc.encode(body).length).toBe(37);
+    expect(digestInput("test-vector", body).length).toBe(68);
+    expect(digest("test-vector", value)).toBe(VECTOR_A_SHA);
+  });
+
+  test("vector B: synthetic envelope body 747 bytes, 780-byte input, sha256", () => {
+    const fixture = JSON.parse(fs.readFileSync(new URL("../../../docs/dispatch-feasibility-fixtures-146.json", import.meta.url), "utf8"));
+    const envelope = fixture.baseline.task_envelope;
+    const body = canonicalize(envelope, opts);
+    expect(body).toBe(VECTOR_B_BODY);
+    expect(enc.encode(body).length).toBe(747);
+    expect(digestInput("task-envelope", body).length).toBe(780);
+    expect(digest("task-envelope", envelope, opts)).toBe(VECTOR_B_SHA);
+    expect(fixture.baseline.task_envelope_digest).toBe(VECTOR_B_SHA);
+  });
+
+  test("vector B also reproduces through the strict raw-text parser", () => {
+    const parsed = parseStrict(VECTOR_B_BODY);
+    expect(digest("task-envelope", parsed, opts)).toBe(VECTOR_B_SHA);
+  });
+});
+
+describe("domain separation", () => {
+  test("domains are the four fixed ASCII strings", () => {
+    expect(DOMAINS).toEqual({
+      "task-envelope": "mctl.feasibility/1/task-envelope",
+      "capability-snapshot": "mctl.feasibility/1/capability-snapshot",
+      report: "mctl.feasibility/1/report",
+      "test-vector": "mctl.feasibility/1/test-vector",
+    });
+  });
+
+  test("same body under different domains gives different digests", () => {
+    const v = { x: 1 };
+    const all = (Object.keys(DOMAINS) as (keyof typeof DOMAINS)[]).map((d) => digest(d, v));
+    expect(new Set(all).size).toBe(4);
+  });
+
+  test("digest input is domain || LF || body", () => {
+    const input = digestInput("report", "{}");
+    expect(new TextDecoder().decode(input)).toBe("mctl.feasibility/1/report\n{}");
+  });
+
+  test("unknown domain is rejected", () => {
+    // @ts-expect-error deliberately outside the closed set
+    expect(codeOf(() => digest("other", {}))).toBe("bad_domain");
+  });
+});
+
+describe("encoding rules", () => {
+  test("object members are in ascending bytewise key order regardless of insertion order", () => {
+    expect(canonicalize({ b: 1, a: 2, c: { z: true, y: false } })).toBe('{"a":2,"b":1,"c":{"y":false,"z":true}}');
+    expect(canonicalize({ c: 1, b: 2, a: 3 })).toBe(canonicalize({ a: 3, b: 2, c: 1 }));
+  });
+
+  test("uppercase keys sort before lowercase (bytewise, not locale)", () => {
+    expect(canonicalize({ b: 1, B: 2, _: 3 })).toBe('{"B":2,"_":3,"b":1}');
+  });
+
+  test("no whitespace; empty containers", () => {
+    expect(canonicalize({ a: [], b: {} })).toBe('{"a":[],"b":{}}');
+  });
+
+  test("string escaping: only quote, backslash and U+0000-U+001F; lowercase hex; U+007F and non-ASCII raw", () => {
+    expect(canonicalize('"\\')).toBe('"\\"\\\\"');
+    expect(canonicalize("\u0000\u001f\n\t\r\b\f")).toBe('"\\u0000\\u001f\\u000a\\u0009\\u000d\\u0008\\u000c"');
+    expect(canonicalize("/")).toBe('"/"');
+    expect(canonicalize("\u007f")).toBe('"\u007f"');
+    expect(canonicalize("é \u{1F600}")).toBe('"é \u{1F600}"');
+    expect(canonicalize("\u001a")).toContain("\\u001a");
+  });
+
+  test("no Unicode normalization", () => {
+    const composed = "é";
+    const decomposed = "é";
+    expect(canonicalize(composed)).not.toBe(canonicalize(decomposed));
+    expect(canonicalize(decomposed)).toBe('"é"');
+  });
+
+  test("astral scalars in valid surrogate pairs are accepted", () => {
+    expect(canonicalize("\u{10FFFF}")).toBe('"\u{10FFFF}"');
+  });
+
+  test("integers: base-10, safe range both ends", () => {
+    expect(canonicalize(0)).toBe("0");
+    expect(canonicalize(-1)).toBe("-1");
+    expect(canonicalize(Number.MAX_SAFE_INTEGER)).toBe("9007199254740991");
+    expect(canonicalize(-Number.MAX_SAFE_INTEGER)).toBe("-9007199254740991");
+  });
+
+  test("booleans", () => {
+    expect(canonicalize([true, false])).toBe("[true,false]");
+  });
+
+  test("ordered arrays keep order and duplicates; no global sort", () => {
+    expect(canonicalize([3, 1, 2, 1])).toBe("[3,1,2,1]");
+    expect(canonicalize({ reasons: ["b:x", "a:y", "b:x"] })).toBe('{"reasons":["b:x","a:y","b:x"]}');
+    expect(canonicalize({ b: [2, 1] })).toBe('{"b":[2,1]}');
+  });
+
+  test("set-valued fields: sorted unique accepted", () => {
+    expect(canonicalize({ allowed_files: ["a", "b", "ba"] }, opts)).toBe('{"allowed_files":["a","b","ba"]}');
+    expect(canonicalize({ allowed_files: [] }, opts)).toBe('{"allowed_files":[]}');
+  });
+
+  test("set-valued fields: unsorted or duplicate input is rejected, never repaired", () => {
+    expect(codeOf(() => canonicalize({ allowed_files: ["b", "a"] }, opts))).toBe("unsorted_set");
+    expect(codeOf(() => canonicalize({ fixtures: ["a", "a"] }, opts))).toBe("unsorted_set");
+  });
+
+  test("set ordering is UTF-8 byte order, not UTF-16 code-unit order", () => {
+    // U+FF5E (BMP, UTF-16 0xFF5E) < U+10000 (astral, UTF-16 0xD800..) in code units is false the other way:
+    // in UTF-16 the astral sorts first (0xD800 < 0xFF5E); in UTF-8 U+FF5E (ef bd 9e) < U+10000 (f0 90 80 80).
+    const bmp = "～";
+    const astral = "\u{10000}";
+    expect(canonicalize({ fixtures: [bmp, astral] }, opts)).toBe(`{"fixtures":["${bmp}","${astral}"]}`);
+    expect(codeOf(() => canonicalize({ fixtures: [astral, bmp] }, opts))).toBe("unsorted_set");
+  });
+
+  test("set rule applies at any depth; non-set fields stay ordered arrays; a set field must be an array", () => {
+    expect(codeOf(() => canonicalize({ facts: { value: { mandatory_writes: ["z", "a"] } } }, opts))).toBe("unsorted_set");
+    expect(canonicalize({ other: ["z", "a"] }, opts)).toBe('{"other":["z","a"]}');
+    expect(codeOf(() => canonicalize({ mandatory_writes: { value: 1 } }, opts))).toBe("wrong_type");
+    expect(codeOf(() => canonicalize({ mandatory_writes: "a" }, opts))).toBe("wrong_type");
+  });
+
+  test("a set field holding non-strings is rejected", () => {
+    expect(codeOf(() => canonicalize({ fixtures: [1, 2] }, opts))).toBe("wrong_type");
+  });
+
+  test("self-field exclusion: digest ignores the named member, and omission is explicit", () => {
+    const base = { a: 1, verdict: "feasible" };
+    const withDigest = { ...base, report_digest: "x" };
+    expect(canonicalize(withDigest, { exclude: ["report_digest"] })).toBe(canonicalize(base));
+    expect(digest("report", withDigest, { exclude: ["report_digest"] })).toBe(digest("report", base));
+    expect(digest("report", withDigest)).not.toBe(digest("report", base));
+    // other members still count
+    expect(digest("report", { ...withDigest, verdict: "busy" }, { exclude: ["report_digest"] })).not.toBe(digest("report", base));
+  });
+
+  test("exclusion applies at the top level only", () => {
+    expect(canonicalize({ nested: { report_digest: 1 } }, { exclude: ["report_digest"] })).toBe('{"nested":{"report_digest":1}}');
+  });
+});
+
+describe("canonicalize rejection corpus (typed values)", () => {
+  const cases: [string, unknown, string][] = [
+    ["null", null, "null_value"],
+    ["null member", { a: null }, "null_value"],
+    ["undefined", undefined, "wrong_type"],
+    ["undefined member", { a: undefined }, "wrong_type"],
+    ["float", 1.5, "forbidden_number"],
+    ["NaN", Number.NaN, "forbidden_number"],
+    ["Infinity", Number.POSITIVE_INFINITY, "forbidden_number"],
+    ["negative zero", -0, "forbidden_number"],
+    ["unsafe integer", 2 ** 53, "unsafe_integer"],
+    ["unsafe negative", -(2 ** 53), "unsafe_integer"],
+    ["bigint", 1n, "wrong_type"],
+    ["function", () => 1, "wrong_type"],
+    ["symbol", Symbol("x"), "wrong_type"],
+    ["Date", new Date(0), "wrong_type"],
+    ["Map", new Map(), "wrong_type"],
+    ["lone high surrogate", "\ud800", "bad_scalar"],
+    ["lone low surrogate", "a\udc00b", "bad_scalar"],
+    ["reversed surrogates", "\udc00\ud800", "bad_scalar"],
+    ["lone surrogate in key", { "\ud800": 1 }, "bad_key"],
+    ["non-ASCII key", { é: 1 }, "bad_key"],
+    ["sparse array", [1, , 3], "wrong_type"], // eslint-disable-line no-sparse-arrays
+  ];
+  for (const [name, value, code] of cases) {
+    test(`rejects ${name}`, () => {
+      expect(codeOf(() => canonicalize(value))).toBe(code);
+    });
+  }
+
+  test("rejects symbol keys, accessor properties and class instances", () => {
+    expect(codeOf(() => canonicalize({ [Symbol("k")]: 1 }))).toBe("wrong_type");
+    const acc = {};
+    Object.defineProperty(acc, "a", { get: () => 1, enumerable: true });
+    expect(codeOf(() => canonicalize(acc))).toBe("wrong_type");
+    class C { a = 1; }
+    expect(codeOf(() => canonicalize(new C()))).toBe("wrong_type");
+  });
+
+  test("rejects cycles and excessive depth without overflowing the stack", () => {
+    const cyc: Record<string, unknown> = {};
+    cyc.a = cyc;
+    expect(codeOf(() => canonicalize(cyc))).toBe("too_deep");
+    let deep: unknown = 1;
+    for (let i = 0; i < 200; i++) deep = [deep];
+    expect(codeOf(() => canonicalize(deep))).toBe("too_deep");
+  });
+
+  test("a null-prototype object is accepted like a plain one", () => {
+    const o = Object.create(null) as Record<string, unknown>;
+    o.a = 1;
+    expect(canonicalize(o)).toBe('{"a":1}');
+  });
+
+  test("__proto__ is an ordinary key when present as an own property", () => {
+    const o = JSON.parse('{"__proto__":1,"a":2}');
+    expect(canonicalize(o)).toBe('{"__proto__":1,"a":2}');
+  });
+});
+
+describe("error privacy", () => {
+  const SECRET = "SECRET-VALUE-/Users/someone/token=abc";
+  test("errors never contain the offending value or arbitrary keys", () => {
+    const attempts: (() => unknown)[] = [
+      () => canonicalize({ [`k-${SECRET}`]: null }),
+      () => canonicalize({ fixtures: [SECRET, "A"] }, opts),
+      () => canonicalize({ a: SECRET + "\ud800" }),
+      () => canonicalize({ [SECRET]: 1.5 }),
+      () => parseStrict(`{"${SECRET}":1,"${SECRET}":2}`),
+      () => parseStrict(`{"a":"${SECRET}" 1.5}`),
+    ];
+    for (const fn of attempts) {
+      let message = "";
+      let json = "";
+      try {
+        fn();
+      } catch (e) {
+        expect(e).toBeInstanceOf(CanonicalError);
+        const err = e as CanonicalError;
+        // Only the fields this library defines; the runtime adds its own source-location properties.
+        message = `${err.name}: ${err.message}`;
+        json = JSON.stringify({ name: err.name, message: err.message, code: err.code });
+        expect(String(err.stack).split("\n")[0]).not.toContain("SECRET");
+      }
+      expect(message).not.toBe("");
+      for (const leak of ["SECRET", "/Users/", "token=", "abc"]) {
+        expect(message).not.toContain(leak);
+        expect(json).not.toContain(leak);
+      }
+    }
+  });
+
+  test("error carries a closed code only", () => {
+    try {
+      canonicalize(1.5);
+    } catch (e) {
+      expect((e as CanonicalError).code).toBe("forbidden_number");
+      expect((e as Error).message).toBe("forbidden_number");
+    }
+  });
+});
+
+describe("parseStrict: raw JSON text", () => {
+  test("parses the closed subset", () => {
+    expect(parseStrict(' { "a" : [ 1 , -2 , true , false , "x" ] , "b" : { } } \n')).toEqual({ a: [1, -2, true, false, "x"], b: {} });
+  });
+
+  test("parses \\u escapes including a valid surrogate pair", () => {
+    expect(parseStrict('"\\u00e9\\ud83d\\ude00\\n\\/"')).toBe("é\u{1F600}\n/");
+  });
+
+  test("__proto__ member becomes an own data property, not a prototype", () => {
+    const v = parseStrict('{"__proto__":{"polluted":true}}') as Record<string, unknown>;
+    expect(Object.getPrototypeOf(v)).toBe(Object.prototype);
+    expect(Object.keys(v)).toEqual(["__proto__"]);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
+  test("duplicate keys are rejected before JSON.parse would silently keep the last", () => {
+    expect(JSON.parse('{"a":1,"a":2}')).toEqual({ a: 2 }); // the loss being guarded against
+    expect(codeOf(() => parseStrict('{"a":1,"a":2}'))).toBe("duplicate_key");
+  });
+
+  test("duplicate keys are detected after escape decoding", () => {
+    expect(codeOf(() => parseStrict('{"a":1,"\\u0061":2}'))).toBe("duplicate_key");
+  });
+
+  test("duplicate keys are detected in nested objects and arrays of objects", () => {
+    expect(codeOf(() => parseStrict('{"x":{"k":1,"k":1}}'))).toBe("duplicate_key");
+    expect(codeOf(() => parseStrict('[{"k":1},{"k":1,"k":2}]'))).toBe("duplicate_key");
+  });
+
+  test("the same key in sibling objects is fine", () => {
+    expect(parseStrict('[{"k":1},{"k":2}]')).toEqual([{ k: 1 }, { k: 2 }]);
+  });
+
+  const forbiddenNumbers: [string, string][] = [
+    ["decimal fraction", "1.0"],
+    ["fraction", "0.5"],
+    ["exponent", "1e3"],
+    ["exponent upper", "1E3"],
+    ["exponent signed", "1e+3"],
+    ["negative exponent", "1e-3"],
+    ["fraction with exponent", "1.5e2"],
+    ["negative zero", "-0"],
+    ["negative zero fraction", "-0.0"],
+    ["leading zero", "01"],
+    ["leading zeros", "007"],
+    ["negative leading zero", "-01"],
+    ["plus sign", "+1"],
+    ["leading dot", ".5"],
+    ["trailing dot", "1."],
+    ["NaN", "NaN"],
+    ["Infinity", "Infinity"],
+    ["negative Infinity", "-Infinity"],
+    ["hex", "0x10"],
+  ];
+  for (const [name, tok] of forbiddenNumbers) {
+    test(`rejects ${name} lexical form (${tok})`, () => {
+      expect(codeOf(() => parseStrict(tok))).toBe("forbidden_number");
+      expect(codeOf(() => parseStrict(`{"a":[${tok}]}`))).toBe("forbidden_number");
+    });
+  }
+
+  test("1.0 would be silently collapsed by JSON.parse; the strict parser refuses it", () => {
+    expect(JSON.parse("1.0")).toBe(1);
+    expect(JSON.parse("1e3")).toBe(1000);
+    expect(JSON.parse("-0")).toBe(-0);
+  });
+
+  test("unsafe integers are rejected by lexical magnitude, before precision loss", () => {
+    expect(parseStrict("9007199254740991")).toBe(9007199254740991);
+    expect(parseStrict("-9007199254740991")).toBe(-9007199254740991);
+    expect(codeOf(() => parseStrict("9007199254740992"))).toBe("unsafe_integer");
+    expect(codeOf(() => parseStrict("9007199254740993"))).toBe("unsafe_integer");
+    expect(codeOf(() => parseStrict("-9007199254740992"))).toBe("unsafe_integer");
+    expect(codeOf(() => parseStrict("123456789012345678901234567890"))).toBe("unsafe_integer");
+  });
+
+  test("null is rejected", () => {
+    expect(codeOf(() => parseStrict("null"))).toBe("null_value");
+    expect(codeOf(() => parseStrict('{"a":null}'))).toBe("null_value");
+  });
+
+  test("lone surrogates are rejected, escaped or raw", () => {
+    expect(codeOf(() => parseStrict('"\\ud800"'))).toBe("bad_scalar");
+    expect(codeOf(() => parseStrict('"\\udc00"'))).toBe("bad_scalar");
+    expect(codeOf(() => parseStrict('"\\ud800\\u0041"'))).toBe("bad_scalar");
+    expect(codeOf(() => parseStrict('"\\ud800x"'))).toBe("bad_scalar");
+    expect(codeOf(() => parseStrict('"\ud800"'))).toBe("bad_scalar");
+    expect(codeOf(() => parseStrict('{"\\ud800":1}'))).toBe("bad_scalar");
+  });
+
+  const malformed: [string, string][] = [
+    ["empty", ""],
+    ["whitespace only", "  "],
+    ["trailing garbage", "1 2"],
+    ["trailing comma object", '{"a":1,}'],
+    ["trailing comma array", "[1,]"],
+    ["missing colon", '{"a" 1}'],
+    ["unquoted key", "{a:1}"],
+    ["single quotes", "{'a':1}"],
+    ["unterminated string", '"abc'],
+    ["unterminated object", '{"a":1'],
+    ["unterminated array", "[1"],
+    ["raw control char in string", '"a\u0001b"'],
+    ["raw newline in string", '"a\nb"'],
+    ["bad escape", '"\\x41"'],
+    ["short unicode escape", '"\\u00"'],
+    ["non-hex unicode escape", '"\\u00zz"'],
+    ["comment", "/* c */ 1"],
+    ["BOM", "﻿1"],
+    ["bare word", "tru"],
+    ["non-string key", "{1:2}"],
+    ["NUL byte", "\u0000"],
+  ];
+  for (const [name, text] of malformed) {
+    test(`rejects malformed text: ${name}`, () => {
+      expect(codeOf(() => parseStrict(text))).toBe("bad_json");
+    });
+  }
+
+  test("depth limit is enforced without stack overflow", () => {
+    expect(codeOf(() => parseStrict("[".repeat(10000) + "]".repeat(10000)))).toBe("too_deep");
+  });
+
+  test("non-string input is rejected", () => {
+    // @ts-expect-error
+    expect(codeOf(() => parseStrict(5))).toBe("wrong_type");
+  });
+
+  test("parse then canonicalize round-trips whitespace and key order differences to the same bytes", () => {
+    const a = canonicalize(parseStrict('{ "b" : [2,1],\n "a" : "x" }'));
+    const b = canonicalize(parseStrict('{"a":"x","b":[2,1]}'));
+    expect(a).toBe(b);
+    expect(a).toBe('{"a":"x","b":[2,1]}');
+  });
+});
+
+describe("determinism and immutability", () => {
+  const envelope = () => ({
+    z: [3, 1, 2],
+    a: { y: "é", x: true },
+    allowed_files: ["a", "b"],
+  });
+
+  test("identical bytes across repeated runs and permuted insertion order", () => {
+    const one = canonicalize(envelope(), opts);
+    const two = canonicalize(envelope(), opts);
+    const permuted = canonicalize({ allowed_files: ["a", "b"], a: { x: true, y: "é" }, z: [3, 1, 2] }, opts);
+    expect(two).toBe(one);
+    expect(permuted).toBe(one);
+    expect(digest("report", envelope(), opts)).toBe(digest("report", { allowed_files: ["a", "b"], a: { x: true, y: "é" }, z: [3, 1, 2] }, opts));
+  });
+
+  test("does not mutate its input and accepts deeply frozen input", () => {
+    const v = envelope();
+    const before = JSON.stringify(v);
+    const deepFreeze = (o: unknown): void => {
+      if (o && typeof o === "object") {
+        Object.freeze(o);
+        for (const k of Object.keys(o)) deepFreeze((o as Record<string, unknown>)[k]);
+      }
+    };
+    deepFreeze(v);
+    const out = canonicalize(v, opts);
+    expect(JSON.stringify(v)).toBe(before);
+    expect(out).toBe(canonicalize(envelope(), opts));
+    // digest hashing the input object before/after
+    expect(digest("report", v, opts)).toBe(digest("report", envelope(), opts));
+    expect(JSON.stringify(v)).toBe(before);
+  });
+
+  test("digest is lowercase hex sha256", () => {
+    expect(digest("test-vector", { a: 1 })).toMatch(/^[0-9a-f]{64}$/);
+  });
+});
