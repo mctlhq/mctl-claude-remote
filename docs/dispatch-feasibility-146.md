@@ -1,6 +1,8 @@
 # Dispatch feasibility report: design (B1), refs #146
 
-Status: **design only**. Nothing in this document is implemented, measured or probed. It adds no
+Status: **design only**. The evaluator, the consumption function, schema validation and every contract
+in this document are **not implemented**; the only merged code is the canonical encoder/strict parser/digest
+(`canonical.ts`, #169, see the legend). Nothing here is measured or probed. This document adds no
 runtime code, no dispatch/reservation/launch/ack change, and no enforcement. The companion file
 [dispatch-feasibility-fixtures-146.json](dispatch-feasibility-fixtures-146.json) holds *illustrative
 design expectations*; they are not executable feature tests and not evidence of readiness.
@@ -227,8 +229,9 @@ authority: if `mandatory_writes` (known) contains a path not matched by `allowed
 fails with `mandatory_write_outside_allowed` (unauthorized); `allowed_files` is not extended to cover it.
 
 **Evidence states under an invalid binding.** Each snapshot-derived check (the eleven in the fixtures'
-`snapshot_derived_checks`; **[PENDING A3/A4]** that list grows to twelve or thirteen if `contract.artifact`
-and/or `authority.reference` become evidence-derived, see 13.8) takes one of two non-pass states when the snapshot cannot be used, with distinct
+`snapshot_derived_checks`; **[PENDING A3/A4]** that list grows to twelve (A3 alone or A4 alone) or thirteen
+(both) if `contract.artifact` and/or `authority.reference` become evidence-derived; the exact lists are in
+13.8) takes one of two non-pass states when the snapshot cannot be used, with distinct
 codes: `unknown` + `evidence_not_evaluable` when the snapshot is untrusted or is not about this task
 (schema invalid, provenance unverified, other slot, other epoch); `stale` + `evidence_stale` when it is
 well-formed, verified and for the same slot/epoch but outside its freshness window. Not-evaluable wins
@@ -271,6 +274,11 @@ Binding validation is an evaluation **gate**, not a seventh verdict.
       `binding.*` entry is class `binding`;
    2. **check order**: the index in the fixed section 5 list (`check_order` in the fixtures);
    3. **code**: ascending bytewise UTF-8 of the reason code.
+   **[PENDING A3]** per-reason class for `ownership.files` only: the class rule above is stated per check
+   status. Under the A3 proposal (13.4) `ownership.files` can be `fail` while one of its reasons reports
+   unavailable evidence; there each reason carries its own class (known-failure codes `blocked_dependency`,
+   `*_unknown` codes `uncertain`) although the check status is `fail`. The alternative that keeps the rule
+   strictly per check status is in 13.4. No other check is affected.
    There is no other sort and no deduplication: the key is a total order on distinct (check, code) pairs, and
    each pair appears at most once. The order is *not* ascending by the whole string, so a `busy` verdict
    still lists `slot.idle:slot_busy` before `identity.os:identity_os_unknown`; the verdict is the highest
@@ -447,8 +455,8 @@ six verdicts and their precedence are unchanged; no seventh verdict is introduce
 
 | ID | Subject | Section | Alternative in one line |
 |---|---|---|---|
-| A1 | Path/scope grammar and matching | 13.1 | exact/directory-only without `/**`, or `unknown` for unsupported patterns |
-| A2 | Closed fact value schemas | 13.2 | defer shapes: only envelope statuses plus opaque digests |
+| A1 | Path/scope grammar and matching | 13.1 | exact/directory-only without `/**`, or `unknown` for unsupported patterns (alt-1 keeps the 13.1 intersection table without the alias; alt-2 defines no intersection beyond exact/exact) |
+| A2 | Closed fact value schemas and key presence | 13.2 | defer shapes: only envelope statuses plus opaque digests (key-presence rule not adopted) |
 | OS | Object-set ordering/uniqueness | 13.3 | defer; ordered arrays plus explicit uniqueness check |
 | A3 | Artifact contract and worktree evidence | 13.4 | leave capability `unknown` until a provider exists |
 | A4 | Authority decision evidence | 13.5 | `none` stays `unknown` until an applicability policy is approved |
@@ -459,21 +467,57 @@ six verdicts and their precedence are unchanged; no seventh verdict is introduce
 
 Applies to `allowed_files`, `path_policy.forbidden`, and `mandatory_writes`.
 
-- **Grammar.** A pattern is exactly one of: an *exact path* (repo-relative, no trailing `/`); a *directory
-  prefix* ending in `/`; or the terminal alias `dir/**` (identical in meaning to `dir/`, only as the final
-  segment). Segments are separated by `/`, are non-empty, are not `.` or `..`, contain no `\`, no `*`, `?`,
-  `[`, `{`, no NUL/control characters, and the whole pattern does not start with `/` or a drive prefix.
-  `mandatory_writes` entries and the paths being tested are exact paths only.
+- **Grammar, in this order.** (1) *Alias step:* if the final segment of the pattern is exactly `**`
+  (pattern ends in `/**` and has at least one segment before it), remove that `/**` and treat the rest as a
+  directory prefix `d/`. This happens **before** step 2, so the `*` ban below never sees the alias. Any other
+  `*` (including `**` not final, `***`, a bare `**`) is left in place for step 2 to reject. (2) *Segment
+  grammar:* what remains is exactly one of an *exact path* (repo-relative, no trailing `/`) or a *directory
+  prefix* ending in `/`. Segments are separated by `/`, are non-empty, are not `.` or `..`, contain no `\`, no
+  `*`, `?`, `[`, `{`, no NUL/control characters, and the whole pattern does not start with `/` or a drive
+  prefix. `mandatory_writes` entries and the paths being tested are exact paths only.
+- **Normal form.** After the alias step every pattern is a pair (kind, segs): kind is `exact` or `dir`, segs is
+  the non-empty list of its segments (`a/b/` and `a/b/**` are both (`dir`, [a, b]); `a/b` is (`exact`,
+  [a, b])). Everything below works on this pair only.
 - **Rejection.** Anything else (absolute path, traversal, dot or empty segment, backslash, any other glob) is an
   **input error** (13.6), never a permission result. Invalid grammar is not `fail` and not `pass`.
-- **Membership.** An exact path matches itself. A directory prefix `d/` matches a path whose leading segments
-  equal `d`'s segments (segment boundary: `docs/` does not match `docs-x/a`). Matching is bytewise on UTF-8
-  with no normalization or case folding.
-- **Scope intersection** (used by `authority.paths`, `ownership.files`): two patterns intersect iff one's
-  segment sequence is a prefix of the other's (exact path counts as a leaf). Symmetric. A forbidden pattern
-  that is a descendant of an allowed directory (`allowed: docs/`, `forbidden: docs/secret/`) **blocks**: the
-  scope is not usable as a whole, so `authority.paths` fails `path_forbidden`. (Not narrowing: B1 never
-  computes a reduced allowlist.)
+- **Membership.** An exact path matches only itself. A directory prefix `d/` matches a path whose segments
+  have `d`'s segments as a **proper** prefix (the path has at least one more segment). So `a/` matches `a/b`
+  but **not** the exact path `a`, and `a/` does not match `ab/x` (segment boundary: `docs/` does not match
+  `docs-x/a`). Matching is bytewise on UTF-8 with no normalization or case folding.
+- **Scope intersection** (used by `authority.paths`, `ownership.files`). Two patterns intersect iff some path
+  is a member of both. In normal form, for P = (kP, sP) and Q = (kQ, sQ), with "proper prefix" meaning
+  strictly shorter and equal on the leading segments:
+
+  | P kind | Q kind | P and Q intersect iff |
+  |---|---|---|
+  | exact | exact | sP equals sQ |
+  | exact | dir | sQ is a **proper** prefix of sP (the exact path lies inside the directory) |
+  | dir | exact | sP is a **proper** prefix of sQ (mirror of the row above) |
+  | dir | dir | sP is a prefix of sQ **or** sQ is a prefix of sP (equal counts) |
+
+  The relation is symmetric by construction: swapping P and Q swaps the two mixed rows and leaves the others
+  unchanged, so a result never depends on argument order. An exact path is a **leaf**, never a prefix of
+  anything: exact `a` does not intersect exact `a/b`, and exact `a` and directory `a/` are **disjoint**
+  (equal segments, but `a/` contains only paths below `a`, not `a` itself). A generic "one segment sequence is
+  a prefix of the other" reading is **not** the rule and must not override the leaf semantics above.
+  Examples (each also checked in reverse order, same result; see fixtures `proposals.a1_path_grammar.intersection`):
+
+  | P | Q | intersect | why |
+  |---|---|---|---|
+  | exact `a/b` | exact `a/b` | yes | equal exact paths |
+  | exact `a/b` | exact `a/c` | no | different leaves |
+  | exact `a` | exact `a/b` | no | `a` is a leaf, not a prefix of `a/b` |
+  | exact `a` | dir `a/` | no | equal segments: `a/` excludes `a` itself |
+  | exact `a/b` | dir `a/` | yes | `a/b` is a member of `a/` |
+  | dir `a/` | dir `a/` (or `a/**`) | yes | equal directories |
+  | dir `a/` | dir `a/b/` | yes | ancestor contains descendant |
+  | dir `a/` | dir `ab/` | no | segment boundary |
+  | exact `ab` | dir `a/` | no | segment boundary |
+
+  `authority.paths` fails `path_forbidden` iff some `allowed_files` pattern intersects some
+  `path_policy.forbidden` pattern; the committed example (`allowed: docs/`, `forbidden: docs/secret/`) is the
+  dir/dir row. The scope is then not usable as a whole. (Not narrowing: B1 never computes a reduced
+  allowlist.)
 - **Non-goal.** No emulation of Claude Code's proprietary command matcher; this grammar covers repo paths only.
 - **Alternative A1-alt-1 (narrower):** drop `dir/**`; only exact paths and `dir/` prefixes (mirrors the
   publisher's `allowed()`, `publish.ts:281`). Tradeoff: fewer spellings, no alias ambiguity, but task authors
@@ -486,8 +530,19 @@ Applies to `allowed_files`, `path_policy.forbidden`, and `mandatory_writes`.
 
 Each `facts.<id>` is exactly `{status, observed_ms}` plus `value` **only when `status` is `known`**. For
 `unknown`/`absent`, `value` must be missing (present value is an input error). `observed_ms` is a required
-integer in `[0, 2^53-1]`. `facts` has exactly the keys below (A3/A4 add two); unknown or missing fact ids are
-input errors. Value objects are closed (exact keys, no extras):
+integer in `[0, 2^53-1]`. `facts` has exactly the keys below (A3/A4 add two).
+
+**Missing key versus unknown status (three distinct situations, never conflated):**
+
+1. **Fact KEY missing from `facts`** (or an unknown fact key present): the snapshot is malformed, an input
+   error under A5 (`missing_key` / `unknown_key`, path `facts.<id>`). No report exists. The evaluator does not
+   normalize an omitted fact into `unknown`, and never invents a timestamp, digest or value for it.
+2. **Key present with `status` `unknown` or `absent` and no `value`:** well-formed *evidence-unavailable*
+   data. The dependent checks are `unknown` with their existing unavailable-evidence codes (A3/A4/section 5).
+3. **Key present, `status` `known`, but a required command/dependency/fixture ENTRY missing inside the value**
+   (13.2 "Missing semantics" below): the check is `unknown`, not an input error.
+
+Value objects are closed (exact keys, no extras):
 
 | Fact | `value` (exact) | Constraints |
 |---|---|---|
@@ -504,8 +559,15 @@ input errors. Value objects are closed (exact keys, no extras):
 | `limits` | `{max_changed_files, max_wall_ms}` | integers `>= 0` |
 | `path_policy` | `{forbidden: [string]}` | A1 patterns; string **set** |
 | `mandatory_writes` | `{paths: [string]}` | A1 exact paths; string **set** |
+| `artifact_contract` (A3, 13.4) | `{artifact_kind, trailer}` | `artifact_kind` string in the closed enum `handoff_bundle`; `trailer` string of 1-128 printable ASCII characters (U+0020..U+007E) |
+| `authority_decision` (A4, 13.5) | `{kind, id, decision}` | `kind` string in `none`\|`operator_decision`; `id` string `[a-z0-9:._-]{1,64}`, and `id` is the literal `none` when `kind` is `none`; `decision` string in `allowed`\|`denied`\|`not_required` |
 
-Missing semantics: a required command with **no** entry in `command_decisions`, a declared dependency with no
+The envelope's `expected.artifact_kind` uses the same enum and `expected.trailer` the same character rule;
+`authority_ref.kind` / `authority_ref.id` use the same `kind` enum and `id` pattern (`kind` `none` requires
+`id` `none`). `expected.branch` is syntax-checked only (13.4). All of these constraints are PROPOSED with A2/A3/A4;
+a violation is an input error (A5, `bad_value`/`bad_pattern`), never a check result.
+
+Missing semantics (situation 3 above, inside a **known** fact only): a required command with **no** entry in `command_decisions`, a declared dependency with no
 `dependencies` entry, or a required fixture with no `fixtures` entry is `unknown` (never an implicit pass,
 never implicit denial), with codes `command_decision_unknown` (existing), `dependency_unknown` and
 `fixture_unknown` (both PROPOSED here). An entry whose id is not required by the envelope is ignored for verdicts but still
@@ -514,7 +576,10 @@ schema-checked. These are claims injected for tests; the schemas give them shape
 - **Alternative A2-alt (narrower/deferred):** define no per-fact value schema yet. Facts carry only
   `{status, observed_ms}` plus an opaque `value_digest`; checks beyond `unknown` cannot be computed, so every
   fact-dependent check is `unknown` until value shapes are approved. Tradeoff: nothing wrongly shaped is
-  frozen, but the evaluator can never return anything but `uncertain` (or binding-driven results).
+  frozen, but the evaluator can never return anything but `uncertain` (or binding-driven results). A2-alt is
+  a different, deferred policy: it does not adopt the key-presence rule above (whether an omitted fact key is
+  an input error or something else is **not** decided by it), and nothing here normalizes omitted facts into
+  invented timestamps or digests. It is not approved either.
 
 ### 13.3 Object-set ordering and uniqueness (PROPOSED, tied to A2)
 
@@ -523,34 +588,81 @@ schema-checked. These are claims injected for tests; the schemas give them shape
   strictly ascending and unique by UTF-8 identity key: `command_decisions.entries` by `command`;
   `dependencies.entries` and `fixtures.entries` by `id`. Two members with the same identity are rejected even
   when their other fields differ (`duplicate_identity`); an out-of-order list is `unsorted_set`. Order is
-  bytewise UTF-8 (so `cmd:Z` < `cmd:a`, and a shorter prefix sorts first).
+  bytewise UTF-8 over identifiers that already satisfy their 13.2 grammar: `cmd:a` < `cmd:z`, and a shorter
+  prefix sorts first (`cmd:a` < `cmd:a-b`). The command grammar stays lowercase (`cmd:[a-z0-9._-]{1,64}`), so
+  uppercase is never an ordering example: `cmd:Z` is a **grammar** error (`bad_pattern`), not a valid member
+  that merely sorts early. Ordering and grammar are separate failures with separate fixtures.
 - It is path- and schema-specific, never global property-name matching. Ordinary ordered arrays stay ordered;
   `TaskEnvelope.dependencies` (array of `{id,kind,step}`) **stays an ordered array**: its reclassification as
   an object-set would be a separate proposal and is not made here.
 - *Implementation fact:* `canonical.ts`'s `setFields` (key-name, string-set) does **not** implement this.
   Implementing it needs a separate, approved change.
 - **Alternative OS-alt (defer):** no object-set schema. Entry arrays stay ordered arrays; evaluator-side
-  explicit uniqueness validation rejects duplicate ids but accepts any order. Tradeoff: permuting the same
-  entries produces a different capability digest and revision-compat semantics (same facts, different bytes), so
-  producers must emit a stable order by convention, and digest equality no longer implies set equality.
+  explicit uniqueness validation rejects duplicate ids but accepts any order. Tradeoff: two producers can
+  emit the same abstract entry set in different orders, giving different bytes and therefore different
+  capability digests (equal abstract sets, unequal digests), so producers must emit a stable order by
+  convention. Scope: this affects **object-entry** arrays only. `unsorted_set` stays valid for **string** sets
+  (`attempts_seen.ids`, `path_policy.forbidden`, `mandatory_writes.paths`, envelope string sets) under OS-alt
+  too; only the object-entry (`command`/`id` keyed) ordering check, and its `unsorted_set` use, disappears.
 
 ### 13.4 A3 artifact contract and worktree evidence (PROPOSED)
 
 The committed design already forbids treating the envelope's `expected.trailer` as a verified pass. A3 adds:
 
-- **Fact `artifact_contract`:** `value` = `{artifact_kind, trailer}`; `artifact_kind` in the closed enum
-  `handoff_bundle`; `trailer` a printable-ASCII string of 1–128 characters. It attests what the artifact
+- **Fact `artifact_contract`:** `value` = `{artifact_kind, trailer}`; exact value types and constraints are in
+  the 13.2 table (`artifact_kind` in the closed enum `handoff_bundle`; `trailer` printable ASCII U+0020..U+007E,
+  1-128 characters). It attests what the artifact
   pipeline supports, compared by exact string equality with the envelope's `expected.artifact_kind` and
   `expected.trailer`. `expected.branch` is **syntax-checked only** (`[A-Za-z0-9._/-]{1,128}`, no `..`, no
   leading or trailing `/`) and is never compared with evidence.
-- **Check `contract.artifact`:** fact missing/`unknown`/`absent` -> `unknown` `artifact_evidence_unknown`;
-  known and equal -> `pass`; known and contradicting -> `fail` `artifact_contract_mismatch`, class
-  `blocked_dependency` (an existing class; no unauthorized path).
-- **Worktree.** `worktree.clean == false` makes `ownership.files` `fail` with code `worktree_dirty` (class
-  `blocked_dependency`); `ownership.conflict == true` makes it `fail` `ownership_conflict`; both together list
-  both codes (ascending). `worktree` `unknown`/`absent` -> required `ownership.files` is `unknown`
-  (`worktree_unknown`) unless a known conflict already makes it `fail`. A dirty tree and another owner's
-  conflict are distinct reasons.
+- **Check `contract.artifact`:** fact key present with status `unknown`/`absent` (no value) -> `unknown`
+  `artifact_evidence_unknown`; known and equal -> `pass`; known and contradicting -> `fail`
+  `artifact_contract_mismatch`, class `blocked_dependency` (an existing class; no unauthorized path). A fact
+  **key missing** from `facts` is not a check outcome: it is a snapshot input error (A2/A5, 13.2 situation 1).
+- **New PROPOSED reason codes (A3):** `artifact_evidence_unknown`, `artifact_contract_mismatch`,
+  `worktree_dirty`, `worktree_unknown`, `ownership_unknown`.
+- **`ownership.files` from two facts (`ownership` and `worktree`), fully specified.** Per fact, evidence is
+  *known failure* (`worktree.clean == false`; `ownership.conflict == true`), *known ok*
+  (`clean == true`; `conflict == false`) or *unavailable* (status `unknown` or `absent`; both map to the same
+  `*_unknown` code and neither is a pass). Key-missing is an input error, not unavailable (13.2).
+  - any known failure -> check status `fail`, class `blocked_dependency` (the check status is fixed to `fail`
+    whatever the other fact says);
+  - else any unavailable -> check status `unknown`;
+  - else (both known ok) -> `pass`.
+  - Reason codes: `worktree_dirty`, `ownership_conflict` (known failures); `worktree_unknown`,
+    `ownership_unknown` (unavailable). Every applicable code is retained, in the check's `reason_codes`
+    ascending bytewise; a known failure never hides unavailable evidence, and unavailable evidence never
+    softens a known failure. A dirty tree and another owner's conflict are distinct reasons.
+  - **Per-reason class (PROPOSED, resolves the check-level rule).** The committed rule (section 6 item 4)
+    classes a reason by its check's status, which would label an unavailable-evidence reason of a `fail` check
+    as `blocked_dependency`. Proposed instead: for `ownership.files` each reason carries its own class:
+    `worktree_dirty`/`ownership_conflict` -> `blocked_dependency`; `worktree_unknown`/`ownership_unknown` ->
+    `uncertain`, **even though the check status is `fail`**. The `reasons[]` sort key is unchanged (class
+    rank, check order, code), so the known failure precedes the unavailable one. The verdict is still the
+    highest class (`blocked_dependency`), and the unavailable reason is retained in `reasons[]`. The
+    verdict-class rule "uncertain if a required check is `unknown`/`absent`/`stale`" is untouched (a `fail`
+    check does not trigger it; the `uncertain` class affects only the order of its reason).
+  - Illustrative cases (not implemented; fixtures `proposals.a3_artifact_and_worktree`):
+
+    | worktree | ownership | check | `reasons[]` in order | verdict |
+    |---|---|---|---|---|
+    | clean | no conflict | `pass` | (none) | feasible if all else passes |
+    | clean | unknown | `unknown` | `ownership.files:ownership_unknown` | uncertain |
+    | unknown | no conflict | `unknown` | `ownership.files:worktree_unknown` | uncertain |
+    | unknown | unknown | `unknown` | `ownership.files:ownership_unknown`, `ownership.files:worktree_unknown` | uncertain |
+    | dirty | unknown | `fail` | `ownership.files:worktree_dirty` (blocked_dependency), `ownership.files:ownership_unknown` (uncertain) | blocked_dependency |
+    | unknown | conflict | `fail` | `ownership.files:ownership_conflict` (blocked_dependency), `ownership.files:worktree_unknown` (uncertain) | blocked_dependency |
+    | dirty | conflict | `fail` | `ownership.files:ownership_conflict`, `ownership.files:worktree_dirty` (both blocked_dependency, by code) | blocked_dependency |
+
+    (Both-unavailable lists `ownership_unknown` before `worktree_unknown`: same class, code ascending.)
+  - **Alternative A3-alt-owner (keep the class rule strictly per check status):** the check is still `fail`
+    with all applicable codes, but every reason of a `fail` check takes the check's class
+    (`blocked_dependency`), so unavailable-evidence reasons rank with the failures and are ordered only by
+    code (dirty+unknown: `ownership_unknown`, `worktree_dirty`; conflict+unknown: `ownership_conflict`,
+    `worktree_unknown`). Tradeoff: no change to section 6 item 4, but an unavailable-evidence reason is
+    labeled as a dependency block, blurring "known failure" and "could not evaluate". Another variant
+    (rejected as lossy, listed for completeness): list only the known-failure reasons and drop the
+    unavailable ones, which hides missing evidence.
 - **Limits.** This proves nothing about future commits and does not show the publisher enforces an `Agent`
   trailer (G7 stays open).
 - **Alternative A3-alt:** add no artifact/worktree facts; `contract.artifact` stays `unknown` and the worktree
@@ -563,9 +675,9 @@ The committed design already forbids treating the envelope's `expected.trailer` 
   `authority_unverified`, `authority_evidence_mismatch`, `authority_denied`; all other codes in this document
   are the complete set, any new code requires a design edit.
 - **Envelope `authority_ref`:** `{kind, id}`; `kind` in `none`\|`operator_decision`; `kind == none` requires `id`
-  equal to the literal `none`.
-- **Fact `authority_decision`:** `value` = `{kind, id, decision}` with `decision` in `allowed`\|`denied`\|
-  `not_required`; "verified" means the snapshot `provenance.verified` is true (a declaration for pure tests).
+  equal to the literal `none`; `id` otherwise matches `[a-z0-9:._-]{1,64}` (13.2).
+- **Fact `authority_decision`:** `value` = `{kind, id, decision}`, exact types in the 13.2 table, with
+  `decision` in `allowed`\|`denied`\|`not_required`; "verified" means the snapshot `provenance.verified` is true (a declaration for pure tests).
 - **Binding rule:** `allowed`/`denied` apply only if evidence `{kind,id}` equals the envelope ref exactly and
   the ref kind is not `none`; `not_required` applies only if the ref kind **is** `none` and the evidence
   `{kind,id}` is `{none, none}`.
@@ -577,7 +689,8 @@ The committed design already forbids treating the envelope's `expected.trailer` 
 | non-none | `not_required`, or unbound `{kind,id}` | `unknown` `authority_evidence_mismatch` |
 | `none` | verified `not_required` bound as above | `pass` |
 | `none` | `allowed`/`denied` or any mismatch | `unknown` `authority_evidence_mismatch` |
-| any | missing/`unknown`/`absent` fact, or provenance unverified | `unknown` `authority_unverified` |
+| any | `authority_decision` key present with status `unknown`/`absent` (no value), or provenance unverified | `unknown` `authority_unverified` |
+| any | `authority_decision` key **missing** from `facts` | not a check row: snapshot input error (A2/A5, `missing_key`, path `facts.authority_decision`) |
 
 Caller `authority_ref.kind == none` is neither a pass nor a denial; only the verified `not_required` row passes
 it. Only a verified explicit denial is `unauthorized`. A2 provenance and A4 evidence are declarations for pure
@@ -630,16 +743,37 @@ closed code), **type/schema validation** (A1/A2/object-set rules, plus clock int
 
 ### 13.8 Consequential updates if proposals are accepted
 
-- **Snapshot-derived check list** (section 5, fixtures `snapshot_derived_checks`): not a hard-coded eleven.
-  Baseline (none accepted): the eleven committed checks. A3 adds `contract.artifact` (twelve); A4 adds
-  `authority.reference` (thirteen with A3). Under A4, `authority.reference` with untrusted evidence is
-  `unknown` `authority_unverified` (keeps its own code), and with stale evidence `stale` `evidence_stale`.
-  With A4 not accepted, its committed behavior (section 5) is unchanged.
-- **Invalid-binding expansion** applies to each check in the adopted list, once per check, in place.
-- **Per-check evidence dependencies:** `authority.paths` <- `path_policy`, `mandatory_writes`, A1; `authority.commands` <-
-  `command_decisions`; `matcher.compat`/`permission.profile` <- `permission_profile`, `command_decisions`;
-  `ownership.files` <- `ownership`, plus `worktree` (A3); `contract.artifact` <- `artifact_contract` (A3);
-  `authority.reference` <- `authority_decision` (A4); `bounds.explicit` <- `limits`, `mandatory_writes`.
+- **Snapshot-derived check list** (section 5, fixtures `meta.snapshot_derived_checks`). The committed
+  eleven were audited entry by entry against the actual legacy list, not by arithmetic. In check order:
+  `authority.paths`, `authority.commands`, `identity.os`, `permission.profile`, `matcher.compat`, `repo.base`,
+  `ownership.files`, `dependency.declared`, `fixtures.data`, `slot.idle`, `bounds.explicit` (11). Not in it
+  today: the seven `binding.*` checks (computed from the inputs and clock), `authority.reference` (provenance
+  based, not snapshot-fact based), `contract.artifact` (no snapshot fact exists yet) and `estimate.advisory`
+  (envelope only, not required). Adopted lists, each in check order:
+  - **none accepted (11):** the list above.
+  - **A3 only (12):** the 11 with `contract.artifact` inserted after `ownership.files` (before
+    `dependency.declared`).
+  - **A4 only (12):** the 11 with `authority.reference` inserted first (before `authority.paths`).
+  - **A3 and A4 (13):** `authority.reference`, `authority.paths`, `authority.commands`, `identity.os`,
+    `permission.profile`, `matcher.compat`, `repo.base`, `ownership.files`, `contract.artifact`,
+    `dependency.declared`, `fixtures.data`, `slot.idle`, `bounds.explicit`.
+- **`authority.reference` under A4 when the snapshot cannot be used (PROPOSED):** provenance unverified ->
+  `unknown` `authority_unverified` (its own code, wins over `evidence_not_evaluable`); schema invalid or other
+  slot/epoch with verified provenance -> `unknown` `evidence_not_evaluable`; well-formed, verified, same
+  slot/epoch but outside the window -> `stale` `evidence_stale`. `contract.artifact` under A3 uses the generic
+  codes (`evidence_not_evaluable`, `evidence_stale`). With A4 not accepted, `authority.reference` keeps its
+  committed behavior (section 5).
+- **Invalid-binding expansion** applies to each check in the adopted list, once per check, in place: an
+  explicit reason for the same check (for example `authority.reference:authority_unverified`) is that check's
+  entry and is not repeated, so no finding is duplicated. Examples with both A3 and A4 adopted are in the
+  fixtures (`proposals.snapshot_derived_expansion`); the legacy cases keep the 11-list.
+- **Per-check evidence dependencies:** `authority.paths` <- `path_policy`, `mandatory_writes`, A1;
+  `authority.commands` <- `command_decisions`; `identity.os` <- `os_identity`; `permission.profile` <-
+  `permission_profile`; `matcher.compat` <- `permission_profile`, `command_decisions`; `repo.base` <-
+  `repo_base`; `ownership.files` <- `ownership`, plus `worktree` (A3); `contract.artifact` <-
+  `artifact_contract` (A3); `authority.reference` <- `authority_decision` (A4); `dependency.declared` <-
+  `dependencies`; `fixtures.data` <- `fixtures`; `slot.idle` <- `slot_state`; `bounds.explicit` <- `limits`,
+  `mandatory_writes`. `binding.attempt_unique` <- `attempts_seen` (a binding check, not expanded).
 - **Unchanged:** the six verdicts, precedence, required status, and published design vectors A and B (their
   bytes and digests). Fixtures keep their old case ids; proposal cases are new, separate entries.
 

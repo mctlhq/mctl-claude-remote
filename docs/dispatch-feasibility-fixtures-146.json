@@ -186,7 +186,7 @@
     },
     {
       "id": "incomplete_capability",
-      "description": "Snapshot lacks OS identity and repo base facts.",
+      "description": "Snapshot carries OS identity and repo base facts with status absent / unknown (keys present, no value); this is not an omitted-key schema error.",
       "mutation": "snapshot.facts.os_identity = absent; repo_base = unknown",
       "check_status_overrides": { "identity.os": "absent", "repo.base": "unknown" },
       "expected": {
@@ -499,8 +499,30 @@
         { "scope": "docs/", "path": "docs/a.md", "member": true },
         { "scope": "docs/", "path": "docs-x/a.md", "member": false, "note": "segment boundary" },
         { "scope": "docs/", "path_policy_forbidden": ["docs/secret/"], "expected": { "authority.paths": "fail", "code": "path_forbidden" }, "note": "forbidden descendant inside allowed directory blocks" },
-        { "scope": "docs/a/", "other_scope": "docs/", "intersects": true, "note": "symmetric prefix intersection" }
+        { "scope": "docs/a/", "other_scope": "docs/", "intersects": true, "note": "dir/dir ancestor; also checked in reverse order (design doc 13.1)" }
       ],
+      "intersection": {
+        "expectation_status": "PENDING (A1); illustrative, not executed",
+        "rule": "Normal form after the alias step (terminal /** removed BEFORE the no-star segment grammar): (kind exact|dir, segs). exact/exact: segs equal. exact/dir: dir segs are a PROPER prefix of the exact segs. dir/dir: one segs is a prefix of the other (equal counts). Exact is a leaf: never a prefix of anything; exact a and dir a/ are disjoint.",
+        "cases": [
+          { "p": "a/b", "q": "a/b", "intersects": true, "why": "equal exact paths" },
+          { "p": "a/b", "q": "a/c", "intersects": false, "why": "different leaves" },
+          { "p": "a", "q": "a/b", "intersects": false, "why": "exact a is a leaf, not a prefix of a/b" },
+          { "p": "a/b", "q": "a", "intersects": false, "why": "reverse of the previous case" },
+          { "p": "a", "q": "a/", "intersects": false, "why": "equal segments, exact vs directory: a/ excludes a itself" },
+          { "p": "a/", "q": "a", "intersects": false, "why": "reverse of the previous case" },
+          { "p": "a/b", "q": "a/", "intersects": true, "why": "exact a/b is a member of a/" },
+          { "p": "a/", "q": "a/b", "intersects": true, "why": "reverse of the previous case" },
+          { "p": "a/", "q": "a/", "intersects": true, "why": "equal directories" },
+          { "p": "a/", "q": "a/**", "intersects": true, "why": "alias a/** is a/ after the alias step" },
+          { "p": "a/", "q": "a/b/", "intersects": true, "why": "ancestor directory contains descendant directory" },
+          { "p": "a/b/", "q": "a/", "intersects": true, "why": "reverse of the previous case" },
+          { "p": "a/", "q": "ab/", "intersects": false, "why": "segment boundary" },
+          { "p": "ab/", "q": "a/", "intersects": false, "why": "reverse of the previous case" },
+          { "p": "ab", "q": "a/", "intersects": false, "why": "segment boundary, exact vs directory" },
+          { "p": "a/b/", "q": "a", "intersects": false, "why": "exact a is a leaf; it is not inside a/b/ and a/b/ is not inside a" }
+        ]
+      },
       "alternatives": {
         "A1-alt-1": "no dir/** alias: 'docs/**' becomes input error; everything else identical.",
         "A1-alt-2": "defer grammar: any non-exact pattern makes authority.paths unknown (path_pattern_unsupported); with allowed_files ['docs/'] the verdict is uncertain."
@@ -530,7 +552,32 @@
           "note": "value must be missing unless status is known."
         }
       ],
-      "alternative": "A2-alt: facts carry only {status, observed_ms, value_digest}; every fact-dependent check is unknown, so each case above is uncertain."
+      "key_presence": {
+        "expectation_status": "PENDING (A2/A5); illustrative, not executed",
+        "note": "Three distinct situations: (1) fact KEY missing = snapshot input error; (2) key present with status unknown/absent and no value = well-formed evidence-unavailable, dependent check unknown; (3) key present and known but a required entry missing inside the value = check unknown (cases above). Omitted facts are never normalized into invented timestamps, digests or values.",
+        "cases": [
+          {
+            "id": "p_fact_key_missing",
+            "mutation": "facts has no os_identity key at all",
+            "expected": { "result": "input error (A5)", "input": "snapshot", "code": "missing_key", "path": "facts.os_identity" },
+            "note": "Not identity_os_unknown: no report exists."
+          },
+          {
+            "id": "p_fact_status_unknown_no_value",
+            "mutation": "facts.os_identity = {status: unknown, observed_ms: 1789999000000} (key present, no value)",
+            "check_status_overrides": { "identity.os": "unknown" },
+            "expected": { "binding_valid": true, "verdict": "uncertain", "reasons": ["identity.os:identity_os_unknown"] },
+            "note": "Well-formed evidence-unavailable data; distinct from the missing-key case above."
+          },
+          {
+            "id": "p_fact_status_absent_no_value",
+            "mutation": "facts.os_identity = {status: absent, observed_ms: 1789999000000}",
+            "check_status_overrides": { "identity.os": "absent" },
+            "expected": { "binding_valid": true, "verdict": "uncertain", "reasons": ["identity.os:identity_os_absent"] }
+          }
+        ]
+      },
+      "alternative": "A2-alt: facts carry only {status, observed_ms, value_digest}; every fact-dependent check is unknown, so each case above is uncertain. A2-alt is a different, deferred policy: it does not adopt the key-presence rule (what an omitted fact key means is not decided by it) and is not approved either."
     },
     "object_set": {
       "illustrates": "OS",
@@ -543,10 +590,25 @@
         },
         {
           "id": "os_utf8_ordering",
-          "valid_order": ["cmd:Z", "cmd:a"],
-          "invalid_order": ["cmd:a", "cmd:Z"],
+          "grammar": "every id below matches cmd:[a-z0-9._-]{1,64} (design doc 13.2); the valid and invalid lists contain the same ids and differ ONLY by order",
+          "valid_order": ["cmd:a", "cmd:z"],
+          "invalid_order": ["cmd:z", "cmd:a"],
           "expected_invalid": { "code": "unsorted_set" },
-          "note": "Bytewise UTF-8: 'Z' (0x5a) sorts before 'a' (0x61); a prefix sorts before its extensions."
+          "note": "Bytewise UTF-8: 'a' (0x61) sorts before 'z' (0x7a)."
+        },
+        {
+          "id": "os_utf8_ordering_prefix",
+          "grammar": "all ids valid under 13.2; same ids, order only differs",
+          "valid_order": ["cmd:a", "cmd:a-b"],
+          "invalid_order": ["cmd:a-b", "cmd:a"],
+          "expected_invalid": { "code": "unsorted_set" },
+          "note": "A shorter prefix sorts before its extensions."
+        },
+        {
+          "id": "os_command_grammar_uppercase_invalid",
+          "mutation": "facts.command_decisions.value.entries[0].command = 'cmd:Z'",
+          "expected": { "result": "input error (A5)", "input": "snapshot", "code": "bad_pattern", "path": "facts.command_decisions.value.entries.command" },
+          "note": "Separate grammar failure. The lowercase command grammar is preserved; uppercase is not allowed in order to make an ordering example work, and no ordering code is produced for it."
         },
         {
           "id": "os_ordered_array_preserved",
@@ -555,7 +617,7 @@
           "note": "TaskEnvelope.dependencies stays an ordered array; no sort, no dedup, no identity validation unless separately proposed."
         }
       ],
-      "alternative": "OS-alt: no object-set schema; duplicates are still rejected by an explicit uniqueness check, but the unsorted_set code does not exist and permuted entries produce different digests."
+      "alternative": "OS-alt: no object-set schema; duplicates are still rejected by an explicit uniqueness check, but object-entry arrays are not order-checked, so unsorted_set is no longer produced for object-entry arrays (command_decisions/dependencies/fixtures entries). unsorted_set stays valid for STRING sets (attempts_seen.ids, path_policy.forbidden, mandatory_writes.paths, envelope string sets). The actual cost: equal abstract entry sets emitted in different orders produce different capability digests."
     },
     "a3_artifact_and_worktree": {
       "illustrates": "A3",
@@ -563,9 +625,24 @@
         { "id": "p_artifact_unknown", "mutation": "facts.artifact_contract = {status: unknown, observed_ms: 1789999000000}", "check_status_overrides": { "contract.artifact": "unknown" }, "expected": { "binding_valid": true, "verdict": "uncertain", "reasons": ["contract.artifact:artifact_evidence_unknown"] } },
         { "id": "p_artifact_trailer_contradiction", "mutation": "facts.artifact_contract.value.trailer = 'Agent: other'", "check_status_overrides": { "contract.artifact": "fail" }, "expected": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["contract.artifact:artifact_contract_mismatch"] } },
         { "id": "p_worktree_dirty", "mutation": "facts.worktree.value.clean = false", "check_status_overrides": { "ownership.files": "fail" }, "expected": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["ownership.files:worktree_dirty"] } },
-        { "id": "p_dirty_and_conflict", "mutation": "facts.worktree.value.clean = false; facts.ownership.value.conflict = true", "check_status_overrides": { "ownership.files": "fail" }, "expected": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["ownership.files:ownership_conflict", "ownership.files:worktree_dirty"] }, "note": "legacy_case conflict_files_owner; distinct reasons, ascending by code." },
-        { "id": "p_worktree_unknown", "mutation": "facts.worktree = {status: unknown, observed_ms: 1789999000000}", "check_status_overrides": { "ownership.files": "unknown" }, "expected": { "binding_valid": true, "verdict": "uncertain", "reasons": ["ownership.files:worktree_unknown"] } }
+        { "id": "p_dirty_and_conflict", "mutation": "facts.worktree.value.clean = false; facts.ownership.value.conflict = true", "check_status_overrides": { "ownership.files": "fail" }, "expected": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["ownership.files:ownership_conflict", "ownership.files:worktree_dirty"] }, "note": "legacy_case conflict_files_owner; distinct reasons, ascending by code (same as o_dirty_and_conflict)." },
+        { "id": "p_worktree_unknown", "mutation": "facts.worktree = {status: unknown, observed_ms: 1789999000000}; ownership known conflict false", "check_status_overrides": { "ownership.files": "unknown" }, "expected": { "binding_valid": true, "verdict": "uncertain", "reasons": ["ownership.files:worktree_unknown"] }, "note": "same as o_unknown_worktree_no_conflict below" },
+        { "id": "p_artifact_fact_key_missing", "mutation": "facts has no artifact_contract key", "expected": { "result": "input error (A2/A5)", "input": "snapshot", "code": "missing_key", "path": "facts.artifact_contract" }, "note": "Missing KEY is a schema input error, not artifact_evidence_unknown (which needs the key present with status unknown/absent, see p_artifact_unknown)." }
       ],
+      "ownership_files_combination": {
+        "expectation_status": "PENDING (A3); illustrative, not executed. Per-reason class is the proposed reading; the alternative follows.",
+        "rule": "Known failure (worktree.clean false OR ownership.conflict true) -> check fail, blocked_dependency. Else any unavailable (status unknown/absent) -> check unknown. Else both known ok -> pass. All applicable codes retained; check reason_codes ascending bytewise. reasons[] sort key unchanged (class rank, check order, code) with per-reason class: worktree_dirty/ownership_conflict = blocked_dependency (2); worktree_unknown/ownership_unknown = uncertain (5) even when the check status is fail.",
+        "cases": [
+          { "id": "o_both_clean", "worktree": "known clean", "ownership": "known conflict false", "check_status": "pass", "reasons": [], "verdict": "feasible (all else pass)" },
+          { "id": "o_clean_unknown_owner", "worktree": "known clean", "ownership": "status unknown, no value", "check_status": "unknown", "check_reason_codes": ["ownership_unknown"], "reasons": ["ownership.files:ownership_unknown"], "verdict": "uncertain" },
+          { "id": "o_unknown_worktree_no_conflict", "worktree": "status unknown, no value", "ownership": "known conflict false", "check_status": "unknown", "check_reason_codes": ["worktree_unknown"], "reasons": ["ownership.files:worktree_unknown"], "verdict": "uncertain" },
+          { "id": "o_both_unknown", "worktree": "status unknown", "ownership": "status absent", "check_status": "unknown", "check_reason_codes": ["ownership_unknown", "worktree_unknown"], "reasons": ["ownership.files:ownership_unknown", "ownership.files:worktree_unknown"], "verdict": "uncertain" },
+          { "id": "o_dirty_unknown_owner", "worktree": "known dirty", "ownership": "status unknown, no value", "check_status": "fail", "check_reason_codes": ["ownership_unknown", "worktree_dirty"], "reasons": ["ownership.files:worktree_dirty", "ownership.files:ownership_unknown"], "reason_classes": ["blocked_dependency", "uncertain"], "verdict": "blocked_dependency", "note": "known failure kept distinct from unavailable evidence; check status fixed to fail; reasons[] ordered by class rank, check_reason_codes ordered by code." },
+          { "id": "o_conflict_unknown_worktree", "worktree": "status unknown, no value", "ownership": "known conflict true", "check_status": "fail", "check_reason_codes": ["ownership_conflict", "worktree_unknown"], "reasons": ["ownership.files:ownership_conflict", "ownership.files:worktree_unknown"], "reason_classes": ["blocked_dependency", "uncertain"], "verdict": "blocked_dependency" },
+          { "id": "o_dirty_and_conflict", "worktree": "known dirty", "ownership": "known conflict true", "check_status": "fail", "check_reason_codes": ["ownership_conflict", "worktree_dirty"], "reasons": ["ownership.files:ownership_conflict", "ownership.files:worktree_dirty"], "reason_classes": ["blocked_dependency", "blocked_dependency"], "verdict": "blocked_dependency" }
+        ],
+        "alternative_A3_alt_owner": "Keep the class rule strictly per check status: same check status and same codes, but every reason of a fail check has class blocked_dependency, so o_dirty_unknown_owner lists ownership.files:ownership_unknown before ownership.files:worktree_dirty and o_conflict_unknown_worktree keeps ownership_conflict before worktree_unknown (both by code). section 6 item 4 is unchanged under this alternative. A lossy variant that drops the unavailable reasons is rejected."
+      },
       "alternative": "A3-alt: no artifact_contract/worktree facts; contract.artifact is always unknown, so every case is uncertain with contract.artifact:artifact_evidence_unknown."
     },
     "a4_authority": {
@@ -574,7 +651,8 @@
         { "id": "p_authority_allowed_bound", "envelope_ref": "operator_decision/decision-0001", "evidence": "operator_decision/decision-0001 allowed", "check_status_overrides": {}, "expected": { "verdict": "feasible", "reasons": [] }, "note": "same as proposed_schema_baseline." },
         { "id": "p_authority_denied_bound", "envelope_ref": "operator_decision/decision-0001", "evidence": "operator_decision/decision-0001 denied", "check_status_overrides": { "authority.reference": "fail" }, "expected": { "verdict": "unauthorized", "reasons": ["authority.reference:authority_denied"] } },
         { "id": "p_authority_id_mismatch", "envelope_ref": "operator_decision/decision-0001", "evidence": "operator_decision/decision-0002 allowed", "check_status_overrides": { "authority.reference": "unknown" }, "expected": { "verdict": "uncertain", "reasons": ["authority.reference:authority_evidence_mismatch"] } },
-        { "id": "p_none_without_evidence", "envelope_ref": "none/none", "evidence": "missing", "check_status_overrides": { "authority.reference": "unknown" }, "expected": { "verdict": "uncertain", "reasons": ["authority.reference:authority_unverified"] }, "note": "kind none alone is neither pass nor denial." },
+        { "id": "p_none_without_evidence", "envelope_ref": "none/none", "evidence": "authority_decision key present, status unknown, no value", "check_status_overrides": { "authority.reference": "unknown" }, "expected": { "verdict": "uncertain", "reasons": ["authority.reference:authority_unverified"] }, "note": "kind none alone is neither pass nor denial. The key is present with status unknown; an omitted key is the separate input-error case p_authority_fact_key_missing." },
+        { "id": "p_authority_fact_key_missing", "envelope_ref": "operator_decision/decision-0001", "evidence": "facts has no authority_decision key", "expected": { "result": "input error (A2/A5)", "input": "snapshot", "code": "missing_key", "path": "facts.authority_decision" }, "note": "Not authority_unverified: no report exists." },
         { "id": "p_none_with_not_required", "envelope_ref": "none/none", "evidence": "none/none not_required, verified", "check_status_overrides": {}, "expected": { "verdict": "feasible", "reasons": [] } },
         { "id": "p_not_required_cannot_bypass_ref", "envelope_ref": "operator_decision/decision-0001", "evidence": "none/none not_required", "check_status_overrides": { "authority.reference": "unknown" }, "expected": { "verdict": "uncertain", "reasons": ["authority.reference:authority_evidence_mismatch"] } }
       ],
@@ -628,7 +706,52 @@
       ],
       "alternative": "A6-alt: a schema-invalid report makes validate_report_for_consumption throw FeasibilityInputError (input: report); there is no ConsumptionResult for it."
     },
-    "snapshot_derived_list_note": "Committed list = 11 checks (meta.snapshot_derived_checks, unchanged). Adopting A3 adds contract.artifact; adopting A4 adds authority.reference (keeping authority_unverified for untrusted evidence). Count is derived from adopted proposals (11, 12 or 13), not hard-coded."
+    "snapshot_derived_list_note": "Committed list = the 11 entries of meta.snapshot_derived_checks (audited entry by entry, unchanged). Adopted lists (check order): none = those 11; A3 only = 11 plus contract.artifact after ownership.files (12); A4 only = 11 plus authority.reference first (12); A3+A4 = authority.reference, authority.paths, authority.commands, identity.os, permission.profile, matcher.compat, repo.base, ownership.files, contract.artifact, dependency.declared, fixtures.data, slot.idle, bounds.explicit (13). binding.* checks and estimate.advisory are never in the list. Evidence dependencies: authority.paths<-path_policy,mandatory_writes; authority.commands<-command_decisions; identity.os<-os_identity; permission.profile<-permission_profile; matcher.compat<-permission_profile,command_decisions; repo.base<-repo_base; ownership.files<-ownership(+worktree, A3); contract.artifact<-artifact_contract (A3); authority.reference<-authority_decision (A4); dependency.declared<-dependencies; fixtures.data<-fixtures; slot.idle<-slot_state; bounds.explicit<-limits,mandatory_writes; binding.attempt_unique<-attempts_seen.",
+    "snapshot_derived_expansion": {
+      "expectation_status": "PENDING (A3+A4 both adopted); illustrative, not executed. Legacy cases keep the 11-list.",
+      "note": "Each adopted check appears exactly once; an explicit reason for a check IS its entry (authority.reference:authority_unverified is not repeated as evidence_not_evaluable). Order: binding entries (rank 0), then uncertain class by check order.",
+      "cases": [
+        {
+          "id": "x_wrong_slot_a3_a4",
+          "legacy_case": "wrong_slot",
+          "reasons": [
+            "binding.slot:slot_mismatch",
+            "authority.reference:evidence_not_evaluable", "authority.paths:evidence_not_evaluable", "authority.commands:evidence_not_evaluable",
+            "identity.os:evidence_not_evaluable", "permission.profile:evidence_not_evaluable",
+            "matcher.compat:evidence_not_evaluable", "repo.base:evidence_not_evaluable",
+            "ownership.files:evidence_not_evaluable", "contract.artifact:evidence_not_evaluable",
+            "dependency.declared:evidence_not_evaluable", "fixtures.data:evidence_not_evaluable",
+            "slot.idle:evidence_not_evaluable", "bounds.explicit:evidence_not_evaluable"
+          ]
+        },
+        {
+          "id": "x_unverified_provenance_a3_a4",
+          "legacy_case": "unverified_provenance",
+          "reasons": [
+            "binding.provenance:provenance_unverified",
+            "authority.reference:authority_unverified", "authority.paths:evidence_not_evaluable", "authority.commands:evidence_not_evaluable",
+            "identity.os:evidence_not_evaluable", "permission.profile:evidence_not_evaluable",
+            "matcher.compat:evidence_not_evaluable", "repo.base:evidence_not_evaluable",
+            "ownership.files:evidence_not_evaluable", "contract.artifact:evidence_not_evaluable",
+            "dependency.declared:evidence_not_evaluable", "fixtures.data:evidence_not_evaluable",
+            "slot.idle:evidence_not_evaluable", "bounds.explicit:evidence_not_evaluable"
+          ]
+        },
+        {
+          "id": "x_capability_stale_a3_a4",
+          "legacy_case": "combined_stale_denial_is_not_denial",
+          "reasons": [
+            "binding.capability_fresh:capability_stale",
+            "authority.reference:evidence_stale", "authority.paths:evidence_stale", "authority.commands:evidence_stale",
+            "identity.os:evidence_stale", "permission.profile:evidence_stale",
+            "matcher.compat:evidence_stale", "repo.base:evidence_stale",
+            "ownership.files:evidence_stale", "contract.artifact:evidence_stale",
+            "dependency.declared:evidence_stale", "fixtures.data:evidence_stale",
+            "slot.idle:evidence_stale", "bounds.explicit:evidence_stale"
+          ]
+        }
+      ]
+    }
   },
   "properties": [
     {
