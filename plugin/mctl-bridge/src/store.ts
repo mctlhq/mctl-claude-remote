@@ -13,7 +13,7 @@ import { ValkeyConnectionError, ValkeyError } from "./valkey.ts";
 import type { Arg, Executor, Reply } from "./valkey.ts";
 
 export const PREFIX = "mctl:bridge:";
-export const LIBRARY_VERSION = "6";
+export const LIBRARY_VERSION = "7";
 export const LIBRARY_PATH = path.join(path.dirname(fileURLToPath(import.meta.url)), "bridge.lua");
 export const MAX_PAYLOAD = 16384;
 

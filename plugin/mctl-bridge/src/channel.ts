@@ -291,9 +291,13 @@ export class Adapter {
       this.lastBeat = now;
       this.lastBusy = busy;
     }
-    // Saves a round trip only: the server refuses `next` while the registration
-    // says busy, and the heartbeat above has just sent the current flag.
-    if (busy) return;
+    // The hooks' busy flag is wrong when a turn ends without a Stop hook (an
+    // interrupt, a refused permission prompt): the session then waits for input
+    // while the flag stays busy. So `next` is asked even while busy once a task is
+    // acknowledged; the server hands out only a steer for that task then, never a
+    // task or another reply, so nothing interleaves. With no acknowledged task
+    // there is nothing a busy slot may receive, and the round trip is saved.
+    if (busy && this.admissions.size === 0) return;
 
     let next: Result;
     try {
