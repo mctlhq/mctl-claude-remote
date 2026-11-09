@@ -724,6 +724,135 @@ describe("consumption: retained_under_invalid_binding local relations (14.6a/b, 
   });
 });
 
+describe("epoch: decimal length is bounded before BigInt conversion (refs #146)", () => {
+  const MAXSAFE = "9007199254740991";
+  const LONG = "1" + "0".repeat(100000); // canonical decimal syntax, absurdly long
+  const SCHEMA_FAIL = (): J => ({
+    schema: "mctl.feasibility-consumption/1",
+    valid: false,
+    checks: [
+      { id: "consume.report_schema", status: "fail", reason_codes: ["report_schema_invalid"] },
+      ...CONSUME_CHECK_ORDER.slice(1).map((id) => ({ id, status: "unknown", reason_codes: ["report_not_evaluable"] })),
+    ],
+    reasons: ["consume.report_schema:report_schema_invalid", ...CONSUME_CHECK_ORDER.slice(1).map((id) => `${id}:report_not_evaluable`)],
+  });
+  // Counts BigInt calls whose string argument is longer than any valid epoch can be.
+  function countLongBigInt<T>(fn: () => T): { out: T; longCalls: number } {
+    const real = globalThis.BigInt;
+    let longCalls = 0;
+    const wrapped = ((v: J) => {
+      if (typeof v === "string" && v.length > 16) longCalls++;
+      return real(v);
+    }) as unknown as BigIntConstructor;
+    Object.assign(wrapped, real);
+    (globalThis as J).BigInt = wrapped;
+    try {
+      return { out: fn(), longCalls };
+    } finally {
+      (globalThis as J).BigInt = real;
+    }
+  }
+  const both = { "envelope.slot_epoch": MAXSAFE, "snapshot.slot_epoch": MAXSAFE };
+
+  test("max safe integer is accepted (envelope, snapshot, report)", () => {
+    const i = inputs({ set: both });
+    const r = run(i);
+    expect(r.slot_epoch).toBe(MAXSAFE);
+    expect(r.binding_valid).toBe(true);
+    expect(code(consume(r, i), "consume.report_schema").status).toBe("pass");
+  });
+  test("max safe integer + 1 is rejected as bad_range on every path", () => {
+    const e = thrown(() => run(inputs({ set: { "envelope.slot_epoch": "9007199254740992" } })));
+    expect({ input: e.input, code: e.code, path: e.path }).toEqual({ input: "envelope", code: "bad_range", path: "slot_epoch" });
+    const s = thrown(() => run(inputs({ set: { "snapshot.slot_epoch": "9007199254740992" } })));
+    expect({ input: s.input, code: s.code }).toEqual({ input: "snapshot", code: "bad_range" });
+    const i = inputs({ set: both });
+    expect(consume({ ...run(i), slot_epoch: "9007199254740992" }, i)).toEqual(SCHEMA_FAIL());
+  });
+  test("16 digits alone is not valid; leading zeros stay bad_pattern", () => {
+    expect(thrown(() => run(inputs({ set: { "envelope.slot_epoch": "9999999999999999" } }))).code).toBe("bad_range");
+    expect(thrown(() => run(inputs({ set: { "envelope.slot_epoch": "0" + MAXSAFE } }))).code).toBe("bad_pattern");
+    expect(thrown(() => run(inputs({ set: { "envelope.slot_epoch": "0".repeat(100000) } }))).code).toBe("bad_pattern");
+  });
+  test("a long canonical digit string is rejected without any BigInt conversion of it", () => {
+    const env = countLongBigInt(() => thrown(() => run(inputs({ set: { "envelope.slot_epoch": LONG } }))));
+    expect({ input: env.out.input, code: env.out.code, path: env.out.path }).toEqual({ input: "envelope", code: "bad_range", path: "slot_epoch" });
+    expect(env.longCalls).toBe(0);
+    const snap = countLongBigInt(() => thrown(() => run(inputs({ set: { "snapshot.slot_epoch": LONG } }))));
+    expect({ input: snap.out.input, code: snap.out.code }).toEqual({ input: "snapshot", code: "bad_range" });
+    expect(snap.longCalls).toBe(0);
+    const i = inputs({ set: both });
+    const r = run(i);
+    const rep = countLongBigInt(() => consume({ ...r, slot_epoch: LONG }, i));
+    expect(rep.out).toEqual(SCHEMA_FAIL());
+    expect(rep.longCalls).toBe(0);
+  });
+});
+
+describe("consumption: valid-binding substantive rows keep the closed evidence shape (refs #146)", () => {
+  const SCHEMA_FAIL = (): J => ({
+    schema: "mctl.feasibility-consumption/1",
+    valid: false,
+    checks: [
+      { id: "consume.report_schema", status: "fail", reason_codes: ["report_schema_invalid"] },
+      ...CONSUME_CHECK_ORDER.slice(1).map((id) => ({ id, status: "unknown", reason_codes: ["report_not_evaluable"] })),
+    ],
+    reasons: ["consume.report_schema:report_schema_invalid", ...CONSUME_CHECK_ORDER.slice(1).map((id) => `${id}:report_not_evaluable`)],
+  });
+  const redigest = (r: J): J => {
+    const { report_digest: _d, ...body } = r;
+    return { ...body, report_digest: digest("report", body) };
+  };
+  // Valid-binding base report with one substantive row replaced; reasons/verdict kept locally consistent so only
+  // the valid-binding evidence-shape relation can reject.
+  function forgeRow(r: J, id: string, patch: J, reasons: string[], verdict: string): J {
+    return redigest({ ...r, checks: r.checks.map((c: J) => (c.id === id ? { ...c, ...patch } : c)), reasons, verdict });
+  }
+  const donor = (set: J, id: string): J => run(inputs({ set })).checks.find((c: J) => c.id === id);
+
+  test.each([
+    ["evidence_not_evaluable", { "snapshot.slot": "slot-y" }],
+    ["evidence_stale", { now: 1789999950000 }],
+  ])("%s on a substantive row under binding_valid=true is rejected (re-digested)", (codeName, set) => {
+    const i = inputs();
+    const r = run(i);
+    expect(r.binding_valid).toBe(true);
+    const d = donor(set, "slot.idle");
+    expect(d.reason_codes).toEqual([codeName]);
+    const forged = forgeRow(r, "slot.idle", { reason_codes: d.reason_codes, status: d.status }, [`slot.idle:${codeName}`], "uncertain");
+    expect(digest("report", forged, { exclude: ["report_digest"] })).toBe(forged.report_digest);
+    expect(consume(forged, i)).toEqual(SCHEMA_FAIL());
+  });
+  test.each(SNAPSHOT_DERIVED_CHECKS.map((id) => [id]))("empty evidence on substantive row %s under binding_valid=true is rejected", (id) => {
+    const i = inputs();
+    const r = run(i);
+    expect(r.binding_valid).toBe(true);
+    expect(r.checks.find((c: J) => c.id === id).evidence.length).toBeGreaterThan(0);
+    expect(consume(forgeRow(r, id, { evidence: [] }, r.reasons, r.verdict), i)).toEqual(SCHEMA_FAIL());
+  });
+  test("genuine unavailable authority_decision: authority_unverified with evidence and binding_valid=true stays accepted", () => {
+    const i = inputs({ set: { "snapshot.facts.authority_decision": { status: "unknown", observed_ms: 1789999000000 } } });
+    const r = run(i);
+    expect(r.binding_valid).toBe(true);
+    const c = r.checks.find((x: J) => x.id === "authority.reference");
+    expect(c.reason_codes).toEqual(["authority_unverified"]);
+    expect(c.evidence.length).toBeGreaterThan(0);
+    expect(code(consume(r, i), "consume.report_schema")).toEqual({ id: "consume.report_schema", status: "pass", reason_codes: [] });
+    // the same code with its evidence stripped is rejected
+    expect(consume(forgeRow(r, "authority.reference", { evidence: [] }, r.reasons, r.verdict), i)).toEqual(SCHEMA_FAIL());
+  });
+  test("positive controls: genuine valid-binding, task-expired and duplicate-attempt reports are accepted", () => {
+    const ok = inputs();
+    expect(consume(run(ok), ok).valid).toBe(true);
+    for (const set of [{ "envelope.expires_at_ms": 1789999400000 }, { "snapshot.facts.attempts_seen.value.ids": ["a-00000000-0000-4000-8000-000000000002"] }]) {
+      const i = inputs({ set });
+      const r = run(i);
+      expect(r.binding_valid).toBe(false);
+      expect(code(consume(r, i), "consume.report_schema").status).toBe("pass");
+    }
+  });
+});
+
 describe("consumption: digest is integrity, not authenticity", () => {
   test("changing a schema-valid report field without re-digesting fails the digest check only", () => {
     const i = inputs();

@@ -110,6 +110,7 @@ export function patternsIntersect(a: string, b: string): boolean {
 
 const MAX_SAFE = Number.MAX_SAFE_INTEGER;
 const MAX_SAFE_BIG = BigInt(MAX_SAFE);
+const MAX_SAFE_DIGITS = String(MAX_SAFE).length;
 const utf8 = new TextEncoder();
 
 function compareBytes(a: string, b: string): number {
@@ -265,7 +266,8 @@ const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[
 const epochV: V = (v, path) => {
   const s = strRaw(v, path);
   if (!/^(0|[1-9][0-9]*)$/.test(s)) bad("bad_pattern", path);
-  if (BigInt(s) > MAX_SAFE_BIG) bad("bad_range", path);
+  // Implementation guard for the existing ceiling (<= 2^53-1 has at most 16 decimal digits): reject before BigInt.
+  if (s.length > MAX_SAFE_DIGITS || BigInt(s) > MAX_SAFE_BIG) bad("bad_range", path);
 };
 
 const repoV: V = (v, path) => {
@@ -801,6 +803,13 @@ function reportRelations(r: Report): void {
     if (c.retained_under_invalid_binding && c.evidence.length === 0) bad("bad_value", "checks.retained_under_invalid_binding");
     if (derived && !r.binding_valid && !expanded && c.evidence.length > 0 && !c.retained_under_invalid_binding) {
       bad("bad_value", "checks.retained_under_invalid_binding");
+    }
+    // Valid binding implies an individually evaluable snapshot: substantive rows are never expansions and always
+    // carry their closed per-check evidence refs. (authority_unverified alone is legitimate here: unavailable
+    // authority_decision in an evaluable snapshot.) Local shape only; no authenticity claim.
+    if (derived && r.binding_valid) {
+      if (expanded) bad("bad_value", "checks.reason_codes");
+      if (c.evidence.length === 0) bad("bad_value", "checks.evidence");
     }
     if (c.id.startsWith("binding.") && c.status !== "pass") allBindingPass = false;
   }
