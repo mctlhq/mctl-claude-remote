@@ -197,6 +197,38 @@ Exit status: 0 done, 1 refused by the state machine (the JSON says why), 2 usage
 connection error. `init` reports the server's persistence as `durable` only for
 `appendonly yes` with `appendfsync always`.
 
+### Steering a task that asked nothing (B13, library 7)
+
+`steer <task id> --stdin` writes a note to the slot's in-flight task, for example after a
+refused permission prompt left Claude Code waiting for input. Operational contract:
+
+- While the slot reads busy, only a steer for the current acknowledged task is delivered;
+  queued tasks and replies to the slot's own question wait for idle. A steer admits no new
+  task.
+- `steer` returning ok means the note is `reply_committed`, nothing more. Delivery to the
+  model is shown only by the slot's `ack_reply` (`reply_acknowledged`); a notification
+  written to stdout is not an acknowledgement.
+- A steer with no state change for 120000 ms (`updated_ms`) is settled as
+  `delivery_unknown` (reasons `steer_undelivered`, `steer_unconfirmed`, `steer_unacked`)
+  by the sweeper, or by the next `steer` for the task. The old note stays in the audit
+  trail and `errors`; it is not resent. `delivery_unknown` does not prove the note was not
+  delivered, and a late ack for it is refused.
+- A steer younger than that, or a question the slot asked, still gives `question_open`.
+  A new steer is a new message, not a requeue of the task.
+- Diagnose with `status`, `observe`, `sessions`, `errors` and `ops/slot.sh state|prompt`
+  first. No duplicate task, `resolve` or slot lifecycle change without the authorization
+  `AGENTS.md` requires, and no manual keypress to work around the bridge.
+- Library `VERSION`/`LIBRARY_VERSION` is 7 (was 6) and the code needs the matching library.
+  That is not the app release version (0.27.0 planned, not confirmed installed). The lead
+  owns deployment, library reload and tagging, with both slots idle.
+- Tests use an isolated Valkey and a faked adapter notify; they do not prove a live Claude
+  wakes after a "No". B13 is operationally closed only after deployment and an authorized
+  host validation.
+
+Full design: [Steer delivery while busy
+(B13)](../../docs/chatgpt-orchestrator-bridge.md#steer-delivery-while-busy-b13), with
+[Questions and replies](../../docs/chatgpt-orchestrator-bridge.md#questions-and-replies).
+
 ## The waker's timer
 
 Between Codex turns nobody sees a slot stop on a permission prompt, or a result nobody collects.

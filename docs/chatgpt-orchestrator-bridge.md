@@ -340,7 +340,108 @@ Fixes P1-d.
   with the task are the reply's own code paths. It is refused unless the task is `acked`
   and is the slot's current `inflight` attempt of the current epoch, and while the task
   has a question of its own open (`question_open`: answer that one instead). It never
-  rings the waker, because nothing waits for the orchestrator.
+  rings the waker, because nothing waits for the orchestrator. Library 7 changes when a
+  steer may go out and how a stuck one ends; see [Steer delivery while busy
+  (B13)](#steer-delivery-while-busy-b13).
+
+### Steer delivery while busy (B13)
+
+Source of truth: `bridge.lua` (`next_message`, `steer`, `expire`, `blocking_question`,
+`STEER_STUCK_MS`), `channel.ts` (the `busy` early return) and the library version in
+`store.ts`. Tests: `test/store.test.ts` and `test/adapter.test.ts`.
+
+**Why.** The `busy` flag is the hooks' guess (see [Busy signal](#busy-signal)). It can
+stay `busy` while Claude Code waits for input after a turn that ended without a `Stop`
+hook, for example an interrupt or a refused permission prompt. Before library 7 the server
+refused every `next` while busy, so the steer meant to unstick that turn could not be
+delivered either. This explanation is inferred from the hook design; it was **not**
+reproduced on a live slot.
+
+**What changed.**
+
+- While the slot reads busy, `next_message` hands out **only** a steer (a `question` in
+  `reply_committed` with `steer=1`) for the task currently in `inflight`. A queued task,
+  a reply to the slot's own question and anything else keep the idle gate and stay queued
+  until the slot reports idle. Nothing new is admitted: a steer carries no new task, and
+  `steer` itself still requires an `acked` task that is the slot's current `inflight`
+  attempt of the current epoch.
+- The adapter asks `next` while busy only if it holds an acknowledged task. With none
+  there is nothing a busy slot may receive, and the round trip is skipped.
+- Claude Code queues a channel event that arrives mid-turn. This is the design's
+  assumption, not something the tests prove.
+
+**Wire emission is not model consumption.** A steer follows the reply path:
+`reply_committed → reply_emit_intent → reply_emitted → reply_acknowledged` (the slot's
+`ack_reply`), with `delivery_unknown` as the explicit branch. `mctl-bridge steer`
+returning ok only means `reply_committed`. The adapter's stdout notification only means
+`reply_emitted`. Only `ack_reply` shows that the model took the note up.
+
+**A steer that never shows progress.** `STEER_STUCK_MS` is 120000. The clock is the
+message's `updated_ms`, which every state transition rewrites, not the creation time. A
+steer still in one of the three pre-ack states with no transition for that long is
+settled as `delivery_unknown`, with the reason code of the state it was stuck in:
+
+| State when settled | Reason | Meaning |
+|---|---|---|
+| `reply_committed` | `steer_undelivered` | never handed to the adapter |
+| `reply_emit_intent` | `steer_unconfirmed` | handed out; the write to stdio is unknown |
+| `reply_emitted` | `steer_unacked` | written; no ack from the slot |
+
+Two things settle it. The sweeper does it through `expire` (`actor sweeper`), so the
+settlement happens when a sweep visits the message, not at an exact wall-clock instant;
+there is no stricter SLA than "at least 120000 ms after the last transition, at the next
+sweep". And a new `steer` for the same task does it (`actor orch`, reason
+`<code>_superseded_by:<new question id>`).
+
+**Re-steer and `question_open`.** `question_open` still applies. A new `steer` is refused
+while the task's earlier question is open and either is a question the slot asked (that
+one is answered with `reply`, and the claim and reply exclusivity is untouched) or is a
+steer younger than `STEER_STUCK_MS` or in any other state. Only a stuck steer is
+superseded. The old note is kept: it moves to `delivery_unknown`, stays in the audit trail
+and in `errors`, and is never replayed or overwritten. A steer already in
+`delivery_unknown` no longer blocks anything, so the task may take a new steer or ask a new
+question at once.
+
+Superseding a note is not resending or requeueing a task. The new note is a new message
+with a new id and a new `reply_id`; the task, its attempt and `inflight` stay as they were.
+`resolve --as requeue` is the separate, manual path for a task and is not part of this.
+
+**`delivery_unknown` does not mean "not delivered".** The note may have reached the
+model. A late `ack_reply` for it is refused (`wrong_state`, as for any reply that left
+`reply_emitted`), so the bridge records no acknowledgement; that is not proof that the
+slot ignored it. Read the task's next evidence before drawing a conclusion.
+
+**Diagnosing a task that seems stuck (read-only first).**
+
+1. `mctl-bridge status <task id>` and `observe <task id>`: state, audit trail, late
+   evidence, adapter liveness. `status <steer question id>` for the note itself.
+2. `mctl-bridge sessions`, then `ops/slot.sh state <slot>` and `ops/slot.sh prompt <slot>`
+   (with its `hash`, see [Slot lint rule and the canonical prompt
+   hash](#slot-lint-rule-and-the-canonical-prompt-hash)): is a prompt waiting, and is the
+   slot reading busy?
+3. `mctl-bridge errors`: look at any `delivery_unknown` steer and its reason code.
+4. If the task has no open question and is in flight, a `steer` is the bridge's own way
+   to reach it. Do not queue a duplicate task.
+5. `resolve`, and any slot start, stop or resume, need the authorization the workspace
+   `AGENTS.md` requires (see [Permission boundary](#permission-boundary) and
+   [Slot adapter](#slice-2-slot-adapter)); this section adds no authority. The
+   orchestrator does not press a key in a slot's terminal to work around the bridge.
+
+**Versions and rollout.** The function library version moved from 6 to 7 (`VERSION` in
+`bridge.lua`, `LIBRARY_VERSION` in `store.ts`), and the code requires the matching
+library. It is a different number from the app release version, which is planned as
+0.27.0 and is **not** confirmed installed; do not read one as the other. The lead owns
+deployment, reloading the library and tagging, and does both slots only while they are
+idle with nothing in flight. This document grants no permission to install or deploy.
+Nothing here says an updater has applied the change. The host's `~/slot-approve.py`
+migration from the canonical prompt hash is a separate lead task and is not claimed as
+done.
+
+**What is tested.** The tests run against an isolated Valkey, with the adapter's notify
+and the state file faked. They cover the gate, the transitions, the sweeper and the
+re-steer. They do not show that a real Claude Code wakes after a "No", or that it queues
+an event that arrives mid-turn, and they measure no latency. Operational closure of B13
+needs deployment and a validation on a live slot by someone authorized.
 
 ### Claims
 
@@ -500,7 +601,8 @@ slice 2; until then there is nothing for Claude Code to load.
 - Registers from the hook state file; `CLAUDE_CODE_SESSION_ID` is only the initial
   value. Heartbeat every 10 seconds.
 - Emits through the intent protocol, only into an idle slot, with the `ack_task`
-  instruction attached.
+  instruction attached. The one exception since library 7 is a steer for the task in
+  flight (see [Steer delivery while busy (B13)](#steer-delivery-while-busy-b13)).
 - Tools: `ack_task`, `report_result`, `ask_orchestrator` (returns `question_id` at
   once), `bridge_status`.
 - Applies the inflight rule, so a task's own reply passes while unrelated tasks wait.
