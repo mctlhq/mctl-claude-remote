@@ -790,6 +790,18 @@ function reportRelations(r: Report): void {
       if (pf !== null && compareBytes(pf, e.fact) >= 0) bad("unsorted_set", "checks.evidence");
       pf = e.fact;
     }
+    // 14.6a/b: retained_under_invalid_binding is true ONLY for a substantive (13-list) check actually evaluated
+    // from an individually evaluable snapshot under an invalid binding; false everywhere else. A local structural
+    // relation only (no authenticity claim): evaluated rows carry their evidence refs, expansion rows never do.
+    const derived = (SNAPSHOT_DERIVED_CHECKS as readonly string[]).includes(c.id);
+    const expanded = c.reason_codes.some((x) => x === "evidence_not_evaluable" || x === "evidence_stale");
+    if (c.retained_under_invalid_binding && r.binding_valid) bad("bad_value", "checks.retained_under_invalid_binding");
+    if (c.retained_under_invalid_binding && !derived) bad("bad_value", "checks.retained_under_invalid_binding");
+    if (c.retained_under_invalid_binding && expanded) bad("bad_value", "checks.retained_under_invalid_binding");
+    if (c.retained_under_invalid_binding && c.evidence.length === 0) bad("bad_value", "checks.retained_under_invalid_binding");
+    if (derived && !r.binding_valid && !expanded && c.evidence.length > 0 && !c.retained_under_invalid_binding) {
+      bad("bad_value", "checks.retained_under_invalid_binding");
+    }
     if (c.id.startsWith("binding.") && c.status !== "pass") allBindingPass = false;
   }
   if (r.binding_valid !== allBindingPass) bad("bad_value", "binding_valid");

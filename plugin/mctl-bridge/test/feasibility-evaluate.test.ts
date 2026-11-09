@@ -620,6 +620,110 @@ describe("consumption: malformed reports (A6) return the fixed schema-fail resul
   });
 });
 
+describe("consumption: retained_under_invalid_binding local relations (14.6a/b, 14.7)", () => {
+  const SCHEMA_FAIL = (): J => ({
+    schema: "mctl.feasibility-consumption/1",
+    valid: false,
+    checks: [
+      { id: "consume.report_schema", status: "fail", reason_codes: ["report_schema_invalid"] },
+      ...CONSUME_CHECK_ORDER.slice(1).map((id) => ({ id, status: "unknown", reason_codes: ["report_not_evaluable"] })),
+    ],
+    reasons: ["consume.report_schema:report_schema_invalid", ...CONSUME_CHECK_ORDER.slice(1).map((id) => `${id}:report_not_evaluable`)],
+  });
+  // Set retained on the named checks, then re-digest so only the local relation (not the digest) can reject.
+  function forge(r: J, ids: string[], value: boolean): J {
+    const body = { ...r, checks: r.checks.map((c: J) => (ids.includes(c.id) ? { ...c, retained_under_invalid_binding: value } : c)) };
+    delete body.report_digest;
+    return { ...body, report_digest: digest("report", body) };
+  }
+  const DUP = { "snapshot.facts.attempts_seen.value.ids": ["a-00000000-0000-4000-8000-000000000002"] };
+  const EXPIRED = { "envelope.expires_at_ms": 1789999400000 };
+
+  test("forged report keeps a matching digest: the failure is schema, not digest", () => {
+    const i = inputs();
+    const f = forge(run(i), ["identity.os"], true);
+    expect(digest("report", f, { exclude: ["report_digest"] })).toBe(f.report_digest);
+    expect(consume(f, i)).toEqual(SCHEMA_FAIL());
+  });
+  test.each([["identity.os"], ["binding.schema"], ["estimate.advisory"], ["binding.attempt_unique"]])("valid binding: true on %s is rejected", (id) => {
+    const i = inputs();
+    const r = run(i);
+    expect(r.binding_valid).toBe(true);
+    expect(consume(forge(r, [id], true), i)).toEqual(SCHEMA_FAIL());
+  });
+  test.each([["binding.schema"], ["binding.attempt_unique"], ["binding.not_expired"]])("invalid binding: true on binding row %s is rejected", (id) => {
+    const i = inputs({ set: DUP });
+    const r = run(i);
+    expect(r.binding_valid).toBe(false);
+    expect(consume(forge(r, [id], true), i)).toEqual(SCHEMA_FAIL());
+  });
+  test("invalid binding: true on the advisory row is rejected", () => {
+    const i = inputs({ set: DUP });
+    expect(consume(forge(run(i), ["estimate.advisory"], true), i)).toEqual(SCHEMA_FAIL());
+  });
+  test.each([
+    ["evidence_not_evaluable (wrong slot)", { "snapshot.slot": "slot-y" }],
+    ["evidence_not_evaluable / authority_unverified (unverified provenance)", { "snapshot.provenance.verified": false }],
+    ["evidence_stale (after window)", { now: 1789999950000 }],
+  ])("expanded non-evaluable or stale substantive check cannot be retained: %s", (_n, set) => {
+    const i = inputs({ set });
+    const r = run(i);
+    expect(r.binding_valid).toBe(false);
+    for (const id of SNAPSHOT_DERIVED_CHECKS) {
+      expect(consume(forge(r, [id], true), i)).toEqual(SCHEMA_FAIL());
+    }
+  });
+  test("expansion code with evidence refs present still cannot be retained", () => {
+    const i = inputs({ set: { "snapshot.slot": "slot-y" } });
+    const r = run(i);
+    const body: J = {
+      ...r,
+      checks: r.checks.map((c: J) =>
+        c.id === "slot.idle" ? { ...c, retained_under_invalid_binding: true, evidence: [{ fact: "slot_state", revision: r.capability_revision }] } : c,
+      ),
+    };
+    delete body.report_digest;
+    expect(consume({ ...body, report_digest: digest("report", body) }, i)).toEqual(SCHEMA_FAIL());
+  });
+  test("evaluable-looking substantive check with no evidence refs cannot be retained", () => {
+    const i = inputs({ set: DUP });
+    const r = run(i);
+    const body: J = {
+      ...r,
+      checks: r.checks.map((c: J) => (c.id === "slot.idle" ? { ...c, evidence: [] } : c)),
+    };
+    delete body.report_digest;
+    const f = { ...body, report_digest: digest("report", body) };
+    expect(consume(f, i)).toEqual(SCHEMA_FAIL());
+  });
+  test("invalid binding: an evaluated substantive check reported as not retained is rejected", () => {
+    const i = inputs({ set: DUP });
+    const r = run(i);
+    expect(consume(forge(r, ["slot.idle"], false), i)).toEqual(SCHEMA_FAIL());
+  });
+  test.each([
+    ["duplicate attempt with evaluable facts", DUP],
+    ["task expiry with a fresh snapshot", EXPIRED],
+  ])("positive control: genuine report stays schema-valid, %s", (_n, set) => {
+    const i = inputs({ set });
+    const r = run(i);
+    expect(r.binding_valid).toBe(false);
+    const retained = r.checks.filter((c: J) => c.retained_under_invalid_binding).map((c: J) => c.id);
+    expect(retained).toEqual([...SNAPSHOT_DERIVED_CHECKS]);
+    expect(code(consume(r, i), "consume.report_schema")).toEqual({ id: "consume.report_schema", status: "pass", reason_codes: [] });
+  });
+  test("positive control: duplicate-attempt report is fully consumable", () => {
+    const i = inputs({ set: DUP });
+    expect(consume(run(i), i).valid).toBe(true);
+  });
+  test("positive control: valid-binding report keeps every flag false and passes", () => {
+    const i = inputs();
+    const r = run(i);
+    expect(r.checks.every((c: J) => c.retained_under_invalid_binding === false)).toBe(true);
+    expect(consume(r, i).valid).toBe(true);
+  });
+});
+
 describe("consumption: digest is integrity, not authenticity", () => {
   test("changing a schema-valid report field without re-digesting fails the digest check only", () => {
     const i = inputs();
