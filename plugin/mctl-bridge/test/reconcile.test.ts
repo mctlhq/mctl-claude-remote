@@ -21,6 +21,62 @@ test("promptHash matches slot-pty.py's prompt_hash on the shared fixture", () =>
   expect(promptHash(PROMPT_FIXTURE)).toBe("a0459369c629");
 });
 
+// The canonical prompt identity is the "hash" field slot-pty.py prints beside the prompt (both
+// `prompt` and `state`), computed over the prompt OBJECT the waker also reads from `state`. These
+// fixtures cross the real boundary: Python prints the state JSON (ensure_ascii=False), the waker
+// parses it, and the waker's promptHash must equal the printed hash. Unicode, an astral emoji,
+// U+2028, DEL, control characters, a null question, empty options and empty detail lines included.
+const PTY = path.join(path.dirname(new URL(import.meta.url).pathname), "..", "ops", "slot-pty.py");
+const CANON = {
+  unicode: { prompt: { kind: "permission", question: "Run ‘naïve’ 日本語 🚀   \u007f \u0001 ok?", options: [{ n: 1, text: "Да" }, { n: 2, text: "Yes, and don’t ask again for: é́" }, { n: 3, text: "No" }], detail: ["Bash command", "echo \"q\" \\ / \u001b[0m 🚀", "x"], truncated: true }, hash: "0d805bb692b9" },
+  dialogNull: { prompt: { kind: "dialog", question: null, options: [], detail: [] }, hash: "2233330efddf" },
+  dialogDetail: { prompt: { kind: "dialog", question: null, options: [], detail: ["Esc to cancel", "  indented ", ""] }, hash: "0a3bb51c9424" },
+};
+const havePy = Bun.spawnSync(["python3", "--version"]).exitCode === 0;
+describe.skipIf(!havePy)("canonical prompt hash across Python and TS", () => {
+  // Python side: load slot-pty.py, print the same JSON `slot-pty.py prompt` prints for each prompt.
+  // slot-pty.py runs main() at import (exits on an unknown command), after defining everything.
+  const script = `import importlib.util,json,sys
+path=sys.argv[1];sys.argv=["slot-pty.py","--no-such-command"]
+s=importlib.util.spec_from_file_location("p",path);m=importlib.util.module_from_spec(s)
+try: s.loader.exec_module(m)
+except SystemExit: pass
+for p in json.load(sys.stdin).values():
+    print(json.dumps({"pending":p is not None,"prompt":p,"hash":m.prompt_hash(p)},ensure_ascii=False))`;
+  function pyLines(prompts: Record<string, unknown>): string[] {
+    const r = Bun.spawnSync(["python3", "-I", "-c", script, PTY], { stdin: new TextEncoder().encode(JSON.stringify(prompts)) });
+    expect(r.exitCode).toBe(0);
+    return new TextDecoder().decode(r.stdout).trim().split("\n");
+  }
+  test("the waker hashes the parsed prompt exactly as slot-pty.py printed it", () => {
+    const lines = pyLines(Object.fromEntries(Object.entries(CANON).map(([k, v]) => [k, v.prompt])));
+    const keys = Object.keys(CANON) as (keyof typeof CANON)[];
+    expect(lines.length).toBe(keys.length);
+    lines.forEach((line, i) => {
+      const printed = JSON.parse(line);
+      expect(promptHash(printed.prompt)).toBe(printed.hash);
+      expect(printed.hash).toBe(CANON[keys[i]].hash);
+      expect(promptHash(CANON[keys[i]].prompt)).toBe(CANON[keys[i]].hash);
+    });
+  });
+  test("a changed prompt changes the hash on both sides", () => {
+    const base = CANON.unicode.prompt;
+    const variants: Record<string, unknown> = {
+      question: { ...base, question: base.question + "!" },
+      option: { ...base, options: [base.options[0], { n: 2, text: "Yes" }, base.options[2]] },
+      detail: { ...base, detail: [...base.detail, "extra"] },
+      truncated: { ...base, truncated: false },
+      nullQuestion: { ...base, question: null },
+    };
+    const lines = pyLines(variants);
+    Object.values(variants).forEach((v, i) => {
+      const printed = JSON.parse(lines[i]);
+      expect(printed.hash).not.toBe(CANON.unicode.hash);
+      expect(promptHash(v as Record<string, unknown>)).toBe(printed.hash);
+    });
+  });
+});
+
 describe("parseState", () => {
   test("reads what slot.sh state prints", () => {
     expect(parseState('{"alive":true,"idle_s":3,"prompt_pending":false,"prompt":null}')).toEqual({ alive: true, prompt: null });

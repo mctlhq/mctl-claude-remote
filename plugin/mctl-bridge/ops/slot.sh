@@ -198,6 +198,16 @@ JSON
     # they are denied in both modes (channel rule 13).
     allow='"Read","Edit","Write","Glob","Grep","Bash(git status:*)","Bash(git diff:*)","Bash(git log:*)","Bash(git show:*)","Bash(git branch:*)","Bash(git rev-parse:*)","Bash(git ls-files:*)","Bash(git grep:*)","Bash(git blame:*)","Bash(git fetch origin:*)","Bash(git checkout:*)","Bash(git switch:*)","Bash(git add:*)","Bash(git commit:*)","Bash(git stash:*)","Bash(git restore:*)","Bash(git worktree:*)","Bash(ls:*)","Bash(pwd)","Bash(head:*)","Bash(tail:*)","Bash(wc:*)","Bash(cut:*)","Bash(python3 -m unittest:*)","Bash(python3 -m py_compile:*)","Bash(python3 -I -m unittest:*)","Bash(sh -n:*)","Bash(bash -n:*)","Bash(zsh -n:*)","Bash(shellcheck:*)","Bash(bun test:*)","Bash(bun run typecheck)","Bash(bun run --cwd plugin/mctl-bridge typecheck)","Bash(go build:*)","Bash(go test:*)","Bash(go vet:*)","Bash(gofmt -l:*)","Bash(gofmt -d:*)","Bash(golangci-lint run:*)","Bash(git rebase origin/main)","Bash(git rebase --continue)","Bash(git rebase --abort)","Bash(ps -o pid,ppid,stat,lstart,command -p:*)","Bash(date)","Bash(date -u)"'
     deny='"Bash(git push:*)","Bash(git remote:*)","Bash(git config:*)","Bash(git credential:*)","Bash(gh:*)","Bash(curl:*)","Bash(wget:*)","Bash(ssh:*)","Bash(scp:*)","Bash(sudo:*)","Bash(security:*)","Bash(rm -rf:*)","Bash(rm -fr:*)","Bash(rm -r -f:*)","Bash(rm -f -r:*)","Bash(open:*)","Bash(go *-exec*)","Bash(go *-toolexec*)","Bash(go *-vettool*)","Bash(golangci-lint *--fix*)","Bash(*.ssh*)","Bash(*.config/gh*)","Bash(*.aws*)","Bash(*.git-credentials*)","Bash(*.pw*)","Bash(*keychain*)","Read(~/.ssh/**)","Read(~/.config/gh/**)","Read(~/.aws/**)","Read(**/*.pw)","Bash(pkill:*)","Bash(killall:*)","Bash(ps *e*)","Bash(ps *E*)"'
+    # The slot's own $HOME/.local/bin/golangci-lint run gets the SAME narrow rule as the bare command
+    # (a slot may spell the installed binary by its path), with the same --fix deny. It is the exact
+    # path of this slot's home, nothing wider: no wildcard in the path, no other user's home. The rule
+    # is a command-text pattern, so it is emitted only when the home path holds no character that a
+    # rule treats specially (glob, parenthesis, colon, quote, space...); otherwise the slot keeps just
+    # the bare rule and the path form prompts.
+    if [[ $sh_home =~ '^/[A-Za-z0-9._/-]+$' && $sh_home != *//* && $sh_home != */ && $sh_home != *..* ]]; then
+      allow+=",$(json "Bash($sh_home/.local/bin/golangci-lint run:*)")"
+      deny+=",$(json "Bash($sh_home/.local/bin/golangci-lint *--fix*)")"
+    fi
     if (( BOUNDARY )); then allow+=',"Bash(kill:*)"'; fi
     put $d/settings.json 600 <<JSON
 {"permissions":{"allow":[$allow],"deny":[$deny]},
