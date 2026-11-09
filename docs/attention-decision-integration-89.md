@@ -170,7 +170,8 @@ existing test ties them).
 | Key | Content | Purpose |
 |---|---|---|
 | `attn-ack:<resource>` | hash `digest, revision, head_sha, event_id, kind, at` | **Authoritative** last successfully acknowledged observation. Only suppression source. TTL `attention_ttl_seconds` (proposal: default `dedup_ttl_seconds`) |
-| `attn-pend:<group>:<event_id>` | hash `resource, digest, revision, head_sha, covered, delivered_at` | Staged observation of a delivered notification. **Never** used to suppress. TTL refreshed on each delivery like `ATTEMPT_PREFIX` |
+| `attn-pend:<group>:<event_id>` | hash `resource, digest, revision, head_sha, covered, attempt, obs_fp, delivered_at` | Staged observation of the notification delivered on `attempt`. **Never** used to suppress. Replaced (not NX) and TTL re-set on each delivery attempt, see 5 and 6 |
+| `attn-pend-index:<group>` | ZSET event_id -> expiry | Bounds the number of pending records (`MAX_PENDING_RECORDS`, section 6) |
 | `attn-index:<group>` | ZSET resource -> expiry | Bound on tracked resources (`MAX_TRACKED_RESOURCES`, proposal 1024) |
 
 Expiry, eviction or capacity exhaustion makes the record absent, which is rule 4
@@ -193,11 +194,25 @@ Expiry, eviction or capacity exhaustion makes the record absent, which is rule 4
    - **IGNORE**: audit `attention_ignored`; `_mark_acked(event_id)`; XACK the
      entry. `attn-ack` is **not** modified (the known digest is retained, not
      advanced). No pending record, no emit, no attempt consumed.
-   - **NOTIFY / REQUIRE_APPROVAL**: write `attn-pend` first (idempotent,
-     proposal `SET ... NX EX`), then `_bump_attempt`, then emit. A failed emit
-     keeps the existing release path (`channel.py:425-430`); the pending record
-     is harmless because it suppresses nothing, and the old authoritative
-     digest is unchanged, so retry re-decides to NOTIFY.
+   - **NOTIFY / REQUIRE_APPROVAL**: stage `attn-pend` for *this attempt's exact
+     observation*, then `_bump_attempt`, then emit. Staging is a
+     **replace-write** (`SET`/`HSET` + `EX`, also registering the event in
+     `attn-pend-index`), not `SET NX`: `NX` neither replaces a record staged
+     for a different observation nor refreshes its TTL, so a retry could emit
+     observation B while the old record still holds A and a later ack would
+     commit A. Each record carries `attempt` and `obs_fp` (fingerprint of
+     digest+revision+head_sha); the in-flight item keeps the `obs_fp` it
+     actually emitted. At ack the commit proceeds only if the stored record's
+     `obs_fp` equals the in-flight item's `obs_fp`; mismatch or missing
+     record => no commit (conservative: one extra wake later, never a silent
+     advance to an unseen snapshot). Staging that cannot be done (bound
+     reached, section 6, or write error) => NOTIFY with `unknown:capacity` and
+     nothing staged, so the later ack cannot advance anything.
+   - **Failed emit**: existing release path (`channel.py:425-430`) plus
+     best-effort deletion of that event's `attn-pend` record and index entry.
+     If the cleanup write fails the record is still bounded by section 6.
+     The old authoritative digest is unchanged, so retry re-decides (and
+     re-stages) and NOTIFYs.
 7. **Successful emit is not acknowledgement. The authoritative digest does not
    move at emit.**
 
@@ -212,9 +227,11 @@ On `ack_event`, for the delivered event:
 | `failed` | no |
 | unknown event / not in flight | no (existing `status:"unknown"`) |
 
-Commit is a **compare-and-set**: write only if staged `revision` > stored
-revision (or no record), so a late ack of an older event cannot regress, and an
-ack of event A never touches resource B. Coalesced decisions commit once and
+Commit must be an **atomic conditional advance** (proposal): write only if
+staged `revision` > stored revision (or no record), evaluated server-side in the
+same atomic step as the write, so a late ack of an older event cannot regress,
+and an ack of event A never touches resource B. A read-then-check-then-write
+done by the client is **not** a CAS (see the competing-ack interleaving below). Coalesced decisions commit once and
 mark every `covered_event_ids` entry (dedup marker + XACK).
 
 Order inside `ack()`: (a) CAS digest + dedup marker (+ index update) **atomically**;
@@ -230,27 +247,50 @@ Order inside `ack()`: (a) CAS digest + dedup marker (+ index update) **atomicall
 - failed ack write (Valkey down): tool errors, event stays in flight, a retried
   `ack_event` completes it (existing behaviour, `channel.py:714-716`).
 
-Atomicity needs: **Lua (EVAL) or WATCH/MULTI/EXEC** for the CAS+marker+index
-write. Whether the adapter's ACL user may run `EVAL`/`MULTI` is **unknown**; I
-did not inspect it and propose no ACL change. Fallback without scripting:
-CAS-less ordered writes (digest, then marker, then XACK); the only extra window
-is a concurrent same-group consumer racing two acks on the same resource, which
-degrades to one extra wake, never to a lost one, provided commits only move
-revision forward at read-check time. The implementation task must pick one after
-confirming ACL.
+Atomicity needs: **Lua (EVAL) or WATCH/MULTI/EXEC** (or another separately
+proven serialization mechanism, e.g. a proven single-consumer-per-group
+guarantee) for the conditional-advance+marker+index write. Whether the
+adapter's ACL user may run `EVAL`/`MULTI` is **unknown**; I did not inspect it
+and propose no ACL change or widening.
+
+**There is no safe CAS-less fallback.** Plain ordered writes (read, check,
+write) do not keep revision monotone. Competing-ack interleaving: consumers A
+and B both read stored revision 4; B checks 6>4 and writes 6; A, having passed
+its own read-time check 5>4, then writes 5. The authoritative record has
+regressed from 6 to 5, and an observation at revision 6 would now be judged
+`digest_changed`/stale against the wrong baseline, or a digest from 5 could
+later suppress a change that was already seen at 6. Fixture
+`competing_ack_interleaving_cas_less`.
+
+**If neither atomic conditional advance nor a proven serialization mechanism is
+available, attention suppression stays disabled**: no `attn-ack` is ever
+written, every event follows today's path (NOTIFY, `unknown:no_atomic_advance`
+at most as an audit reason), and no ACL is widened to change that. The
+implementation task must establish the mechanism before anything is enabled.
 
 ### Multi-instance
 
 Keys are group-scoped. Two consumers in one group (reclaim path) may both
 decide NOTIFY for the same resource: two wakes, accepted (at-least-once). The
-revision CAS keeps the authoritative record monotone. Separate groups are fully
+atomic conditional advance (section 5) keeps the authoritative record monotone;
+without it, suppression is disabled rather than approximated. Separate groups are fully
 independent.
 
 ## 6. Caps and TTL
 
-- Pending records: at most one per in-flight event, bounded by
-  `max_inflight` x `MAX_ENTRIES_PER_EVENT`; TTL proposal = `dedup_ttl_seconds`,
-  refreshed on redelivery.
+- Pending records: **in-flight slots do not bound them.** A failed emit
+  releases its slot, so successive distinct event IDs with repeated failures
+  could each leave a record until TTL; TTL bounds age, not count. Proposed
+  bound: `MAX_PENDING_RECORDS` per group (proposal `4 x max_inflight`), tracked
+  in `attn-pend-index`. Cleanup: (a) delete the record on ack and on failed
+  emit (best effort); (b) before staging, prune index entries whose expiry has
+  passed and delete their records; (c) if still at the cap, do not stage and
+  do not evict a live record: the new event NOTIFYs with `unknown:capacity`
+  with nothing staged (so its ack advances nothing). Index writes need the same
+  atomic primitive as section 5; without it attention stays disabled. TTL
+  proposal = `dedup_ttl_seconds`, re-set on every replace-write (the record is
+  replaced per attempt, not refreshed by `NX`). Fixture
+  `repeated_failed_emit_distinct_events`.
 - Tracked resources: `MAX_TRACKED_RESOURCES` per group via `attn-index`
   eviction of the oldest expiry; evicted = absent = NOTIFY (never "unchanged").
 - Provider calls: `MAX_OBSERVE_PER_BATCH`; provider deadline value is OPEN.
@@ -277,7 +317,9 @@ No installer, workflow, dependency or host change is implied.
    `unknown:no_provider` -> NOTIFY (today's behaviour), so a deployment without
    a source is functionally the status quo but **not ready** for attention.
 2. Digest field set and whether a monotone `revision` exists.
-3. ACL: `EVAL`/`MULTI` permission for the adapter user.
+3. Atomic conditional advance (ACL: `EVAL`/`MULTI` for the adapter user) or a
+   separately proven serialization mechanism. Unresolved => suppression
+   disabled, events NOTIFY, no ACL widening.
 4. TOCTOU: the observation is a snapshot; IGNORE means "unchanged versus the
    last acknowledged observation", never "the PR is unchanged now". Claude still
    hydrates from the source of record for every notification.
@@ -289,10 +331,15 @@ No installer, workflow, dependency or host change is implied.
 - `python3 -m unittest discover -s events/tests -p "test_*.py"`: 251 tests ran
   (about 166 s), `FAILED (errors=1)`. The one error is
   `test_telegram_token.RenewTest.test_an_unreadable_error_body_is_a_failed_renewal`
-  (`mock.patch.object` KeyError on `tempfile` wrapper under system Python 3.9,
-  unrelated to the channel code). I did not count skips; Valkey-backed channel
-  tests produced adapter logs, so they executed in this environment.
-- Fixture file validated with `python3 -m json.tool`.
+  (`mock.patch.object` KeyError on `tempfile` wrapper under system Python 3.9).
+  **No baseline run on `main` was made, so whether this error exists
+  independently of this branch is unverified**; this branch changes docs only,
+  which makes a link unlikely but is not a verification. I did not count skips.
+  The suite was not rerun for this revision and the failing test was not fixed.
+- Both files re-checked with `python3 -m json.tool` (fixture) after this
+  revision; the Markdown has no tooling check.
+- Fixture cases are **design expectations**, not executable implementation
+  tests; nothing in the repo consumes them.
 - Not done: no live hydration, network, GitHub, credentials, external-doc fetch,
   or ACL inspection. Fixture expectations are derived from the agreed rules
   above, not from an implementation (none exists).

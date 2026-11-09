@@ -62,7 +62,7 @@
     {
       "id": "failed_emit",
       "given": {"authoritative": {"o/r#8": {"digest": "d1", "revision": 1, "head": "aaa"}}, "event": {"id": "e8", "resource": "o/r#8"}, "observation": {"known": true, "digest": "d2", "revision": 2, "head": "aaa"}, "emit": "raises BrokenPipeError"},
-      "expect": {"wake": false, "ack_entry": false, "attempt_released": true, "authoritative_after": {"o/r#8": {"digest": "d1", "revision": 1, "head": "aaa"}}, "retry_decision": "NOTIFY", "note": "entry stays pending; old digest means redelivery notifies"}
+      "expect": {"wake": false, "ack_entry": false, "attempt_released": true, "pending_record": "deleted best effort on failure; otherwise bounded by max_pending_records and TTL", "authoritative_after": {"o/r#8": {"digest": "d1", "revision": 1, "head": "aaa"}}, "retry_decision": "NOTIFY", "note": "entry stays pending; old digest means redelivery notifies"}
     },
     {
       "id": "emit_ok_then_crash_before_model_ack",
@@ -148,6 +148,21 @@
       "id": "no_provider_configured",
       "given": {"provider": null, "event": {"id": "e50", "type": "github.pull_request.updated", "resource": "o/r#50"}},
       "expect": {"decision": "NOTIFY", "reason": "unknown:no_provider", "wake": true, "note": "equals today's behaviour; deployment not attention-ready"}
+    },
+    {
+      "id": "competing_ack_interleaving_cas_less",
+      "given": {"authoritative": {"o/r#60": {"digest": "d4", "revision": 4, "head": "aaa"}}, "consumers": ["A", "B"], "in_flight": [{"consumer": "A", "event": "e60a", "resource": "o/r#60", "staged": {"digest": "d5", "revision": 5, "head": "aaa"}}, {"consumer": "B", "event": "e60b", "resource": "o/r#60", "staged": {"digest": "d6", "revision": 6, "head": "aaa"}}], "interleaving": ["A reads stored revision 4", "B reads stored revision 4", "B check 6>4 passes, writes revision 6", "A check 5>4 passes (read-time), writes revision 5"], "mechanism": "client-side read/check/write without atomic conditional advance"},
+      "expect": {"cas_less_result": {"o/r#60": {"digest": "d5", "revision": 5, "head": "aaa"}}, "violation": "revision regressed 6 -> 5; plain ordered writes are NOT a safe fallback", "required": "atomic conditional advance (server-side compare+write) or a separately proven serialization mechanism", "with_atomic_advance_authoritative_after": {"o/r#60": {"digest": "d6", "revision": 6, "head": "aaa"}}, "mechanism_unavailable": {"suppression": "disabled", "attn_ack_written": false, "decision_for_events": "NOTIFY", "acl_widened": false}, "note": "design expectation, not an executable test"}
+    },
+    {
+      "id": "repeated_failed_emit_distinct_events",
+      "given": {"max_inflight": 4, "max_pending_records": 16, "authoritative": {}, "events": "20 distinct event ids on 20 distinct resources, each emit raises BrokenPipeError, each failure releases its in-flight slot", "cleanup_write": "fails for all (worst case)"},
+      "expect": {"pending_records_max": 16, "slots_do_not_bound_pending": true, "first_16": "staged, emit fails, slot released, record left until TTL", "events_17_to_20": {"decision": "NOTIFY", "reason": "unknown:capacity", "staged": false, "note": "no live record evicted; nothing staged so a later ack advances nothing"}, "ttl_bounds_age_only": true, "when_cleanup_succeeds": "record and index entry deleted on failed emit, so count stays near 0", "authoritative_after": {}, "note": "design expectation, not an executable test"}
+    },
+    {
+      "id": "retry_after_failed_emit_with_different_observation",
+      "given": {"authoritative": {"o/r#61": {"digest": "d1", "revision": 1, "head": "aaa"}}, "event": {"id": "e61", "resource": "o/r#61"}, "attempt_1": {"observation": {"digest": "dA", "revision": 2, "head": "aaa"}, "staged": true, "emit": "fails"}, "attempt_2": {"observation": {"digest": "dB", "revision": 3, "head": "aaa"}, "emit": "succeeds"}, "pending_staging": "SET NX would leave dA in place and not refresh TTL (rejected design)", "ack_event": {"outcome": "handled"}},
+      "expect": {"staging": "replace-write per attempt; record now holds dB with attempt=2 and obs_fp of dB", "commit": {"o/r#61": {"digest": "dB", "revision": 3, "head": "aaa"}}, "never_committed": "dA", "stale_record_case": "if the stored obs_fp differs from the in-flight item's emitted obs_fp (replace lost or raced), no commit and a later identical observation NOTIFYs again", "ttl": "re-set by the replace-write", "note": "design expectation, not an executable test"}
     }
   ]
 }
