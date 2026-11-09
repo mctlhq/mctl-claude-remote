@@ -417,6 +417,172 @@ describe("parseStrict: raw JSON text", () => {
   });
 });
 
+describe("parseStrict: object key ASCII rule matches canonicalize", () => {
+  const keyCases: [string, string][] = [
+    ["raw accented key", '{"é":1}'],
+    ["escaped accented key", '{"\\u00e9":1}'],
+    ["raw astral key", '{"\u{1F600}":1}'],
+    ["escaped astral key", '{"\\ud83d\\ude00":1}'],
+    ["nested object key", '{"a":{"é":1}}'],
+    ["key inside array of objects", '[{"a":1},{"\\u00e9":2}]'],
+    ["deep nested key", '{"a":[{"b":{"\u{1F600}":true}}]}'],
+  ];
+  for (const [name, text] of keyCases) {
+    test(`rejects ${name} with bad_key`, () => {
+      expect(codeOf(() => parseStrict(text))).toBe("bad_key");
+    });
+  }
+
+  test("bad_key error does not leak the key", () => {
+    try {
+      parseStrict('{"SECRET-é":1}');
+      throw new Error("expected throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(CanonicalError);
+      expect((e as CanonicalError).message).toBe("bad_key");
+    }
+  });
+
+  test("non-ASCII string VALUES are still accepted, and ASCII escaped keys still decode", () => {
+    expect(parseStrict('{"a":"é\u{1F600}","b":["\\u00e9"]}')).toEqual({ a: "é\u{1F600}", b: ["é"] });
+    expect(parseStrict('{"\\u0061":1}')).toEqual({ a: 1 });
+  });
+
+  test("parser and encoder agree on a non-ASCII key", () => {
+    expect(codeOf(() => canonicalize({ é: 1 }))).toBe("bad_key");
+    expect(codeOf(() => parseStrict('{"é":1}'))).toBe("bad_key");
+  });
+});
+
+describe("shared depth rule: at most MAX_DEPTH (64) nested containers", () => {
+  type Kind = "a" | "o";
+  const pattern = (name: string, n: number): Kind[] => {
+    const out: Kind[] = [];
+    for (let i = 0; i < n; i++) out.push(name === "array" ? "a" : name === "object" ? "o" : i % 2 === 0 ? "a" : "o");
+    return out;
+  };
+  // innermost container holds `leaf` (undefined = empty container)
+  const buildText = (kinds: Kind[], leaf: string | undefined): string => {
+    let s = "";
+    for (let i = kinds.length - 1; i >= 0; i--) {
+      const inner = i === kinds.length - 1 ? leaf : s;
+      s = kinds[i] === "a" ? `[${inner ?? ""}]` : inner === undefined ? "{}" : `{"k":${inner}}`;
+    }
+    return s;
+  };
+  const buildValue = (kinds: Kind[], leaf: unknown): unknown => {
+    let v: unknown = leaf;
+    for (let i = kinds.length - 1; i >= 0; i--) {
+      const empty = i === kinds.length - 1 && leaf === undefined;
+      v = kinds[i] === "a" ? (empty ? [] : [v]) : empty ? {} : { k: v };
+    }
+    return v;
+  };
+
+  for (const shape of ["array", "object", "mixed"]) {
+    for (const [leafName, leafText, leafValue] of [
+      ["empty", undefined, undefined],
+      ["primitive", "1", 1],
+    ] as const) {
+      test(`${shape} nesting, ${leafName} innermost: 64 accepted and round-trips`, () => {
+        const kinds = pattern(shape, 64);
+        const text = buildText(kinds, leafText);
+        const parsed = parseStrict(text);
+        expect(canonicalize(parsed)).toBe(text);
+        expect(canonicalize(buildValue(kinds, leafValue))).toBe(text);
+      });
+      test(`${shape} nesting, ${leafName} innermost: 65 rejected by parser and encoder with too_deep`, () => {
+        const kinds = pattern(shape, 65);
+        expect(codeOf(() => parseStrict(buildText(kinds, leafText)))).toBe("too_deep");
+        expect(codeOf(() => canonicalize(buildValue(kinds, leafValue)))).toBe("too_deep");
+      });
+    }
+  }
+
+  test("a primitive inside the 64th container is allowed; a 65th empty container is not", () => {
+    expect(canonicalize(buildValue(pattern("array", 64), "x"))).toBe(buildText(pattern("array", 64), '"x"'));
+    expect(codeOf(() => canonicalize(buildValue(pattern("array", 64), []))) ).toBe("too_deep");
+    expect(codeOf(() => canonicalize(buildValue(pattern("object", 64), {})))).toBe("too_deep");
+  });
+});
+
+describe("object own-property hardening", () => {
+  test("non-enumerable own data key is rejected, not silently omitted", () => {
+    const o: Record<string, unknown> = { a: 1 };
+    Object.defineProperty(o, "hidden", { value: 2, enumerable: false, configurable: true, writable: true });
+    expect(codeOf(() => canonicalize(o))).toBe("wrong_type");
+    expect(codeOf(() => canonicalize({ x: [o] }))).toBe("wrong_type");
+    expect(codeOf(() => digest("report", o))).toBe("wrong_type");
+  });
+
+  test("non-enumerable getter is rejected and never invoked", () => {
+    let calls = 0;
+    const o: Record<string, unknown> = { a: 1 };
+    Object.defineProperty(o, "hidden", {
+      enumerable: false,
+      get() {
+        calls++;
+        return 1;
+      },
+    });
+    expect(codeOf(() => canonicalize(o))).toBe("wrong_type");
+    expect(codeOf(() => canonicalize({ n: o }))).toBe("wrong_type");
+    expect(calls).toBe(0);
+  });
+
+  test("non-enumerable key on a null-prototype object is rejected", () => {
+    const o = Object.create(null) as Record<string, unknown>;
+    Object.defineProperty(o, "h", { value: 1, enumerable: false });
+    expect(codeOf(() => canonicalize(o))).toBe("wrong_type");
+  });
+
+  test("ordinary, null-prototype and frozen objects still encode", () => {
+    const np = Object.create(null) as Record<string, unknown>;
+    np.b = 1;
+    np.a = 2;
+    expect(canonicalize(np)).toBe('{"a":2,"b":1}');
+    expect(canonicalize(Object.freeze({ b: Object.freeze({ d: 1, c: 2 }), a: 1 }))).toBe('{"a":1,"b":{"c":2,"d":1}}');
+  });
+
+  test("top-level exclusion still works and does not read the excluded member", () => {
+    let calls = 0;
+    const o: Record<string, unknown> = { a: 1 };
+    Object.defineProperty(o, "report_digest", {
+      enumerable: false,
+      get() {
+        calls++;
+        return "x";
+      },
+    });
+    expect(canonicalize(o, { exclude: ["report_digest"] })).toBe('{"a":1}');
+    expect(calls).toBe(0);
+  });
+
+  test("exclusion does not extend to nested data or hide other hidden keys", () => {
+    const nested: Record<string, unknown> = { a: 1 };
+    Object.defineProperty(nested, "report_digest", { value: "x", enumerable: false });
+    expect(codeOf(() => canonicalize({ n: nested }, { exclude: ["report_digest"] }))).toBe("wrong_type");
+    const top: Record<string, unknown> = { a: 1 };
+    Object.defineProperty(top, "other", { value: "x", enumerable: false });
+    expect(codeOf(() => canonicalize(top, { exclude: ["report_digest"] }))).toBe("wrong_type");
+  });
+});
+
+describe("parseStrict: negative non-finite tokens", () => {
+  test("-NaN is forbidden_number like NaN, Infinity and -Infinity", () => {
+    for (const tok of ["NaN", "Infinity", "-Infinity", "-NaN"]) {
+      expect(codeOf(() => parseStrict(tok))).toBe("forbidden_number");
+      expect(codeOf(() => parseStrict(`{"a":[${tok}]}`))).toBe("forbidden_number");
+    }
+  });
+
+  test("other malformed tokens stay bad_json", () => {
+    for (const tok of ["-nan", "-NaNx", "-Nope", "-", "-N", "NaNx"]) {
+      expect(codeOf(() => parseStrict(tok))).toBe("bad_json");
+    }
+  });
+});
+
 describe("determinism and immutability", () => {
   const envelope = () => ({
     z: [3, 1, 2],

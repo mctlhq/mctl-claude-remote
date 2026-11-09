@@ -122,8 +122,16 @@ function readDenseArray(v: unknown[]): unknown[] {
   return items;
 }
 
+/**
+ * The one depth rule, shared by encoder and parser: `depth` is the number of containers already
+ * open around a container about to be entered (root container: 0). At most MAX_DEPTH containers may
+ * nest, so entering one at depth >= MAX_DEPTH is too deep. Primitives never count.
+ */
+function checkContainerDepth(depth: number): void {
+  if (depth >= MAX_DEPTH) fail("too_deep");
+}
+
 function encodeValue(v: unknown, depth: number, seen: Set<object>, opts: CanonicalOptions, field: string | null): string {
-  if (depth > MAX_DEPTH) fail("too_deep");
   switch (typeof v) {
     case "string":
       if (field !== null && opts.setFields?.has(field)) fail("wrong_type");
@@ -140,6 +148,7 @@ function encodeValue(v: unknown, depth: number, seen: Set<object>, opts: Canonic
       return fail("wrong_type"); // undefined, bigint, function, symbol
   }
   if (v === null) return fail("null_value");
+  checkContainerDepth(depth);
   if (seen.has(v)) return fail("too_deep");
   const isSet = field !== null && opts.setFields?.has(field) === true;
   seen.add(v);
@@ -163,15 +172,21 @@ function encodeValue(v: unknown, depth: number, seen: Set<object>, opts: Canonic
     if (isSet) fail("wrong_type");
     const proto = Object.getPrototypeOf(v);
     if (proto !== Object.prototype && proto !== null) fail("wrong_type");
-    if (Object.getOwnPropertySymbols(v).length > 0) fail("wrong_type");
     const record = v as Record<string, unknown>;
     const skip = depth === 0 ? (opts.exclude ?? []) : [];
-    const keys = Object.keys(record).filter((k) => !skip.includes(k));
-    for (const k of keys) {
+    const own = Reflect.ownKeys(record);
+    for (const k of own) {
+      if (typeof k === "symbol") fail("wrong_type");
+    }
+    const keys: string[] = [];
+    for (const k of own as string[]) {
+      if (skip.includes(k)) continue; // explicit top-level exclusion: never inspected or read
       // ASCII keys only (design section 4 rule 2); this also rejects lone surrogates in keys.
       if (!/^[\x00-\x7f]*$/.test(k)) fail("bad_key");
+      // Descriptors first: accessors and hidden (non-enumerable) members are rejected, never read or omitted.
       const d = Object.getOwnPropertyDescriptor(record, k);
-      if (!d || d.get || d.set) fail("wrong_type");
+      if (!d || d.get || d.set || !("value" in d) || d.enumerable !== true) fail("wrong_type");
+      keys.push(k);
     }
     keys.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0)); // ASCII: code-unit order == UTF-8 byte order
     return "{" + keys.map((k) => encodeString(k) + ":" + encodeValue(record[k], depth + 1, seen, opts, k)).join(",") + "}";
@@ -281,6 +296,7 @@ export function parseStrict(text: string): unknown {
     const start = pos;
     while (pos < n && /[0-9A-Za-z.+\-]/.test(text[pos]!)) pos++;
     const tok = text.slice(start, pos);
+    if (tok === "-NaN") fail("forbidden_number");
     if (!/[0-9]/.test(tok)) fail("bad_json");
     if (!INT_RE.test(tok)) fail("forbidden_number");
     if (tok === "-0") fail("forbidden_number");
@@ -294,7 +310,7 @@ export function parseStrict(text: string): unknown {
     if (pos >= n) fail("bad_json");
     const c = text[pos]!;
     if (c === "{") {
-      if (depth >= MAX_DEPTH) fail("too_deep");
+      checkContainerDepth(depth);
       pos++;
       const obj: Record<string, unknown> = {};
       const keys = new Set<string>();
@@ -307,6 +323,7 @@ export function parseStrict(text: string): unknown {
         skip();
         if (text[pos] !== '"') fail("bad_json");
         const k = parseString();
+        if (!/^[\x00-\x7f]*$/.test(k)) fail("bad_key"); // same ASCII key rule as canonicalize, after escape decoding
         if (keys.has(k)) fail("duplicate_key");
         keys.add(k);
         skip();
@@ -327,7 +344,7 @@ export function parseStrict(text: string): unknown {
       }
     }
     if (c === "[") {
-      if (depth >= MAX_DEPTH) fail("too_deep");
+      checkContainerDepth(depth);
       pos++;
       const arr: unknown[] = [];
       skip();
