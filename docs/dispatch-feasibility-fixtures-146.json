@@ -444,6 +444,192 @@
       }
     ]
   },
+  "proposals": {
+    "status": "PROPOSED / PENDING OWNER DECISION (design doc section 13, gate G9). Illustrative only: not approved, not executable readiness proof, not a conformance claim. Every case names the proposal it illustrates; none of it changes the published design vectors or the legacy cases above.",
+    "provenance_note": "All facts are injected synthetic claims for pure tests. 'verified' is a declaration, not a runtime grant. Digests are symbolic labels.",
+    "proposed_schema_baseline": {
+      "illustrates": ["A1", "A2", "OS", "A3", "A4"],
+      "description": "A future proposed schema baseline, separate from the legacy baseline. Its envelope body is byte-identical to the legacy baseline envelope (design vector B, sha256 43e77d4fafa97cc56fe831d1bdcb145468f821b940bdf1519a074157c9527880), and its allowed_files pattern 'docs/example-146.md' is a valid A1 exact path. The snapshot differs from the legacy summary (closed value schemas plus artifact_contract and authority_decision), so its digest is symbolic and is NOT claimed to equal any legacy digest.",
+      "capability_digest": "digest:cap-P-rev-1 (symbolic)",
+      "snapshot": {
+        "schema": "mctl.capability-snapshot/1",
+        "snapshot_id": "snap-p-1",
+        "revision": 1,
+        "slot": "slot-x",
+        "slot_epoch": "7",
+        "captured_at_ms": 1789999000000,
+        "expires_at_ms": 1789999900000,
+        "provenance": { "source_kind": "synthetic", "issuer_ref": "issuer-1", "verified": true },
+        "facts": {
+          "os_identity": { "status": "known", "observed_ms": 1789999000000, "value": { "trusted": true } },
+          "permission_profile": { "status": "known", "observed_ms": 1789999000000, "value": { "digest": "0000000000000000000000000000000000000000000000000000000000000001" } },
+          "command_decisions": { "status": "known", "observed_ms": 1789999000000, "value": { "entries": [ { "command": "cmd:git-diff-check", "decision": "allowed" } ] } },
+          "repo_base": { "status": "known", "observed_ms": 1789999000000, "value": { "sha": "0123456789abcdef0123456789abcdef01234567" } },
+          "worktree": { "status": "known", "observed_ms": 1789999000000, "value": { "clean": true } },
+          "ownership": { "status": "known", "observed_ms": 1789999000000, "value": { "conflict": false } },
+          "dependencies": { "status": "known", "observed_ms": 1789999000000, "value": { "entries": [] } },
+          "fixtures": { "status": "known", "observed_ms": 1789999000000, "value": { "entries": [ { "id": "fixture:synthetic-a", "available": true } ] } },
+          "slot_state": { "status": "known", "observed_ms": 1789999000000, "value": { "idle": true } },
+          "attempts_seen": { "status": "known", "observed_ms": 1789999000000, "value": { "ids": [] } },
+          "limits": { "status": "known", "observed_ms": 1789999000000, "value": { "max_changed_files": 10, "max_wall_ms": 7200000 } },
+          "path_policy": { "status": "known", "observed_ms": 1789999000000, "value": { "forbidden": [] } },
+          "mandatory_writes": { "status": "known", "observed_ms": 1789999000000, "value": { "paths": ["docs/example-146.md"] } },
+          "artifact_contract": { "status": "known", "observed_ms": 1789999000000, "value": { "artifact_kind": "handoff_bundle", "trailer": "Agent: claude" } },
+          "authority_decision": { "status": "known", "observed_ms": 1789999000000, "value": { "kind": "operator_decision", "id": "decision-0001", "decision": "allowed" } }
+        }
+      },
+      "evaluated_at_ms": 1789999500000,
+      "traceability": "Legacy case ids (allowed_small_task, forbidden_path, ...) remain defined only against the legacy baseline above; proposal cases below carry a legacy_case reference where a counterpart exists."
+    },
+    "a1_path_grammar": {
+      "illustrates": "A1",
+      "pattern_validity": [
+        { "pattern": "docs/example-146.md", "result": "valid exact path" },
+        { "pattern": "docs/", "result": "valid directory prefix" },
+        { "pattern": "docs/**", "result": "valid terminal alias, same meaning as docs/" },
+        { "pattern": "/etc/x", "result": "input error (absolute)" },
+        { "pattern": "docs/../x", "result": "input error (traversal)" },
+        { "pattern": "docs//x", "result": "input error (empty segment)" },
+        { "pattern": "docs/./x", "result": "input error (dot segment)" },
+        { "pattern": "docs\\x", "result": "input error (backslash)" },
+        { "pattern": "docs/*.md", "result": "input error (other glob)" },
+        { "pattern": "docs/**/x", "result": "input error (** not terminal)" }
+      ],
+      "matching": [
+        { "scope": "docs/", "path": "docs/a.md", "member": true },
+        { "scope": "docs/", "path": "docs-x/a.md", "member": false, "note": "segment boundary" },
+        { "scope": "docs/", "path_policy_forbidden": ["docs/secret/"], "expected": { "authority.paths": "fail", "code": "path_forbidden" }, "note": "forbidden descendant inside allowed directory blocks" },
+        { "scope": "docs/a/", "other_scope": "docs/", "intersects": true, "note": "symmetric prefix intersection" }
+      ],
+      "alternatives": {
+        "A1-alt-1": "no dir/** alias: 'docs/**' becomes input error; everything else identical.",
+        "A1-alt-2": "defer grammar: any non-exact pattern makes authority.paths unknown (path_pattern_unsupported); with allowed_files ['docs/'] the verdict is uncertain."
+      }
+    },
+    "a2_missing_entries": {
+      "illustrates": "A2",
+      "cases": [
+        {
+          "id": "p_command_entry_missing",
+          "legacy_case": "matcher_not_reproducible (analogue)",
+          "mutation": "facts.command_decisions = known with entries [] while envelope requires cmd:git-diff-check",
+          "check_status_overrides": { "authority.commands": "unknown" },
+          "expected": { "binding_valid": true, "verdict": "uncertain", "reasons": ["authority.commands:command_decision_unknown"] },
+          "note": "A missing entry is unknown, never an implicit pass."
+        },
+        {
+          "id": "p_fixture_entry_missing",
+          "mutation": "facts.fixtures = known with entries []",
+          "check_status_overrides": { "fixtures.data": "unknown" },
+          "expected": { "binding_valid": true, "verdict": "uncertain", "reasons": ["fixtures.data:fixture_unknown"] }
+        },
+        {
+          "id": "p_value_present_for_unknown",
+          "mutation": "facts.slot_state = {status: unknown, observed_ms: 1789999000000, value: {idle: true}}",
+          "expected": { "result": "input error (A5)", "input": "snapshot", "code": "bad_value", "path": "facts.slot_state.value" },
+          "note": "value must be missing unless status is known."
+        }
+      ],
+      "alternative": "A2-alt: facts carry only {status, observed_ms, value_digest}; every fact-dependent check is unknown, so each case above is uncertain."
+    },
+    "object_set": {
+      "illustrates": "OS",
+      "cases": [
+        {
+          "id": "os_duplicate_id_different_value",
+          "mutation": "facts.fixtures.value.entries = [{id: fixture:synthetic-a, available: true}, {id: fixture:synthetic-a, available: false}]",
+          "expected": { "result": "input error (A5)", "input": "snapshot", "code": "duplicate_identity", "path": "facts.fixtures.value.entries.id" },
+          "note": "Rejected even though other members differ; the encoder itself would encode both as-is."
+        },
+        {
+          "id": "os_utf8_ordering",
+          "valid_order": ["cmd:Z", "cmd:a"],
+          "invalid_order": ["cmd:a", "cmd:Z"],
+          "expected_invalid": { "code": "unsorted_set" },
+          "note": "Bytewise UTF-8: 'Z' (0x5a) sorts before 'a' (0x61); a prefix sorts before its extensions."
+        },
+        {
+          "id": "os_ordered_array_preserved",
+          "mutation": "envelope.dependencies = [{id: dep-2, kind: review, step: automatic}, {id: dep-1, kind: review, step: automatic}]",
+          "expected": { "result": "accepted", "encoded_order": "dep-2 then dep-1" },
+          "note": "TaskEnvelope.dependencies stays an ordered array; no sort, no dedup, no identity validation unless separately proposed."
+        }
+      ],
+      "alternative": "OS-alt: no object-set schema; duplicates are still rejected by an explicit uniqueness check, but the unsorted_set code does not exist and permuted entries produce different digests."
+    },
+    "a3_artifact_and_worktree": {
+      "illustrates": "A3",
+      "cases": [
+        { "id": "p_artifact_unknown", "mutation": "facts.artifact_contract = {status: unknown, observed_ms: 1789999000000}", "check_status_overrides": { "contract.artifact": "unknown" }, "expected": { "binding_valid": true, "verdict": "uncertain", "reasons": ["contract.artifact:artifact_evidence_unknown"] } },
+        { "id": "p_artifact_trailer_contradiction", "mutation": "facts.artifact_contract.value.trailer = 'Agent: other'", "check_status_overrides": { "contract.artifact": "fail" }, "expected": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["contract.artifact:artifact_contract_mismatch"] } },
+        { "id": "p_worktree_dirty", "mutation": "facts.worktree.value.clean = false", "check_status_overrides": { "ownership.files": "fail" }, "expected": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["ownership.files:worktree_dirty"] } },
+        { "id": "p_dirty_and_conflict", "mutation": "facts.worktree.value.clean = false; facts.ownership.value.conflict = true", "check_status_overrides": { "ownership.files": "fail" }, "expected": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["ownership.files:ownership_conflict", "ownership.files:worktree_dirty"] }, "note": "legacy_case conflict_files_owner; distinct reasons, ascending by code." },
+        { "id": "p_worktree_unknown", "mutation": "facts.worktree = {status: unknown, observed_ms: 1789999000000}", "check_status_overrides": { "ownership.files": "unknown" }, "expected": { "binding_valid": true, "verdict": "uncertain", "reasons": ["ownership.files:worktree_unknown"] } }
+      ],
+      "alternative": "A3-alt: no artifact_contract/worktree facts; contract.artifact is always unknown, so every case is uncertain with contract.artifact:artifact_evidence_unknown."
+    },
+    "a4_authority": {
+      "illustrates": "A4",
+      "cases": [
+        { "id": "p_authority_allowed_bound", "envelope_ref": "operator_decision/decision-0001", "evidence": "operator_decision/decision-0001 allowed", "check_status_overrides": {}, "expected": { "verdict": "feasible", "reasons": [] }, "note": "same as proposed_schema_baseline." },
+        { "id": "p_authority_denied_bound", "envelope_ref": "operator_decision/decision-0001", "evidence": "operator_decision/decision-0001 denied", "check_status_overrides": { "authority.reference": "fail" }, "expected": { "verdict": "unauthorized", "reasons": ["authority.reference:authority_denied"] } },
+        { "id": "p_authority_id_mismatch", "envelope_ref": "operator_decision/decision-0001", "evidence": "operator_decision/decision-0002 allowed", "check_status_overrides": { "authority.reference": "unknown" }, "expected": { "verdict": "uncertain", "reasons": ["authority.reference:authority_evidence_mismatch"] } },
+        { "id": "p_none_without_evidence", "envelope_ref": "none/none", "evidence": "missing", "check_status_overrides": { "authority.reference": "unknown" }, "expected": { "verdict": "uncertain", "reasons": ["authority.reference:authority_unverified"] }, "note": "kind none alone is neither pass nor denial." },
+        { "id": "p_none_with_not_required", "envelope_ref": "none/none", "evidence": "none/none not_required, verified", "check_status_overrides": {}, "expected": { "verdict": "feasible", "reasons": [] } },
+        { "id": "p_not_required_cannot_bypass_ref", "envelope_ref": "operator_decision/decision-0001", "evidence": "none/none not_required", "check_status_overrides": { "authority.reference": "unknown" }, "expected": { "verdict": "uncertain", "reasons": ["authority.reference:authority_evidence_mismatch"] } }
+      ],
+      "alternative": "A4-alt: kind none is always unknown (authority_applicability_unknown); p_none_with_not_required becomes uncertain, other cases unchanged."
+    },
+    "a5_input_errors": {
+      "illustrates": "A5",
+      "cases": [
+        { "id": "p_malformed_lexical", "input": "envelope raw text with duplicate key", "expected": { "result": "throw FeasibilityInputError", "input": "envelope", "code": "duplicate_key", "path": "(root)" }, "note": "No report, no sentinel ids or digests, offending key not echoed." },
+        { "id": "p_schema_bad_range", "input": "snapshot captured_at_ms > expires_at_ms", "expected": { "result": "throw FeasibilityInputError", "input": "snapshot", "code": "bad_range", "path": "expires_at_ms" } },
+        { "id": "p_clock_not_integer", "input": "nowMs = 1.5", "expected": { "result": "throw FeasibilityInputError", "input": "clock", "code": "forbidden_number", "path": "nowMs" } },
+        { "id": "p_valid_stale", "legacy_case": "task_and_capability_both_expired", "input": "well-formed, verified, same slot, past window", "expected": { "result": "report", "verdict": "uncertain", "note": "stale is a valid report, not an error; binding.schema is pass." } },
+        { "id": "p_valid_wrong_slot", "legacy_case": "wrong_slot", "input": "well-formed snapshot for slot-y", "expected": { "result": "report", "verdict": "uncertain" } }
+      ],
+      "alternative": "A5-alt: malformed cases return a sanitized schema-failure report; the sentinel/binding policy is undesigned and these cases have no defined expected result."
+    },
+    "a6_malformed_report_consumption": {
+      "illustrates": "A6",
+      "cases": [
+        {
+          "id": "p_consume_schema_invalid_report",
+          "description": "The presented report has an unusable identity and digest (task_id is not a string, report_digest is not 64 hex). None of its fields are read or echoed.",
+          "mutation": "report.task_id = 42; report.report_digest = 'zzz'",
+          "expected": {
+            "valid": false,
+            "checks_in_order": [
+              { "check": "consume.report_schema", "status": "fail" },
+              { "check": "consume.report_digest", "status": "unknown" },
+              { "check": "consume.report_expired", "status": "unknown" },
+              { "check": "consume.identity", "status": "unknown" },
+              { "check": "consume.task_digest", "status": "unknown" },
+              { "check": "consume.capability_digest", "status": "unknown" },
+              { "check": "consume.capability_revision", "status": "unknown" },
+              { "check": "consume.trust", "status": "unknown" }
+            ],
+            "reasons": [
+              "consume.report_schema:report_schema_invalid",
+              "consume.report_digest:report_not_evaluable",
+              "consume.report_expired:report_not_evaluable",
+              "consume.identity:report_not_evaluable",
+              "consume.task_digest:report_not_evaluable",
+              "consume.capability_digest:report_not_evaluable",
+              "consume.capability_revision:report_not_evaluable",
+              "consume.trust:report_not_evaluable"
+            ]
+          },
+          "note": "report_not_evaluable is not a digest or revision mismatch."
+        },
+        { "id": "p_consume_malformed_envelope", "input": "presented envelope malformed", "expected": { "result": "throw FeasibilityInputError (A5)", "input": "envelope" } },
+        { "id": "p_consume_valid_report_mismatch", "legacy_case": "same_epoch_fresh_capability_change", "expected": { "valid": false, "reasons": ["consume.capability_digest:capability_digest_mismatch", "consume.capability_revision:capability_revision_mismatch"] }, "note": "Schema-valid report: all eight checks run; mismatch is distinct from expiry." }
+      ],
+      "alternative": "A6-alt: a schema-invalid report makes validate_report_for_consumption throw FeasibilityInputError (input: report); there is no ConsumptionResult for it."
+    },
+    "snapshot_derived_list_note": "Committed list = 11 checks (meta.snapshot_derived_checks, unchanged). Adopting A3 adds contract.artifact; adopting A4 adds authority.reference (keeping authority_unverified for untrusted evidence). Count is derived from adopted proposals (11, 12 or 13), not hard-coded."
+  },
   "properties": [
     {
       "id": "identical_input_identical_json",

@@ -5,6 +5,19 @@ runtime code, no dispatch/reservation/launch/ack change, and no enforcement. The
 [dispatch-feasibility-fixtures-146.json](dispatch-feasibility-fixtures-146.json) holds *illustrative
 design expectations*; they are not executable feature tests and not evidence of readiness.
 
+**Status legend (read this first).** Four kinds of statement appear in this document and must not be confused:
+
+| Label | Meaning |
+|---|---|
+| **IMPLEMENTED (#169)** | A fact about merged code: only `plugin/mctl-bridge/src/feasibility/canonical.ts` (MCTL-CJ1 encoder, strict parser, digest). Nothing else (no evaluator, no consumption function, no schema validator) exists. |
+| **DESIGN COMMITMENT** | Text of this design as already reviewed and merged before this amendment. Still design only, not implemented. |
+| **PROPOSED / PENDING OWNER DECISION** | New contracts A1–A6 and the object-set rule, collected in section 13, each with a concrete alternative. Not approved. Authoring or merging this document is **not** operator approval to implement them. Where a legacy sentence is affected, it carries a `[PENDING A#]` marker pointing to section 13. |
+| **FUTURE APPROVAL** | Operator decisions that do not exist yet (gate G8/G9): approval of the proposals, then of any implementation. All runtime work is held. |
+
+Pending-rule index: A1 path grammar (13.1), A2 closed fact schemas (13.2), object-set rule (13.3), A3 artifact
+and worktree evidence (13.4), A4 authority evidence (13.5), A5 input error behavior (13.6), A6 malformed-report
+consumption (13.7), consequential list updates (13.8).
+
 Refs #146 (not "closes"). Order of work stays: **B1** design / dry-run / report, then a separate owner
 decision, then **B2** atomic dispatch enforcement (section 11). The report contracts here are independent
 of the handoff (#127), context (#107) and operator-attention (#130) contracts, and a preflight PASS is
@@ -70,7 +83,7 @@ Fixed ASCII keys, all required (absence of a feature is expressed with an empty 
 | `repo` | string | `owner/name` |
 | `worktree_label` | string | opaque label, never a filesystem path |
 | `base` | object | `branch`, `base_sha` (40 lowercase hex) |
-| `allowed_files` | **set** of strings | repo-relative path patterns: a permission *scope* (what output may touch), never a count of required writes |
+| `allowed_files` | **set** of strings | repo-relative path patterns: a permission *scope* (what output may touch), never a count of required writes. The pattern grammar is undefined in the committed design; **[PENDING A1]** (13.1) |
 | `expected` | object | `artifact_kind`, `branch`, `trailer` |
 | `required_commands` | **set** of strings | logical command ids (`cmd:...`), not shell text |
 | `fixtures` | **set** of strings | logical fixture/test-data ids |
@@ -88,7 +101,7 @@ Fixed ASCII keys, all required (absence of a feature is expressed with an empty 
 | `slot`, `slot_epoch` | what the snapshot describes |
 | `captured_at_ms`, `expires_at_ms` | freshness window |
 | `provenance` | `{source_kind, issuer_ref, verified}`; `verified` is a boolean set only by a future trust gate |
-| `facts` | one entry per fact id (below); each `{status, value, observed_ms}`, `status` in `known` \| `unknown` \| `absent` |
+| `facts` | one entry per fact id (below); each `{status, value, observed_ms}`, `status` in `known` \| `unknown` \| `absent`. The committed design fixes only this envelope; the exact `value` schema per fact, whether `value` is present for non-known, and the two extra facts `artifact_contract` / `authority_decision` are **[PENDING A2/A3/A4]** (13.2, 13.4, 13.5) |
 
 Fact ids: `os_identity`, `permission_profile`, `command_decisions` (per required command: `allowed` \|
 `denied` \| `unknown`, produced by the real matcher, never by B1), `repo_base`, `worktree`, `ownership`,
@@ -129,6 +142,14 @@ exactly:
    `checks` and `advisory_codes` are **ordered arrays**, not sets: their order is semantic and defined in
    section 6 (reasons) and section 5 (checks); `advisory_codes` is ascending by bytewise UTF-8 by that
    field's own rule, still without any encoder-side sorting.
+
+   *Implementation fact (#169):* `canonical.ts` takes an optional `setFields` set of object **key names**
+   and requires every array under a matching key name, at any depth, to be a strictly ascending string set
+   (`unsorted_set` / `wrong_type`). It has no path awareness and no notion of arrays of objects with an
+   identity key. The "snapshot fact value sets" wording above is therefore a design commitment that the
+   current code does **not** implement as path-specific validation. **[PENDING object-set rule]** (13.3)
+   proposes path-specific object-set validation; any change to `canonical.ts` or a future schema validator
+   requires separate approval.
 7. Digest = lowercase-hex SHA-256 over `domain || 0x0A || canonical_bytes`. `domain` is an ASCII string with
    no LF, fixed per object type: `mctl.feasibility/1/task-envelope`, `.../capability-snapshot`,
    `.../report`, `.../test-vector`. The LF frames the domain, so two object types cannot collide.
@@ -172,6 +193,11 @@ references (never raw values that could be sensitive). Fixed evaluation/output o
 `binding.schema`, `binding.provenance`, `binding.slot`, `binding.epoch`, `binding.capability_fresh`,
 `binding.not_expired`, `binding.attempt_unique`.
 
+*Role of `binding.schema` [PENDING A5]:* the committed text lets `binding.schema` fail inside a returned
+report. Proposal A5 (13.6) instead rejects malformed inputs by throwing before any report exists; then
+`binding.schema` is `pass` in every returned report. Alternative in 13.6. Until the owner decides, both
+readings are unapproved and the check list keeps the entry.
+
 `binding.not_expired` is about the **envelope** `expires_at_ms` only (code `task_expired`).
 `binding.capability_fresh` is about the **snapshot** window `captured_at_ms..expires_at_ms` only (code
 `capability_stale`). The two can fail independently or together.
@@ -201,7 +227,8 @@ authority: if `mandatory_writes` (known) contains a path not matched by `allowed
 fails with `mandatory_write_outside_allowed` (unauthorized); `allowed_files` is not extended to cover it.
 
 **Evidence states under an invalid binding.** Each snapshot-derived check (the eleven in the fixtures'
-`snapshot_derived_checks`) takes one of two non-pass states when the snapshot cannot be used, with distinct
+`snapshot_derived_checks`; **[PENDING A3/A4]** that list grows to twelve or thirteen if `contract.artifact`
+and/or `authority.reference` become evidence-derived, see 13.8) takes one of two non-pass states when the snapshot cannot be used, with distinct
 codes: `unknown` + `evidence_not_evaluable` when the snapshot is untrusted or is not about this task
 (schema invalid, provenance unverified, other slot, other epoch); `stale` + `evidence_stale` when it is
 well-formed, verified and for the same slot/epoch but outside its freshness window. Not-evaluable wins
@@ -280,7 +307,7 @@ exactly these inputs and has not expired", nothing more. Its checks, in order:
 
 | Check | Pass condition | Non-pass |
 |---|---|---|
-| `consume.report_schema` | report parses under MCTL-CJ1, closed schema, constant `non_claims` present | `fail` `report_schema_invalid` |
+| `consume.report_schema` | report parses under MCTL-CJ1, closed schema, constant `non_claims` present | `fail` `report_schema_invalid`. **[PENDING A6]** the behavior of the other seven checks after this failure is unspecified in the committed design; 13.7 proposes it |
 | `consume.report_digest` | recompute the digest over the report's canonical bytes **with the `report_digest` member removed** (self-field exclusion) under domain `.../report`; equals the stored value | `fail` `report_digest_mismatch` |
 | `consume.report_expired` | `nowMs <= report.expires_at_ms` | `stale` `report_expired` |
 | `consume.identity` | report `task_id`, `attempt_id`, `slot`, `slot_epoch` equal the presented envelope's | `fail` `identity_mismatch` |
@@ -304,7 +331,9 @@ facts still hold, and does not close TOCTOU (section 11).
   message text, tool output, free-text prose.
 - Strings in the report come from closed enums (verdicts, statuses, reason codes, check ids) or are echoed
   from schema-validated identifiers (`task_id`, `attempt_id`, `slot`, `repo`, repo-relative patterns).
-  Any identifier failing its pattern makes `binding.schema` fail and is **not** echoed.
+  Any identifier failing its pattern is **not** echoed. Committed text: it makes `binding.schema` fail in the
+  report. **[PENDING A5]** proposed: it makes the evaluator throw a closed `FeasibilityInputError` and no
+  report exists (13.6). Never-echo holds under both.
 - Output must be stable: fixed key order (MCTL-CJ1), fixed check order, sorted reason codes.
 
 ## 8. Advisory estimates
@@ -405,6 +434,214 @@ B2 is a different decision and a different change. Prerequisites and obligations
 | G6 | Cross-language equivalence of MCTL-CJ1 (second implementation, rejection corpus). |
 | G7 | Where the declared `Agent: claude` trailer expectation is verified. The publisher (`publish.ts`) is in this repo but validates actual commits only after the fact and today refuses `Co-Authored-By` lines, not a missing `Agent:` trailer; whether and where a presence check belongs, and what pre-dispatch fact would carry it, is undecided. |
 | G8 | Owner decision to proceed to B1 implementation, and later to B2. |
+| G9 | Owner decision on each proposal in section 13 (A1–A6, object-set rule): accept, take the stated alternative, or reject. Precedes G8 for any evaluator work. Unanswered today. |
+
+## 13. PROPOSED contracts, PENDING OWNER DECISION (A1–A6 and object-set rule)
+
+Everything in this section is **PROPOSED / PENDING OWNER DECISION** (gate G9). None of it is implemented,
+approved, or executable. Each proposal lists its alternative with behavior and tradeoff. Illustrative cases
+live in the fixtures file under `proposals` (`status: PENDING`, never readiness proof, symbolic digests only).
+All facts and evidence below are **injected synthetic claims for pure tests**, not runtime grants: provider
+authentication, freshness, identity and the proprietary command matcher stay unresolved gates (G1–G4). The
+six verdicts and their precedence are unchanged; no seventh verdict is introduced by any proposal.
+
+| ID | Subject | Section | Alternative in one line |
+|---|---|---|---|
+| A1 | Path/scope grammar and matching | 13.1 | exact/directory-only without `/**`, or `unknown` for unsupported patterns |
+| A2 | Closed fact value schemas | 13.2 | defer shapes: only envelope statuses plus opaque digests |
+| OS | Object-set ordering/uniqueness | 13.3 | defer; ordered arrays plus explicit uniqueness check |
+| A3 | Artifact contract and worktree evidence | 13.4 | leave capability `unknown` until a provider exists |
+| A4 | Authority decision evidence | 13.5 | `none` stays `unknown` until an applicability policy is approved |
+| A5 | Malformed input behavior | 13.6 | sanitized schema-failure report with a separately designed sentinel policy |
+| A6 | Malformed report consumption | 13.7 | throw a sanitized error instead of returning a result |
+
+### 13.1 A1 path grammar (PROPOSED)
+
+Applies to `allowed_files`, `path_policy.forbidden`, and `mandatory_writes`.
+
+- **Grammar.** A pattern is exactly one of: an *exact path* (repo-relative, no trailing `/`); a *directory
+  prefix* ending in `/`; or the terminal alias `dir/**` (identical in meaning to `dir/`, only as the final
+  segment). Segments are separated by `/`, are non-empty, are not `.` or `..`, contain no `\`, no `*`, `?`,
+  `[`, `{`, no NUL/control characters, and the whole pattern does not start with `/` or a drive prefix.
+  `mandatory_writes` entries and the paths being tested are exact paths only.
+- **Rejection.** Anything else (absolute path, traversal, dot or empty segment, backslash, any other glob) is an
+  **input error** (13.6), never a permission result. Invalid grammar is not `fail` and not `pass`.
+- **Membership.** An exact path matches itself. A directory prefix `d/` matches a path whose leading segments
+  equal `d`'s segments (segment boundary: `docs/` does not match `docs-x/a`). Matching is bytewise on UTF-8
+  with no normalization or case folding.
+- **Scope intersection** (used by `authority.paths`, `ownership.files`): two patterns intersect iff one's
+  segment sequence is a prefix of the other's (exact path counts as a leaf). Symmetric. A forbidden pattern
+  that is a descendant of an allowed directory (`allowed: docs/`, `forbidden: docs/secret/`) **blocks**: the
+  scope is not usable as a whole, so `authority.paths` fails `path_forbidden`. (Not narrowing: B1 never
+  computes a reduced allowlist.)
+- **Non-goal.** No emulation of Claude Code's proprietary command matcher; this grammar covers repo paths only.
+- **Alternative A1-alt-1 (narrower):** drop `dir/**`; only exact paths and `dir/` prefixes (mirrors the
+  publisher's `allowed()`, `publish.ts:281`). Tradeoff: fewer spellings, no alias ambiguity, but task authors
+  used to `**` get an input error.
+- **Alternative A1-alt-2 (defer):** grammar is not defined; any pattern beyond exact paths makes
+  `authority.paths` `unknown` (`path_pattern_unsupported`). Fail-closed consequence: every directory-scoped
+  task is at best `uncertain` until the grammar is approved; no false `feasible`, but low usefulness.
+
+### 13.2 A2 closed fact schemas (PROPOSED)
+
+Each `facts.<id>` is exactly `{status, observed_ms}` plus `value` **only when `status` is `known`**. For
+`unknown`/`absent`, `value` must be missing (present value is an input error). `observed_ms` is a required
+integer in `[0, 2^53-1]`. `facts` has exactly the keys below (A3/A4 add two); unknown or missing fact ids are
+input errors. Value objects are closed (exact keys, no extras):
+
+| Fact | `value` (exact) | Constraints |
+|---|---|---|
+| `os_identity` | `{trusted: bool}` | |
+| `permission_profile` | `{digest: string}` | 64 lowercase hex |
+| `command_decisions` | `{entries: [{command, decision}]}` | `command` matches `cmd:[a-z0-9._-]{1,64}`; `decision` in `allowed`\|`denied`\|`unknown`; object-set keyed by `command` (13.3) |
+| `repo_base` | `{sha: string}` | 40 lowercase hex |
+| `worktree` | `{clean: bool}` | |
+| `ownership` | `{conflict: bool}` | |
+| `dependencies` | `{entries: [{id, met}]}` | `id` string `[a-z0-9:._-]{1,64}`, `met` bool; object-set keyed by `id` |
+| `fixtures` | `{entries: [{id, available}]}` | `id` same pattern, `available` bool; object-set keyed by `id` |
+| `slot_state` | `{idle: bool}` | |
+| `attempts_seen` | `{ids: [string]}` | each `a-<uuid>`; string **set** strictly ascending |
+| `limits` | `{max_changed_files, max_wall_ms}` | integers `>= 0` |
+| `path_policy` | `{forbidden: [string]}` | A1 patterns; string **set** |
+| `mandatory_writes` | `{paths: [string]}` | A1 exact paths; string **set** |
+
+Missing semantics: a required command with **no** entry in `command_decisions`, a declared dependency with no
+`dependencies` entry, or a required fixture with no `fixtures` entry is `unknown` (never an implicit pass,
+never implicit denial), with codes `command_decision_unknown` (existing), `dependency_unknown` and
+`fixture_unknown` (both PROPOSED here). An entry whose id is not required by the envelope is ignored for verdicts but still
+schema-checked. These are claims injected for tests; the schemas give them shape, not trust.
+
+- **Alternative A2-alt (narrower/deferred):** define no per-fact value schema yet. Facts carry only
+  `{status, observed_ms}` plus an opaque `value_digest`; checks beyond `unknown` cannot be computed, so every
+  fact-dependent check is `unknown` until value shapes are approved. Tradeoff: nothing wrongly shaped is
+  frozen, but the evaluator can never return anything but `uncertain` (or binding-driven results).
+
+### 13.3 Object-set ordering and uniqueness (PROPOSED, tied to A2)
+
+- The encoder **preserves supplied array order** and never sorts or de-duplicates (as in section 4).
+- A **schema validator** (not the encoder) checks, per explicit schema path, that an array of objects is
+  strictly ascending and unique by UTF-8 identity key: `command_decisions.entries` by `command`;
+  `dependencies.entries` and `fixtures.entries` by `id`. Two members with the same identity are rejected even
+  when their other fields differ (`duplicate_identity`); an out-of-order list is `unsorted_set`. Order is
+  bytewise UTF-8 (so `cmd:Z` < `cmd:a`, and a shorter prefix sorts first).
+- It is path- and schema-specific, never global property-name matching. Ordinary ordered arrays stay ordered;
+  `TaskEnvelope.dependencies` (array of `{id,kind,step}`) **stays an ordered array**: its reclassification as
+  an object-set would be a separate proposal and is not made here.
+- *Implementation fact:* `canonical.ts`'s `setFields` (key-name, string-set) does **not** implement this.
+  Implementing it needs a separate, approved change.
+- **Alternative OS-alt (defer):** no object-set schema. Entry arrays stay ordered arrays; evaluator-side
+  explicit uniqueness validation rejects duplicate ids but accepts any order. Tradeoff: permuting the same
+  entries produces a different capability digest and revision-compat semantics (same facts, different bytes), so
+  producers must emit a stable order by convention, and digest equality no longer implies set equality.
+
+### 13.4 A3 artifact contract and worktree evidence (PROPOSED)
+
+The committed design already forbids treating the envelope's `expected.trailer` as a verified pass. A3 adds:
+
+- **Fact `artifact_contract`:** `value` = `{artifact_kind, trailer}`; `artifact_kind` in the closed enum
+  `handoff_bundle`; `trailer` a printable-ASCII string of 1–128 characters. It attests what the artifact
+  pipeline supports, compared by exact string equality with the envelope's `expected.artifact_kind` and
+  `expected.trailer`. `expected.branch` is **syntax-checked only** (`[A-Za-z0-9._/-]{1,128}`, no `..`, no
+  leading or trailing `/`) and is never compared with evidence.
+- **Check `contract.artifact`:** fact missing/`unknown`/`absent` -> `unknown` `artifact_evidence_unknown`;
+  known and equal -> `pass`; known and contradicting -> `fail` `artifact_contract_mismatch`, class
+  `blocked_dependency` (an existing class; no unauthorized path).
+- **Worktree.** `worktree.clean == false` makes `ownership.files` `fail` with code `worktree_dirty` (class
+  `blocked_dependency`); `ownership.conflict == true` makes it `fail` `ownership_conflict`; both together list
+  both codes (ascending). `worktree` `unknown`/`absent` -> required `ownership.files` is `unknown`
+  (`worktree_unknown`) unless a known conflict already makes it `fail`. A dirty tree and another owner's
+  conflict are distinct reasons.
+- **Limits.** This proves nothing about future commits and does not show the publisher enforces an `Agent`
+  trailer (G7 stays open).
+- **Alternative A3-alt:** add no artifact/worktree facts; `contract.artifact` stays `unknown` and the worktree
+  fact stays outside any verdict until a provider exists. Tradeoff: no invented verified evidence and a
+  smaller schema, but feasibility can never be reached for tasks needing those checks (they stay required).
+
+### 13.5 A4 authority decision evidence (PROPOSED)
+
+- **Reason-code vocabulary closed** (no verdict or precedence change): `authority.reference` codes are
+  `authority_unverified`, `authority_evidence_mismatch`, `authority_denied`; all other codes in this document
+  are the complete set, any new code requires a design edit.
+- **Envelope `authority_ref`:** `{kind, id}`; `kind` in `none`\|`operator_decision`; `kind == none` requires `id`
+  equal to the literal `none`.
+- **Fact `authority_decision`:** `value` = `{kind, id, decision}` with `decision` in `allowed`\|`denied`\|
+  `not_required`; "verified" means the snapshot `provenance.verified` is true (a declaration for pure tests).
+- **Binding rule:** `allowed`/`denied` apply only if evidence `{kind,id}` equals the envelope ref exactly and
+  the ref kind is not `none`; `not_required` applies only if the ref kind **is** `none` and the evidence
+  `{kind,id}` is `{none, none}`.
+
+| Envelope ref | Evidence | `authority.reference` |
+|---|---|---|
+| non-none | verified, bound, `allowed` | `pass` |
+| non-none | verified, bound, `denied` | `fail` `authority_denied` (class `unauthorized`) |
+| non-none | `not_required`, or unbound `{kind,id}` | `unknown` `authority_evidence_mismatch` |
+| `none` | verified `not_required` bound as above | `pass` |
+| `none` | `allowed`/`denied` or any mismatch | `unknown` `authority_evidence_mismatch` |
+| any | missing/`unknown`/`absent` fact, or provenance unverified | `unknown` `authority_unverified` |
+
+Caller `authority_ref.kind == none` is neither a pass nor a denial; only the verified `not_required` row passes
+it. Only a verified explicit denial is `unauthorized`. A2 provenance and A4 evidence are declarations for pure
+tests, not runtime grants.
+
+- **Alternative A4-alt:** `none` stays `unknown` (`authority_applicability_unknown`) until an authority
+  applicability policy is approved; `not_required` is not a valid decision. Tradeoff: avoids letting any
+  injected fact waive authority, but tasks with no authority reference can never be `feasible`.
+
+### 13.6 A5 input error behavior (PROPOSED)
+
+Three layers stay separate: **strict lexical parsing** (`parseStrict`, #169; throws `CanonicalError` with a
+closed code), **type/schema validation** (A1/A2/object-set rules, plus clock integer range), and
+**evaluation**.
+
+- Malformed raw text, schema, closed-set violation, out-of-range integer (e.g. `captured_at_ms >
+  expires_at_ms`, negative values) or a non-integer clock makes the evaluator **throw `FeasibilityInputError`**
+  with exactly `{input: envelope|snapshot|clock, code, path}`. `code` is from a closed set (`bad_json`,
+  `bad_scalar`, `bad_key`, `duplicate_key`, `forbidden_number`, `unsafe_integer`, `null_value`, `too_deep`,
+  `unknown_key`, `missing_key`, `wrong_type`, `bad_value`, `bad_range`, `bad_pattern`, `unsorted_set`,
+  `duplicate_identity`, `bad_path_grammar`). `path` is a **fixed schema path template** (for example
+  `facts.command_decisions.value.entries.command`; array indices dropped), never an offending value or an
+  arbitrary input key. No sentinel ids, digests or report are produced.
+- **Valid but stale/wrong-slot/wrong-epoch/untrusted** inputs are not errors: they yield the specified
+  `uncertain` report (section 6). Staleness is a fact about well-formed data; malformation is not.
+- **`binding.schema`** is `pass` in every returned report (a report exists only after validation). The check
+  stays listed to keep a fixed check order; its `schema_invalid` code is unreachable under A5.
+- **Alternative A5-alt:** return a sanitized schema-failure report. This needs an explicit, separately designed
+  sentinel/binding policy (what `task_id`, digests and slot to carry when none can be trusted, how it avoids
+  being mistaken for a bound report); this document does **not** choose one. Tradeoff: callers get a uniform
+  return type but must trust or invent identity fields from malformed input.
+
+### 13.7 A6 malformed-report consumption (PROPOSED)
+
+- Malformed **envelope, snapshot or clock** presented to `validate_report_for_consumption` use A5 (throw).
+- A **schema-invalid report** returns a `ConsumptionResult` with `valid: false` and exactly eight checks in the
+  fixed order: `consume.report_schema` `fail` `report_schema_invalid`, then the remaining seven
+  (`report_digest`, `report_expired`, `identity`, `task_digest`, `capability_digest`, `capability_revision`,
+  `trust`) each `unknown` `report_not_evaluable`. `reasons` are the eight `check:code` entries in that order.
+  No report field is read to produce a digest pass, an identity pass or any output string; no untrusted
+  identifier is echoed.
+- A **schema-valid** report runs all eight checks as in 6.1. Digest/revision mismatch (`fail`) stays distinct
+  from expiry (`stale`). There is no automatic replacement or re-evaluation.
+- Non-evaluable is **not** a measured mismatch: no `*_mismatch` code is produced for it.
+- **Why not partial evaluation:** fields of a malformed report (digest, ids, expiry) are untrusted structure;
+  computing digest or identity checks from them would let attacker-shaped input steer outcomes and echo its text.
+- **Alternative A6-alt:** throw a sanitized `FeasibilityInputError` for malformed reports. Explicit change from
+  the 6.1 wording (`consume.report_schema` would never be reported as `fail`); callers lose a uniform return
+  type and the fixed eight-check output.
+
+### 13.8 Consequential updates if proposals are accepted
+
+- **Snapshot-derived check list** (section 5, fixtures `snapshot_derived_checks`): not a hard-coded eleven.
+  Baseline (none accepted): the eleven committed checks. A3 adds `contract.artifact` (twelve); A4 adds
+  `authority.reference` (thirteen with A3). Under A4, `authority.reference` with untrusted evidence is
+  `unknown` `authority_unverified` (keeps its own code), and with stale evidence `stale` `evidence_stale`.
+  With A4 not accepted, its committed behavior (section 5) is unchanged.
+- **Invalid-binding expansion** applies to each check in the adopted list, once per check, in place.
+- **Per-check evidence dependencies:** `authority.paths` <- `path_policy`, `mandatory_writes`, A1; `authority.commands` <-
+  `command_decisions`; `matcher.compat`/`permission.profile` <- `permission_profile`, `command_decisions`;
+  `ownership.files` <- `ownership`, plus `worktree` (A3); `contract.artifact` <- `artifact_contract` (A3);
+  `authority.reference` <- `authority_decision` (A4); `bounds.explicit` <- `limits`, `mandatory_writes`.
+- **Unchanged:** the six verdicts, precedence, required status, and published design vectors A and B (their
+  bytes and digests). Fixtures keep their old case ids; proposal cases are new, separate entries.
 
 Related analogues (agents #997/#1032) are not a second DevLoop and add no write scope here; their
 excerpts were not needed.
