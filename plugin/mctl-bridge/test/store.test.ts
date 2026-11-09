@@ -246,6 +246,135 @@ describe.skipIf(requiresValkey)("bridge state machine", () => {
     expect(await b.next(a)).toMatchObject({ ok: false, code: "empty" });
   });
 
+  // B13: a turn that ends without a Stop hook leaves the slot reading busy while the
+  // session waits for input. Only a steer for the task in flight may pass then.
+  async function age(id: string, ms = 200_000): Promise<void> {
+    const t = Number((await b.message(id)).updated_ms) - ms;
+    await b.exec.execute(["HSET", key.msg(id), "updated_ms", String(t)]);
+  }
+
+  test("a busy slot receives a steer for its task, but no task and no reply to its own question", async () => {
+    const a = await register("a");
+    const { id, admission } = await admitted(a);
+    must(await b.heartbeat(a, true)); // the hooks still say busy
+    const t2 = must(await b.send({ slot: "a", payload: "second task" }));
+    expect(await b.next(a)).toMatchObject({ ok: false, code: "busy" });
+    const st = must(await b.steer(id, "go on, use the other path"));
+    const got = must(await b.next(a));
+    expect(got).toMatchObject({ kind: "reply", id: st.question_id, task_id: id, attempt_id: admission.attempt_id });
+    expect(await state(st.question_id)).toBe("reply_emit_intent");
+    expect(await state(t2.id)).toBe("queued"); // never interleaves
+    // the slot's own question is answered only when idle
+    must(await b.emitted(a, st.question_id));
+    must(await b.ackReply(a, st.question_id, st.reply_id));
+    const q = must(await b.ask("a", admission, "which?"));
+    const c = must(await b.claim(q.question_id));
+    must(await b.reply(q.question_id, c.claim_token, "this"));
+    expect(await b.next(a)).toMatchObject({ ok: false, code: "busy" });
+    expect(await state(q.question_id)).toBe("reply_committed");
+    must(await b.heartbeat(a, false));
+    expect(must(await b.next(a)).id).toBe(q.question_id);
+  });
+
+  test("an idle slot gets the steer too, ahead of a task queued behind the one in flight", async () => {
+    const a = await register("a");
+    const { id } = await admitted(a);
+    const t2 = must(await b.send({ slot: "a", payload: "second task" }));
+    const st = must(await b.steer(id, "note"));
+    expect(must(await b.next(a)).id).toBe(st.question_id);
+    expect(await b.next(a)).toMatchObject({ ok: false, code: "empty" });
+    expect(await state(t2.id)).toBe("queued");
+  });
+
+  test("a stuck steer never blocks the next one forever, and is settled as unknown, never overwritten", async () => {
+    const a = await register("a");
+    const { id } = await admitted(a);
+    const one = must(await b.steer(id, "one"));
+    expect(await b.steer(id, "two")).toMatchObject({ ok: false, code: "question_open", question_id: one.question_id });
+    await age(one.question_id);
+    const two = must(await b.steer(id, "two"));
+    expect(await b.message(one.question_id)).toMatchObject({ state: "delivery_unknown", reply: "one" });
+    expect((await b.message(one.question_id)).reason).toContain("steer_undelivered_superseded_by:" + two.question_id);
+    expect((await auditFor(one.question_id)).map((e) => e.to)).toEqual(["reply_committed", "delivery_unknown"]);
+    // only the new note goes out; the unknown one is never re-sent
+    expect(must(await b.next(a)).id).toBe(two.question_id);
+    expect(await b.next(a)).toMatchObject({ ok: false });
+    expect(await state(one.question_id)).toBe("delivery_unknown");
+  });
+
+  test("an emitted steer with no ack is unknown only after the bound, not before", async () => {
+    const a = await register("a");
+    const { id } = await admitted(a);
+    const one = must(await b.steer(id, "one"));
+    must(await b.next(a));
+    must(await b.emitted(a, one.question_id));
+    expect(await b.steer(id, "two")).toMatchObject({ ok: false, code: "question_open" }); // may still be read
+    await age(one.question_id);
+    must(await b.steer(id, "two"));
+    expect((await b.message(one.question_id)).reason).toContain("steer_unacked_superseded_by");
+  });
+
+  test("the sweeper settles a steer that shows no evidence as unknown", async () => {
+    const a = await register("a");
+    const { id, admission } = await admitted(a);
+    const one = must(await b.steer(id, "one"));
+    await b.sweep(60_000);
+    expect(await state(one.question_id)).toBe("reply_committed"); // inside the bound
+    await age(one.question_id);
+    expect((await b.sweep(60_000)).expired).toContain(one.question_id);
+    expect(await b.message(one.question_id)).toMatchObject({ state: "delivery_unknown", reason: "steer_undelivered" });
+    expect(await b.next(a)).toMatchObject({ ok: false, code: "empty" });
+    // the explicit unknown frees the task for a note and for its own question
+    must(await b.ask("a", admission, "still there?"));
+  });
+
+  test("a delivery_unknown steer does not block a re-steer", async () => {
+    const a = await register("a");
+    const { id } = await admitted(a);
+    const one = must(await b.steer(id, "one"));
+    must(await b.next(a));
+    must(await b.emitLost(a));
+    expect(await state(one.question_id)).toBe("delivery_unknown");
+    const two = must(await b.steer(id, "again"));
+    expect(must(await b.next(a)).id).toBe(two.question_id);
+  });
+
+  test("a genuine asked question blocks a steer however old, and cannot be claimed as a note", async () => {
+    const a = await register("a");
+    const { id, admission } = await admitted(a);
+    const q = must(await b.ask("a", admission, "which?"));
+    await age(q.question_id);
+    expect(await b.steer(id, "x")).toMatchObject({ ok: false, code: "question_open", question_id: q.question_id });
+    expect(await state(q.question_id)).toBe("asked");
+    must(await b.claim(q.question_id));
+    expect(await b.steer(id, "x")).toMatchObject({ ok: false, code: "question_open" });
+    const one = (await b.sweep(60_000)).expired;
+    expect(one).not.toContain(q.question_id);
+    // a steer cannot be claimed: it was never asked
+    const c2 = await register("b");
+    const t = await admitted(c2);
+    const st = must(await b.steer(t.id, "n"));
+    expect(await b.claim(st.question_id)).toMatchObject({ ok: false, code: "not_asked" });
+  });
+
+  test("a finished task closes its newest steer and leaves the unknown one as it was", async () => {
+    const a = await register("a");
+    const { id, admission } = await admitted(a);
+    const one = must(await b.steer(id, "one"));
+    await age(one.question_id);
+    const two = must(await b.steer(id, "two"));
+    must(await b.result("a", admission, "completed", "done"));
+    expect(await state(two.question_id)).toBe("closed");
+    expect(await state(one.question_id)).toBe("delivery_unknown");
+  });
+
+  test("a steer from before a re-registration is refused for the new context", async () => {
+    const a = await register("a");
+    const { id } = await admitted(a);
+    await register("a", { pid: 100 });
+    expect(await b.steer(id, "stale")).toMatchObject({ ok: false });
+  });
+
   test("a committed reply survives a lost inbox stream and goes out with its reply_id", async () => {
     const a = await register("a");
     const { admission } = await admitted(a);

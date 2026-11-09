@@ -24,7 +24,7 @@
 -- Every function returns a JSON object: {"ok":true,...} or {"ok":false,"code":...}.
 -- Rejections are data, not errors: a fenced or stale caller is an expected event.
 
-local VERSION = '6'
+local VERSION = '7'
 local P = 'mctl:bridge:'
 local MAX_PAYLOAD = 16384
 local MAX_HOP = 4
@@ -213,6 +213,23 @@ local function abandon(slot, actor, why, now)
   end
 end
 
+-- The task's open question that still excludes another one, or nil. A steer whose
+-- delivery is already explicitly unknown (never re-sent) excludes nothing: it is
+-- audited as unknown and must not wedge the task's next note or question.
+local function blocking_question(task_m)
+  local qid = task_m.open_question
+  if not qid or qid == '' then return nil end
+  local q = hgetall(mkey(qid))
+  if not q.state or TERMINAL[q.state] then return nil end
+  if q.steer == '1' and q.state == 'delivery_unknown' then return nil end
+  return qid, q
+end
+
+-- A steer that no slot evidence has moved for this long is settled as unknown.
+local STEER_STUCK_MS = 120000
+local STEER_STUCK = { reply_committed = 'steer_undelivered', reply_emit_intent = 'steer_unconfirmed',
+  reply_emitted = 'steer_unacked' }
+
 ---------------------------------------------------------------------------------
 -- Slot functions (first key: mctl:bridge:s:<slot>:slot)
 ---------------------------------------------------------------------------------
@@ -293,7 +310,12 @@ local function next_message(keys, a)
   end
   local s = hgetall(skey(slot))
   if fenced(s, conn, epoch) then return no('fenced') end
-  if s.busy ~= '0' then return no('busy') end
+  -- Busy is the hooks' guess, and it is wrong exactly when a turn ends without a Stop
+  -- hook (an interrupt, a refused permission prompt): the session waits for input
+  -- while the flag says busy. A steer for the task in flight is the way out, so while
+  -- busy it alone may go out; a task or a reply to the slot's own question still waits
+  -- for idle. Claude Code queues a channel event that arrives mid-turn.
+  local busy = s.busy ~= '0'
   local now = now_ms()
   local actor = 'slot:' .. slot
   local inflight = s.inflight or ''
@@ -301,6 +323,8 @@ local function next_message(keys, a)
     local m = hgetall(mkey(id))
     if m.state == nil then
       redis.call('ZREM', ready_key(slot), id)
+    elseif busy and not (m.kind == 'question' and m.state == 'reply_committed' and m.steer == '1') then
+      -- stays queued until the slot reports idle
     elseif m.kind == 'task' and m.state == 'queued' then
       if inflight == '' then
         if m.uuid ~= s.uuid or m.epoch ~= s.epoch then
@@ -326,7 +350,7 @@ local function next_message(keys, a)
       redis.call('ZREM', ready_key(slot), id)
     end
   end
-  return no('empty')
+  return no(busy and 'busy' or 'empty')
 end
 
 -- ARGV: slot, conn_id, epoch, id
@@ -455,10 +479,8 @@ local function ask(keys, a)
     end
     return no(code)
   end
-  if m.open_question and m.open_question ~= '' then
-    local st = redis.call('HGET', mkey(m.open_question), 'state')
-    if st and not TERMINAL[st] then return no('question_open', { question_id = m.open_question }) end
-  end
+  local blocking = blocking_question(m)
+  if blocking then return no('question_open', { question_id = blocking }) end
   local hop = tonumber(m.hop or '0') + 1
   if hop > MAX_HOP then return no('hop_limit') end
   if redis.call('EXISTS', mkey(qid)) == 1 then return no('duplicate_id') end
@@ -582,12 +604,19 @@ local function steer(keys, a)
       or s.inflight_attempt ~= m.attempt_id or s.epoch ~= m.emit_epoch then
     return no('not_inflight')
   end
-  if m.open_question and m.open_question ~= '' then
-    local st = redis.call('HGET', mkey(m.open_question), 'state')
-    if st and not TERMINAL[st] then return no('question_open', { question_id = m.open_question }) end
-  end
   if redis.call('EXISTS', mkey(qid)) == 1 then return no('duplicate_id') end
   local now = now_ms()
+  local blocking, bq = blocking_question(m)
+  if blocking then
+    -- Only an earlier steer that has shown no progress for STEER_STUCK_MS may be
+    -- settled here, as an explicit delivery_unknown (never re-sent, never overwritten).
+    -- A question of the slot's own, or a steer still within its window, keeps the slot.
+    local why = STEER_STUCK[bq.state]
+    if bq.steer ~= '1' or not why or now - tonumber(bq.updated_ms or '0') < STEER_STUCK_MS then
+      return no('question_open', { question_id = blocking })
+    end
+    transition(blocking, bq, 'delivery_unknown', 'orch', why .. '_superseded_by:' .. qid, now)
+  end
   redis.call('HSET', mkey(qid), 'kind', 'question', 'state', 'reply_committed', 'steer', '1',
     'slot', m.slot, 'task_id', task_id, 'attempt_id', m.attempt_id, 'uuid', s.uuid,
     'epoch', s.epoch, 'conn_id', s.conn_id, 'payload', STEER_QUESTION, 'hop', m.hop or '0',
@@ -825,6 +854,13 @@ local function expire(keys, a)
   if m.state == nil then return no('unknown') end
   local exp = tonumber(m.expires_ms or '0')
   local now = now_ms()
+  -- A steer has no expiry and no asker waiting, so nothing else would ever settle it:
+  -- without slot evidence (an ack) for STEER_STUCK_MS its delivery is explicitly unknown.
+  if m.kind == 'question' and m.steer == '1' and STEER_STUCK[m.state]
+      and now - tonumber(m.updated_ms or '0') >= STEER_STUCK_MS then
+    transition(id, m, 'delivery_unknown', 'sweeper', STEER_STUCK[m.state], now)
+    return ok({ expired = true, settled = 'delivery_unknown' })
+  end
   if exp <= 0 or now < exp then return ok({ expired = false }) end
   if m.kind == 'task' and m.state == 'queued' then
     transition(id, m, 'expired', 'sweeper', 'expires_at', now)

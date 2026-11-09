@@ -270,6 +270,21 @@ describe.skipIf(requiresValkey)("slot adapter, lost replies", () => {
     fs.renameSync(`${file}.tmp`, file);
   }
 
+  function busyState(session = "s-1"): void {
+    const file = path.join(dir, `${process.pid}.json`);
+    fs.writeFileSync(`${file}.tmp`, JSON.stringify({ session_id: session, state: "busy", t: Date.now() / 1000 }));
+    fs.renameSync(`${file}.tmp`, file);
+  }
+
+  /** A task emitted and acknowledged, as in B13 before the permission prompt was refused. */
+  async function working(): Promise<{ id: string; attempt: string }> {
+    const t = must(await b.send({ slot: "a", payload: "work" }));
+    await adapter.tick();
+    const attempt = notes[0]!.params.meta.attempt_id;
+    must((await adapter.call("ack_task", { task_id: t.id, attempt_id: attempt })) as Result);
+    return { id: t.id, attempt };
+  }
+
   beforeAll(async () => {
     server = await ValkeyServer.start();
   });
@@ -372,6 +387,112 @@ describe.skipIf(requiresValkey)("slot adapter, lost replies", () => {
     expect((await b.message(t1.id)).state).toBe("emitted");
     const ack = (await adapter.call("ack_task", { task_id: t1.id, attempt_id: notes[0]!.params.meta.attempt_id })) as Result;
     expect(ack.ok).toBe(true);
+  });
+
+  // B13. These prove what the adapter writes to the channel and what the server records.
+  // They cannot prove that a real Claude Code session wakes on the notification: that
+  // is host behaviour no fixture here reproduces.
+  test("a steer reaches the channel while the hooks still say busy (the turn ended without a Stop hook)", async () => {
+    const t1 = await working();
+    await sleep(5);
+    busyState(); // the last hook was busy: no Stop ran after the refused permission prompt
+    await adapter.tick();
+    await until(async () => (await b.slotInfo("a")).busy === "1");
+    const t2 = must(await b.send({ slot: "a", payload: "unrelated second task" }));
+    const st = must(await b.steer(t1.id, "use the other approach"));
+    await adapter.tick();
+    expect(notes).toHaveLength(2);
+    expect(notes[1]!.params.meta).toEqual({
+      kind: "reply", question_id: st.question_id, reply_id: st.reply_id, task_id: t1.id, attempt_id: t1.attempt,
+    });
+    expect(notes[1]!.params.content).toContain("use the other approach");
+    // wire emission is not consumption: the note is emitted, not acknowledged
+    expect((await b.message(st.question_id)).state).toBe("reply_emitted");
+    expect((await b.message(t2.id)).state).toBe("queued");
+    await adapter.tick();
+    await adapter.tick();
+    expect(notes).toHaveLength(2); // no duplicate, no new task
+    // only the model's ack moves it on
+    expect(((await adapter.call("ack_reply", { question_id: st.question_id, reply_id: st.reply_id })) as Result).ok).toBe(true);
+    expect((await b.message(st.question_id)).state).toBe("reply_acknowledged");
+  });
+
+  test("a steer that arrives after the idle transition is delivered once, ahead of a queued task", async () => {
+    const t1 = await working();
+    const t2 = must(await b.send({ slot: "a", payload: "queued behind" }));
+    await sleep(5);
+    idle(); // Stop ran after all
+    await adapter.tick();
+    const st = must(await b.steer(t1.id, "note"));
+    await adapter.tick();
+    await adapter.tick();
+    expect(notes.map((n) => n.params.meta.kind)).toEqual(["task", "reply"]);
+    expect(notes[1]!.params.meta.question_id).toBe(st.question_id);
+    expect((await b.message(t2.id)).state).toBe("queued");
+  });
+
+  test("a steer whose stdio write fails is unknown, not resent, and the task can be steered again", async () => {
+    const t1 = await working();
+    await sleep(5);
+    busyState();
+    const one = must(await b.steer(t1.id, "one"));
+    failNotify = true;
+    await expect(adapter.tick()).rejects.toThrow("stdout write failed");
+    expect((await b.message(one.question_id)).state).toBe("reply_emit_intent");
+    await adapter.tick(); // settles the lost emit
+    expect(await b.message(one.question_id)).toMatchObject({ state: "delivery_unknown", reason: "emit_reply_lost" });
+    expect(notes).toHaveLength(1); // never resent
+    const two = must(await b.steer(t1.id, "two"));
+    await adapter.tick();
+    expect(notes).toHaveLength(2);
+    expect(notes[1]!.params.meta.question_id).toBe(two.question_id);
+  });
+
+  test("a lost `next` reply for a steer settles it as unknown while busy", async () => {
+    const t1 = await working();
+    await sleep(5);
+    busyState();
+    const one = must(await b.steer(t1.id, "one"));
+    lossy.armed = "bridge_next";
+    await expect(adapter.tick()).rejects.toThrow("reply lost");
+    expect((await b.message(one.question_id)).state).toBe("reply_emit_intent");
+    await adapter.tick();
+    expect(await b.message(one.question_id)).toMatchObject({ state: "delivery_unknown", reason: "emit_reply_lost" });
+    expect(notes).toHaveLength(1);
+    expect((await b.message(t1.id)).state).toBe("acked");
+  });
+
+  test("a lost `emitted` reply for a steer leaves the delivered note alone", async () => {
+    const t1 = await working();
+    await sleep(5);
+    busyState();
+    const one = must(await b.steer(t1.id, "one"));
+    lossy.armed = "bridge_emitted";
+    await expect(adapter.tick()).rejects.toThrow("reply lost");
+    expect(notes).toHaveLength(2);
+    await adapter.tick();
+    expect((await b.message(one.question_id)).state).toBe("reply_emitted"); // the server ran it; the lost reply settles nothing
+    expect(((await adapter.call("ack_reply", { question_id: one.question_id, reply_id: one.reply_id })) as Result).ok).toBe(true);
+  });
+
+  test("with no acknowledged task a busy slot asks the server for nothing", async () => {
+    busyState();
+    await adapter.tick();
+    must(await b.send({ slot: "a", payload: "x" }));
+    await adapter.tick();
+    await adapter.tick();
+    expect(notes).toHaveLength(0);
+  });
+
+  test("a finished task leaves no steer to deliver", async () => {
+    const t1 = await working();
+    await sleep(5);
+    busyState();
+    const one = must(await b.steer(t1.id, "late note"));
+    must((await adapter.call("report_result", { task_id: t1.id, status: "completed", summary: "done" })) as Result);
+    await adapter.tick();
+    expect(notes).toHaveLength(1);
+    expect((await b.message(one.question_id)).state).toBe("closed");
   });
 
   test("settling a lost emit is fenced to the connection that lost it", async () => {
