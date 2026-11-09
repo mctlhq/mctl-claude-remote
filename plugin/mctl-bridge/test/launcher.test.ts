@@ -468,7 +468,7 @@ describe.skipIf(!usable)("launcher scripts", () => {
 
   test("channel instructions tell slots to stay at the repo root and use the Read tools", () => {
     expect(INSTRUCTIONS).toContain("Work from the repository root and never cd");
-    expect(INSTRUCTIONS).toContain("Read, Grep and Glob tools, not cat, grep or sed in Bash");
+    expect(INSTRUCTIONS).toContain("Read, Grep and Glob tools, not cat, grep, find or sed in Bash");
     expect(INSTRUCTIONS).toContain("Edit files with the built-in Edit or Write tools, never with a script run through python3, sed -i,");
     expect(INSTRUCTIONS).toContain("Run syntax checks (sh -n, bash -n) as separate short commands.");
     expect(INSTRUCTIONS).toContain("bun test --cwd plugin/mctl-bridge and");
@@ -518,6 +518,14 @@ describe.skipIf(!usable)("launcher scripts", () => {
     const globDenied = (cmd: string): boolean => denied.some((r) => r.includes("*") && !r.endsWith(":*") && glob(r).test(cmd));
     for (const env of ["ps eww", "ps -E", "ps auxe", "ps -ww -E -p 1", "ps -o pid,ppid,stat,lstart,command -p 10436 -e", "ps -o pid,ppid,stat,lstart,command -p 1 e"]) expect([env, globDenied(env)]).toEqual([env, true]);
     expect(globDenied("ps -o pid,ppid,stat,lstart,command -p 10436")).toBe(false);
+    // shasum -a 256 fingerprints a file without a prompt; other readers and json.tool still prompt,
+    // and the credential-path denies still catch a shasum of a credential file
+    expect(INSTRUCTIONS).toContain("use shasum -a 256 <file>, which runs without a prompt");
+    expect(INSTRUCTIONS).toContain("never python3 -m json.tool");
+    expect(INSTRUCTIONS).toContain("not cat, grep, find or sed in Bash");
+    expect(matches("shasum -a 256 docs/a.json docs/b.bin")).toBe(true);
+    for (const cmd of ["shasum docs/a.json", "shasum -a 1 docs/a.json", "python3 -m json.tool docs/a.json /dev/null", "find . -name '*.json'", "grep -rn x ."]) expect([cmd, matches(cmd)]).toEqual([cmd, false]);
+    for (const cmd of ["shasum -a 256 ~/.ssh/id_ed25519", "shasum -a 256 slot.pw", "shasum -a 256 ~/.config/gh/hosts.yml"]) expect([cmd, globDenied(cmd)]).toEqual([cmd, true]);
     // rules are numbered without gaps, so a later edit cannot silently drop one
     const nums = [...INSTRUCTIONS.matchAll(/^(\d+)\. /gm)].map((m) => Number(m[1]));
     expect(nums).toEqual(nums.map((_, i) => i + 1));
