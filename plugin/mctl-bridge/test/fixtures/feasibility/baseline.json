@@ -1,0 +1,51 @@
+{
+  "_note": "Executable synthetic baseline derived from the accepted schema baseline of docs/dispatch-feasibility-fixtures-146.json (proposals.proposed_schema_baseline): all values synthetic, 16 facts. Envelope is design vector B. Not live data, not a host fact.",
+  "nowMs": 1789999500000,
+  "envelope": {
+    "schema": "mctl.task-envelope/1",
+    "task_id": "t-00000000-0000-4000-8000-000000000001",
+    "attempt_id": "a-00000000-0000-4000-8000-000000000002",
+    "slot": "slot-x",
+    "slot_epoch": "7",
+    "repo": "example-org/example-repo",
+    "worktree_label": "wt-1",
+    "base": { "branch": "main", "base_sha": "0123456789abcdef0123456789abcdef01234567" },
+    "allowed_files": ["docs/example-146.md"],
+    "expected": { "artifact_kind": "handoff_bundle", "branch": "docs/example-146", "trailer": "Agent: claude" },
+    "required_commands": ["cmd:git-diff-check"],
+    "fixtures": ["fixture:synthetic-a"],
+    "dependencies": [],
+    "bounds": { "max_changed_files": 3, "max_wall_ms": 3600000 },
+    "expires_at_ms": 1790000000000,
+    "authority_ref": { "kind": "operator_decision", "id": "decision-0001" },
+    "advisory": { "est_changed_files": 2, "est_minutes": 20 }
+  },
+  "snapshot": {
+    "schema": "mctl.capability-snapshot/1",
+    "snapshot_id": "snap-p-1",
+    "revision": 1,
+    "slot": "slot-x",
+    "slot_epoch": "7",
+    "captured_at_ms": 1789999000000,
+    "expires_at_ms": 1789999900000,
+    "provenance": { "source_kind": "synthetic", "issuer_ref": "issuer-1", "verified": true },
+    "facts": {
+      "os_identity": { "status": "known", "observed_ms": 1789999000000, "value": { "trusted": true } },
+      "permission_profile": { "status": "known", "observed_ms": 1789999000000, "value": { "digest": "0000000000000000000000000000000000000000000000000000000000000001" } },
+      "matcher_attestation": { "status": "known", "observed_ms": 1789999000000, "value": { "profile_digest": "0000000000000000000000000000000000000000000000000000000000000001", "matcher_revision": "mctl.matcher-contract/1", "compatible": true } },
+      "command_decisions": { "status": "known", "observed_ms": 1789999000000, "value": { "entries": [{ "command": "cmd:git-diff-check", "decision": "allowed" }] } },
+      "repo_base": { "status": "known", "observed_ms": 1789999000000, "value": { "sha": "0123456789abcdef0123456789abcdef01234567" } },
+      "worktree": { "status": "known", "observed_ms": 1789999000000, "value": { "clean": true } },
+      "ownership": { "status": "known", "observed_ms": 1789999000000, "value": { "conflict": false } },
+      "dependencies": { "status": "known", "observed_ms": 1789999000000, "value": { "entries": [] } },
+      "fixtures": { "status": "known", "observed_ms": 1789999000000, "value": { "entries": [{ "id": "fixture:synthetic-a", "available": true }] } },
+      "slot_state": { "status": "known", "observed_ms": 1789999000000, "value": { "idle": true } },
+      "attempts_seen": { "status": "known", "observed_ms": 1789999000000, "value": { "ids": [] } },
+      "limits": { "status": "known", "observed_ms": 1789999000000, "value": { "max_changed_files": 10, "max_wall_ms": 7200000 } },
+      "path_policy": { "status": "known", "observed_ms": 1789999000000, "value": { "forbidden": [] } },
+      "mandatory_writes": { "status": "known", "observed_ms": 1789999000000, "value": { "paths": ["docs/example-146.md"] } },
+      "artifact_contract": { "status": "known", "observed_ms": 1789999000000, "value": { "artifact_kind": "handoff_bundle", "trailer": "Agent: claude" } },
+      "authority_decision": { "status": "known", "observed_ms": 1789999000000, "value": { "kind": "operator_decision", "id": "decision-0001", "decision": "allowed" } }
+    }
+  }
+}

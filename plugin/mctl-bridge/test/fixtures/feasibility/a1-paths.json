@@ -1,0 +1,33 @@
+{
+  "_note": "Executable synthetic A1 path-grammar fixtures (design doc 13.1, 14.11; fixtures proposals.a1_path_grammar and the R11 boundary table). Intersection cases are checked in both argument orders.",
+  "valid": [
+    { "pattern": "docs/example-146.md", "kind": "exact", "segs": ["docs", "example-146.md"] },
+    { "pattern": "docs/", "kind": "dir", "segs": ["docs"] },
+    { "pattern": "docs/**", "kind": "dir", "segs": ["docs"] },
+    { "pattern": "docs/a:b", "kind": "exact", "segs": ["docs", "a:b"] },
+    { "pattern": "ab:c", "kind": "exact", "segs": ["ab:c"] }
+  ],
+  "invalid": ["", "/etc/x", "docs/../x", "docs//x", "docs/./x", "docs\\x", "docs/*.md", "docs/**/x", "**", "***", "a/***", "/**", "C:", "C:/x", "C:relative", "c:x", "C:/**", "a:b", "a/\u0000", "a/\u007f", "a/?", "a/[", "a/{", "a//", "//"],
+  "intersection": [
+    { "p": "a/b", "q": "a/b", "intersects": true },
+    { "p": "a/b", "q": "a/c", "intersects": false },
+    { "p": "a", "q": "a/b", "intersects": false },
+    { "p": "a", "q": "a/", "intersects": false },
+    { "p": "a/b", "q": "a/", "intersects": true },
+    { "p": "a/", "q": "a/", "intersects": true },
+    { "p": "a/", "q": "a/**", "intersects": true },
+    { "p": "a/", "q": "a/b/", "intersects": true },
+    { "p": "a/", "q": "ab/", "intersects": false },
+    { "p": "ab", "q": "a/", "intersects": false },
+    { "p": "a/b/", "q": "a", "intersects": false },
+    { "p": "docs/", "q": "docs/secret/", "intersects": true }
+  ],
+  "membership": [
+    { "scope": "docs/", "path": "docs/a.md", "member": true },
+    { "scope": "docs/", "path": "docs-x/a.md", "member": false },
+    { "scope": "docs/", "path": "docs", "member": false },
+    { "scope": "docs/**", "path": "docs/a/b", "member": true },
+    { "scope": "a/b", "path": "a/b", "member": true },
+    { "scope": "a/b", "path": "a/b/c", "member": false }
+  ]
+}
