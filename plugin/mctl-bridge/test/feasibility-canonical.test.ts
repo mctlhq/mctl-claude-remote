@@ -455,3 +455,115 @@ describe("determinism and immutability", () => {
     expect(digest("test-vector", { a: 1 })).toMatch(/^[0-9a-f]{64}$/);
   });
 });
+
+describe("array own-property hardening", () => {
+  function withGetter(): { arr: unknown[]; calls: () => number } {
+    let n = 0;
+    const arr: unknown[] = [];
+    Object.defineProperty(arr, 0, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        n++;
+        return n;
+      },
+    });
+    return { arr, calls: () => n };
+  }
+
+  test("enumerable index getter is rejected with zero getter calls", () => {
+    const { arr, calls } = withGetter();
+    expect(codeOf(() => canonicalize(arr))).toBe("wrong_type");
+    expect(codeOf(() => canonicalize({ a: arr }))).toBe("wrong_type");
+    expect(codeOf(() => digest("report", arr))).toBe("wrong_type");
+    expect(calls()).toBe(0);
+  });
+
+  test("getter on a later index, and setter-only index, are rejected without invoking", () => {
+    let n = 0;
+    const arr: unknown[] = [1, 2];
+    Object.defineProperty(arr, 1, {
+      enumerable: true,
+      configurable: true,
+      get() {
+        n++;
+        return 2;
+      },
+    });
+    expect(codeOf(() => canonicalize(arr))).toBe("wrong_type");
+    const s: unknown[] = [];
+    Object.defineProperty(s, 0, { enumerable: true, configurable: true, set() { n++; } });
+    expect(codeOf(() => canonicalize(s))).toBe("wrong_type");
+    expect(n).toBe(0);
+  });
+
+  test("accessor arrays can never change bytes between calls", () => {
+    const { arr } = withGetter();
+    const outcomes = [0, 1, 2].map(() => codeOf(() => canonicalize(arr)));
+    expect(outcomes).toEqual(["wrong_type", "wrong_type", "wrong_type"]);
+  });
+
+  test("error is closed and sanitized", () => {
+    const { arr } = withGetter();
+    try {
+      canonicalize(arr);
+      throw new Error("expected throw");
+    } catch (e) {
+      expect(e).toBeInstanceOf(CanonicalError);
+      expect((e as CanonicalError).message).toBe("wrong_type");
+      expect((e as CanonicalError).code).toBe("wrong_type");
+      expect(Object.keys(e as object).sort()).toEqual(["code", "name"]);
+    }
+  });
+
+  test("non-enumerable index data property, sparse holes and non-index extras are rejected", () => {
+    const hidden: unknown[] = [1];
+    Object.defineProperty(hidden, 0, { value: 1, enumerable: false, configurable: true, writable: true });
+    expect(codeOf(() => canonicalize(hidden))).toBe("wrong_type");
+    expect(codeOf(() => canonicalize([1, , 3]))).toBe("wrong_type"); // eslint-disable-line no-sparse-arrays
+    const extra = [1, 2] as unknown[] & { x?: number };
+    extra.x = 1;
+    expect(codeOf(() => canonicalize(extra))).toBe("wrong_type");
+    const hiddenExtra = [1, 2] as unknown[];
+    Object.defineProperty(hiddenExtra, "x", { value: 1, enumerable: false });
+    expect(codeOf(() => canonicalize(hiddenExtra))).toBe("wrong_type");
+    // key count equals length but one index is missing and a non-index key stands in
+    const swapped = [1, 2, 3] as unknown[] & { x?: number };
+    delete (swapped as unknown[])[1];
+    swapped.x = 9;
+    expect(codeOf(() => canonicalize(swapped))).toBe("wrong_type");
+  });
+
+  test("ordinary and frozen dense data arrays keep their bytes", () => {
+    expect(canonicalize([2, 1, "a", true, [3], { b: 1 }])).toBe('[2,1,"a",true,[3],{"b":1}]');
+    expect(canonicalize([])).toBe("[]");
+    const frozen = Object.freeze([2, 1, Object.freeze(["x"])]);
+    expect(canonicalize(frozen)).toBe("[2,1,[\"x\"]]");
+    expect(canonicalize(frozen)).toBe(canonicalize(frozen));
+    expect(canonicalize({ allowed_files: Object.freeze(["a", "b"]) }, opts)).toBe('{"allowed_files":["a","b"]}');
+  });
+
+  test("array with enumerable Symbol property is rejected like plain objects", () => {
+    const arr: unknown[] = [1];
+    (arr as unknown as Record<symbol, unknown>)[Symbol("s")] = 1;
+    expect(codeOf(() => canonicalize(arr))).toBe("wrong_type");
+    const o = { a: 1 } as Record<string | symbol, unknown>;
+    o[Symbol("s")] = 1;
+    expect(codeOf(() => canonicalize(o))).toBe("wrong_type");
+  });
+
+  test("array with non-enumerable Symbol property is rejected", () => {
+    const arr: unknown[] = [1];
+    Object.defineProperty(arr, Symbol("h"), { value: 1, enumerable: false });
+    expect(codeOf(() => canonicalize(arr))).toBe("wrong_type");
+  });
+
+  test("Symbol rejection precedes element encoding: index getter not invoked", () => {
+    for (const enumerable of [true, false]) {
+      const { arr, calls } = withGetter();
+      Object.defineProperty(arr, Symbol("s"), { value: 1, enumerable });
+      expect(codeOf(() => canonicalize(arr))).toBe("wrong_type");
+      expect(calls()).toBe(0);
+    }
+  });
+});

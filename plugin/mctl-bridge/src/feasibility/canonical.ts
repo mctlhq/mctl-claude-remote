@@ -95,6 +95,33 @@ function encodeInteger(n: number): string {
   return String(n);
 }
 
+/**
+ * Validate an array's own properties from descriptors only and return its element values.
+ * Rejects (wrong_type) any Symbol key, any non-index string key other than "length", accessor
+ * or non-enumerable indices, and sparse arrays. No element getter is ever invoked.
+ */
+function readDenseArray(v: unknown[]): unknown[] {
+  const keys = Reflect.ownKeys(v);
+  const len = v.length;
+  const items: unknown[] = new Array<unknown>(len);
+  let count = 0;
+  for (const k of keys) {
+    if (typeof k === "symbol") fail("wrong_type");
+  }
+  for (const k of keys as string[]) {
+    if (k === "length") continue;
+    if (!/^(0|[1-9][0-9]*)$/.test(k)) fail("wrong_type");
+    const i = Number(k);
+    if (i >= len || i >= 4294967295) fail("wrong_type");
+    const d = Object.getOwnPropertyDescriptor(v, k);
+    if (!d || d.get || d.set || !("value" in d) || d.enumerable !== true) fail("wrong_type");
+    items[i] = d.value;
+    count++;
+  }
+  if (count !== len) fail("wrong_type"); // sparse
+  return items;
+}
+
 function encodeValue(v: unknown, depth: number, seen: Set<object>, opts: CanonicalOptions, field: string | null): string {
   if (depth > MAX_DEPTH) fail("too_deep");
   switch (typeof v) {
@@ -118,11 +145,11 @@ function encodeValue(v: unknown, depth: number, seen: Set<object>, opts: Canonic
   seen.add(v);
   try {
     if (Array.isArray(v)) {
-      if (Object.keys(v).length !== v.length) fail("wrong_type"); // sparse or with extra properties
+      const items = readDenseArray(v);
       const parts: string[] = [];
       let prev: string | null = null;
-      for (let i = 0; i < v.length; i++) {
-        const item: unknown = v[i];
+      for (let i = 0; i < items.length; i++) {
+        const item: unknown = items[i];
         if (isSet) {
           if (typeof item !== "string") fail("wrong_type");
           encodeString(item); // scalar check before ordering
