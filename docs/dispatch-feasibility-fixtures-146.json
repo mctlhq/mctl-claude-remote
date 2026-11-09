@@ -1,7 +1,9 @@
 {
   "meta": {
     "title": "Dispatch feasibility fixture matrix, refs #146",
-    "status": "ILLUSTRATIVE DESIGN EXPECTATIONS. Not executable feature tests, not measured readiness, not host facts. All identifiers, digests and values are synthetic.",
+    "status": "ILLUSTRATIVE DESIGN EXPECTATIONS for ACCEPTED DESIGN contracts A1-A6 and the object-set rule (operator-accepted; design only, NOT implemented). Not executable feature tests, not a conformance measurement, not measured readiness, not host facts. All identifiers, digests and values are synthetic. Acceptance authorizes no evaluator/consumption implementation (gate G8 not started; B2 separately gated; provider, matcher and isolation gates unresolved).",
+    "shape_status": "Two shapes coexist. (1) ACCEPTED SCHEMA BASELINE: 'proposals.proposed_schema_baseline' (closed fact value objects, 15 fact keys incl. artifact_contract and authority_decision); the 'proposals' group key is kept only for traceability to PR #170. (2) LEGACY ILLUSTRATIVE SUMMARY SHAPE: top-level 'baseline' (published vector B envelope plus a prose capability_snapshot_summary) and 'cases'/'combined_failures'. The legacy shape is NOT executable under the accepted schemas (facts are prose, not closed value objects; artifact_contract and authority_decision are absent). Legacy case ids are kept only for traceability; their expected reasons arrays use the accepted 13-check expansion where an expansion applies, and the entries listed in 'superseded_illustrative_expectations' record what changed.",
+    "superseded_illustrative_expectations": "Pre-acceptance expansion arrays listed the 11-check snapshot_derived list (no authority.reference entry except via authority_unverified in unverified_provenance, and no contract.artifact entry). They are superseded by the 13-check list in these legacy cases: stale_epoch, wrong_slot, task_and_capability_both_expired, unverified_provenance (authority_unverified unchanged; contract.artifact added), combined_stale_denial_is_not_denial, combined_stale_epoch_and_task_expiry. Also superseded: any reading of a legacy case where binding.schema fails (A5: malformed input throws; binding.schema is pass in every returned report) and allowed_small_task as feasible under the legacy summary (the accepted baseline additionally needs known artifact_contract and a bound authority_decision).",
     "design_doc": "dispatch-feasibility-146.md",
     "encoding": "MCTL-CJ1 (see design doc section 4). Digests here are symbolic labels, except where a case cites design vector B.",
     "verdicts": ["feasible", "busy", "needs_split", "blocked_dependency", "unauthorized", "uncertain"],
@@ -20,15 +22,19 @@
     ],
     "required_checks": "every check_order entry except estimate.advisory",
     "snapshot_derived_checks": [
-      "authority.paths", "authority.commands", "identity.os", "permission.profile", "matcher.compat",
-      "repo.base", "ownership.files", "dependency.declared", "fixtures.data", "slot.idle", "bounds.explicit"
+      "authority.reference", "authority.paths", "authority.commands", "identity.os", "permission.profile",
+      "matcher.compat", "repo.base", "ownership.files", "contract.artifact", "dependency.declared",
+      "fixtures.data", "slot.idle", "bounds.explicit"
     ],
-    "reasons_semantics": "reasons[] is an ORDERED array (not a set, no encoder sort/dedup). Entry = 'check_id:code', one per (check, code) with a non-pass status. Total order = (class rank, check order, code bytewise ascending). Class rank: binding 0, unauthorized 1, blocked_dependency 2, needs_split 3, busy 4, uncertain 5. A reason's class: binding.* -> binding; status fail -> the check's section 5 class; status unknown/absent/stale -> uncertain. The order is NOT ascending by whole string. For consumption results the class is 'consumption' for every entry, then consumption_check_order, then code.",
-    "not_evaluable_rule": "When binding fails because the snapshot is untrusted or not about this task (provenance unverified, other slot, other epoch, invalid schema), every snapshot_derived_checks item is status unknown with code evidence_not_evaluable. When the snapshot is verified and for this slot/epoch but outside its freshness window, every snapshot_derived_checks item is status stale with code evidence_stale. Not-evaluable wins if both apply. Each such check appears exactly once in reasons[] (an explicit reason for it IS its entry). No such check is ever pass or fail. In every case below these entries are written out in full, in check_order; there is no placeholder token.",
+    "snapshot_derived_checks_note": "Accepted list of exactly 13 (A3 added contract.artifact after ownership.files; A4 added authority.reference first). Never included: the seven binding.* checks and estimate.advisory.",
+    "reasons_semantics": "reasons[] is an ORDERED array (not a set, no encoder sort/dedup). Entry = 'check_id:code', one per (check, code) with a non-pass status. Total order = (class rank, check order, code bytewise ascending). Class rank: binding 0, unauthorized 1, blocked_dependency 2, needs_split 3, busy 4, uncertain 5. A reason's class: binding.* -> binding; status fail -> the check's section 5 class; status unknown/absent/stale -> uncertain. ACCEPTED EXCEPTION (A3): for ownership.files each reason has its own class (ownership_conflict, worktree_dirty -> blocked_dependency; ownership_unknown, worktree_unknown -> uncertain) even when the check status is fail. The order is NOT ascending by whole string. For consumption results the class is 'consumption' for every entry, then consumption_check_order, then code.",
+    "not_evaluable_rule": "When binding fails because the snapshot is untrusted or not about this task (provenance unverified, other slot, other epoch), every snapshot_derived_checks item (13) is status unknown with code evidence_not_evaluable, except authority.reference when provenance is unverified: it is unknown with authority_unverified (its own entry, not repeated). When the snapshot is verified and for this slot/epoch but outside its freshness window, every one of the 13 is status stale with code evidence_stale. Not-evaluable wins if both apply. A schema-invalid snapshot is not an expansion case: it is an input error (A5), no report. Each such check appears exactly once in reasons[] (an explicit reason for it IS its entry). No such check is ever pass or fail. In every case below these entries are written out in full, in check_order; there is no placeholder token.",
+    "closed_reason_codes_note": "Closed code set: see design doc 13.8. Includes dependency_unknown, fixture_unknown, artifact_evidence_unknown, artifact_contract_mismatch, worktree_dirty, worktree_unknown, ownership_unknown, authority_unverified, authority_evidence_mismatch, authority_denied, report_not_evaluable. path_pattern_unsupported and authority_applicability_unknown belong to NOT SELECTED alternatives and are not accepted codes.",
     "expectation_reading": "check_status_overrides lists only checks that differ from the all-pass baseline. A case's expected.verdict, binding_valid and reasons are the full expected result. 'mutation' may also override evaluated_at_ms or snapshot fields; the baseline snapshot window ends at 1789999900000 and the envelope expires at 1790000000000.",
     "non_claims": ["not_authorization", "not_reservation", "not_os_isolation", "not_toctou_closure"]
   },
   "baseline": {
+    "status": "LEGACY ILLUSTRATIVE SUMMARY SHAPE, kept for traceability of stable case ids. The envelope is valid under the accepted schemas (design vector B, bytes and digest unchanged). The capability_snapshot_summary is prose and is NOT a valid accepted-schema snapshot (not executable); the accepted-schema baseline is proposals.proposed_schema_baseline.",
     "description": "Small allowed task. All required checks pass. Envelope is design vector B (sha256 43e77d4fafa97cc56fe831d1bdcb145468f821b940bdf1519a074157c9527880).",
     "task_envelope_digest": "43e77d4fafa97cc56fe831d1bdcb145468f821b940bdf1519a074157c9527880",
     "capability_digest": "digest:cap-A-rev-3",
@@ -102,12 +108,12 @@
         "verdict": "uncertain",
         "reasons": [
           "binding.epoch:epoch_stale",
-          "authority.paths:evidence_not_evaluable", "authority.commands:evidence_not_evaluable",
+          "authority.reference:evidence_not_evaluable", "authority.paths:evidence_not_evaluable", "authority.commands:evidence_not_evaluable",
           "identity.os:evidence_not_evaluable", "permission.profile:evidence_not_evaluable",
           "matcher.compat:evidence_not_evaluable", "repo.base:evidence_not_evaluable",
-          "ownership.files:evidence_not_evaluable", "dependency.declared:evidence_not_evaluable",
-          "fixtures.data:evidence_not_evaluable", "slot.idle:evidence_not_evaluable",
-          "bounds.explicit:evidence_not_evaluable"
+          "ownership.files:evidence_not_evaluable", "contract.artifact:evidence_not_evaluable",
+          "dependency.declared:evidence_not_evaluable", "fixtures.data:evidence_not_evaluable",
+          "slot.idle:evidence_not_evaluable", "bounds.explicit:evidence_not_evaluable"
         ]
       }
     },
@@ -121,12 +127,12 @@
         "verdict": "uncertain",
         "reasons": [
           "binding.slot:slot_mismatch",
-          "authority.paths:evidence_not_evaluable", "authority.commands:evidence_not_evaluable",
+          "authority.reference:evidence_not_evaluable", "authority.paths:evidence_not_evaluable", "authority.commands:evidence_not_evaluable",
           "identity.os:evidence_not_evaluable", "permission.profile:evidence_not_evaluable",
           "matcher.compat:evidence_not_evaluable", "repo.base:evidence_not_evaluable",
-          "ownership.files:evidence_not_evaluable", "dependency.declared:evidence_not_evaluable",
-          "fixtures.data:evidence_not_evaluable", "slot.idle:evidence_not_evaluable",
-          "bounds.explicit:evidence_not_evaluable"
+          "ownership.files:evidence_not_evaluable", "contract.artifact:evidence_not_evaluable",
+          "dependency.declared:evidence_not_evaluable", "fixtures.data:evidence_not_evaluable",
+          "slot.idle:evidence_not_evaluable", "bounds.explicit:evidence_not_evaluable"
         ]
       }
     },
@@ -213,12 +219,12 @@
         "verdict": "uncertain",
         "reasons": [
           "binding.capability_fresh:capability_stale", "binding.not_expired:task_expired",
-          "authority.paths:evidence_stale", "authority.commands:evidence_stale",
+          "authority.reference:evidence_stale", "authority.paths:evidence_stale", "authority.commands:evidence_stale",
           "identity.os:evidence_stale", "permission.profile:evidence_stale",
           "matcher.compat:evidence_stale", "repo.base:evidence_stale",
-          "ownership.files:evidence_stale", "dependency.declared:evidence_stale",
-          "fixtures.data:evidence_stale", "slot.idle:evidence_stale",
-          "bounds.explicit:evidence_stale"
+          "ownership.files:evidence_stale", "contract.artifact:evidence_stale",
+          "dependency.declared:evidence_stale", "fixtures.data:evidence_stale",
+          "slot.idle:evidence_stale", "bounds.explicit:evidence_stale"
         ]
       },
       "note": "binding.capability_fresh (rank: binding, check order 5) precedes binding.not_expired (check order 6)."
@@ -237,9 +243,9 @@
           "authority.paths:evidence_not_evaluable", "authority.commands:evidence_not_evaluable",
           "identity.os:evidence_not_evaluable", "permission.profile:evidence_not_evaluable",
           "matcher.compat:evidence_not_evaluable", "repo.base:evidence_not_evaluable",
-          "ownership.files:evidence_not_evaluable", "dependency.declared:evidence_not_evaluable",
-          "fixtures.data:evidence_not_evaluable", "slot.idle:evidence_not_evaluable",
-          "bounds.explicit:evidence_not_evaluable"
+          "ownership.files:evidence_not_evaluable", "contract.artifact:evidence_not_evaluable",
+          "dependency.declared:evidence_not_evaluable", "fixtures.data:evidence_not_evaluable",
+          "slot.idle:evidence_not_evaluable", "bounds.explicit:evidence_not_evaluable"
         ]
       }
     },
@@ -361,12 +367,12 @@
         "verdict": "uncertain",
         "reasons": [
           "binding.capability_fresh:capability_stale",
-          "authority.paths:evidence_stale", "authority.commands:evidence_stale",
+          "authority.reference:evidence_stale", "authority.paths:evidence_stale", "authority.commands:evidence_stale",
           "identity.os:evidence_stale", "permission.profile:evidence_stale",
           "matcher.compat:evidence_stale", "repo.base:evidence_stale",
-          "ownership.files:evidence_stale", "dependency.declared:evidence_stale",
-          "fixtures.data:evidence_stale", "slot.idle:evidence_stale",
-          "bounds.explicit:evidence_stale"
+          "ownership.files:evidence_stale", "contract.artifact:evidence_stale",
+          "dependency.declared:evidence_stale", "fixtures.data:evidence_stale",
+          "slot.idle:evidence_stale", "bounds.explicit:evidence_stale"
         ]
       },
       "proves": "stale evidence cannot yield unauthorized; binding.not_expired still passes because the envelope has not expired"
@@ -381,12 +387,12 @@
         "verdict": "uncertain",
         "reasons": [
           "binding.epoch:epoch_stale", "binding.not_expired:task_expired",
-          "authority.paths:evidence_not_evaluable", "authority.commands:evidence_not_evaluable",
+          "authority.reference:evidence_not_evaluable", "authority.paths:evidence_not_evaluable", "authority.commands:evidence_not_evaluable",
           "identity.os:evidence_not_evaluable", "permission.profile:evidence_not_evaluable",
           "matcher.compat:evidence_not_evaluable", "repo.base:evidence_not_evaluable",
-          "ownership.files:evidence_not_evaluable", "dependency.declared:evidence_not_evaluable",
-          "fixtures.data:evidence_not_evaluable", "slot.idle:evidence_not_evaluable",
-          "bounds.explicit:evidence_not_evaluable"
+          "ownership.files:evidence_not_evaluable", "contract.artifact:evidence_not_evaluable",
+          "dependency.declared:evidence_not_evaluable", "fixtures.data:evidence_not_evaluable",
+          "slot.idle:evidence_not_evaluable", "bounds.explicit:evidence_not_evaluable"
         ]
       },
       "proves": "binding failures are all listed in check order; a wrong-epoch snapshot is not evaluable (not stale) even though it is also past some window"
@@ -445,9 +451,10 @@
     ]
   },
   "proposals": {
-    "status": "PROPOSED / PENDING OWNER DECISION (design doc section 13, gate G9). Illustrative only: not approved, not executable readiness proof, not a conformance claim. Every case names the proposal it illustrates; none of it changes the published design vectors or the legacy cases above.",
+    "status": "ACCEPTED DESIGN (design doc section 13; operator accepted all proposed choices, gate G9 resolved). Group key 'proposals' is kept only for traceability to PR #170. Illustrative only: NOT implemented, not executable readiness proof, no conformance measurement; acceptance authorizes no evaluator/consumption implementation (G8 not started). Every case names the contract it illustrates; none of it changes the published design vectors A/B. 'alternative'/'alternatives' entries are NOT SELECTED historical alternatives, not pending defaults.",
     "provenance_note": "All facts are injected synthetic claims for pure tests. 'verified' is a declaration, not a runtime grant. Digests are symbolic labels.",
     "proposed_schema_baseline": {
+      "status": "ACCEPTED SCHEMA BASELINE (design only, illustrative, not executable). Separate from the legacy summary baseline above; use this for closed-schema cases.",
       "illustrates": ["A1", "A2", "OS", "A3", "A4"],
       "description": "A future proposed schema baseline, separate from the legacy baseline. Its envelope body is byte-identical to the legacy baseline envelope (design vector B, sha256 43e77d4fafa97cc56fe831d1bdcb145468f821b940bdf1519a074157c9527880), and its allowed_files pattern 'docs/example-146.md' is a valid A1 exact path. The snapshot differs from the legacy summary (closed value schemas plus artifact_contract and authority_decision), so its digest is symbolic and is NOT claimed to equal any legacy digest.",
       "capability_digest": "digest:cap-P-rev-1 (symbolic)",
@@ -502,7 +509,7 @@
         { "scope": "docs/a/", "other_scope": "docs/", "intersects": true, "note": "dir/dir ancestor; also checked in reverse order (design doc 13.1)" }
       ],
       "intersection": {
-        "expectation_status": "PENDING (A1); illustrative, not executed",
+        "expectation_status": "ACCEPTED DESIGN (A1); illustrative, not executed",
         "rule": "Normal form after the alias step (terminal /** removed BEFORE the no-star segment grammar): (kind exact|dir, segs). exact/exact: segs equal. exact/dir: dir segs are a PROPER prefix of the exact segs. dir/dir: one segs is a prefix of the other (equal counts). Exact is a leaf: never a prefix of anything; exact a and dir a/ are disjoint.",
         "cases": [
           { "p": "a/b", "q": "a/b", "intersects": true, "why": "equal exact paths" },
@@ -524,8 +531,9 @@
         ]
       },
       "alternatives": {
+        "status": "NOT SELECTED historical alternatives (not pending defaults).",
         "A1-alt-1": "no dir/** alias: 'docs/**' becomes input error; everything else identical.",
-        "A1-alt-2": "defer grammar: any non-exact pattern makes authority.paths unknown (path_pattern_unsupported); with allowed_files ['docs/'] the verdict is uncertain."
+        "A1-alt-2": "defer grammar: any non-exact pattern makes authority.paths unknown (path_pattern_unsupported, not an accepted code); with allowed_files ['docs/'] the verdict is uncertain."
       }
     },
     "a2_missing_entries": {
@@ -553,7 +561,7 @@
         }
       ],
       "key_presence": {
-        "expectation_status": "PENDING (A2/A5); illustrative, not executed",
+        "expectation_status": "ACCEPTED DESIGN (A2/A5); illustrative, not executed",
         "note": "Three distinct situations: (1) fact KEY missing = snapshot input error; (2) key present with status unknown/absent and no value = well-formed evidence-unavailable, dependent check unknown; (3) key present and known but a required entry missing inside the value = check unknown (cases above). Omitted facts are never normalized into invented timestamps, digests or values.",
         "cases": [
           {
@@ -577,7 +585,7 @@
           }
         ]
       },
-      "alternative": "A2-alt: facts carry only {status, observed_ms, value_digest}; every fact-dependent check is unknown, so each case above is uncertain. A2-alt is a different, deferred policy: it does not adopt the key-presence rule (what an omitted fact key means is not decided by it) and is not approved either."
+      "alternative": "NOT SELECTED, A2-alt: facts carry only {status, observed_ms, value_digest}; every fact-dependent check is unknown, so each case above would be uncertain. It did not adopt the key-presence rule; the accepted rule is that an omitted fact key is an input error."
     },
     "object_set": {
       "illustrates": "OS",
@@ -617,7 +625,7 @@
           "note": "TaskEnvelope.dependencies stays an ordered array; no sort, no dedup, no identity validation unless separately proposed."
         }
       ],
-      "alternative": "OS-alt: no object-set schema; duplicates are still rejected by an explicit uniqueness check, but object-entry arrays are not order-checked, so unsorted_set is no longer produced for object-entry arrays (command_decisions/dependencies/fixtures entries). unsorted_set stays valid for STRING sets (attempts_seen.ids, path_policy.forbidden, mandatory_writes.paths, envelope string sets). The actual cost: equal abstract entry sets emitted in different orders produce different capability digests."
+      "alternative": "NOT SELECTED, OS-alt: no object-set schema; duplicates are still rejected by an explicit uniqueness check, but object-entry arrays are not order-checked, so unsorted_set is no longer produced for object-entry arrays (command_decisions/dependencies/fixtures entries). unsorted_set stays valid for STRING sets (attempts_seen.ids, path_policy.forbidden, mandatory_writes.paths, envelope string sets). The actual cost: equal abstract entry sets emitted in different orders produce different capability digests."
     },
     "a3_artifact_and_worktree": {
       "illustrates": "A3",
@@ -630,7 +638,7 @@
         { "id": "p_artifact_fact_key_missing", "mutation": "facts has no artifact_contract key", "expected": { "result": "input error (A2/A5)", "input": "snapshot", "code": "missing_key", "path": "facts.artifact_contract" }, "note": "Missing KEY is a schema input error, not artifact_evidence_unknown (which needs the key present with status unknown/absent, see p_artifact_unknown)." }
       ],
       "ownership_files_combination": {
-        "expectation_status": "PENDING (A3); illustrative, not executed. Per-reason class is the proposed reading; the alternative follows.",
+        "expectation_status": "ACCEPTED DESIGN (A3); illustrative, not executed. Per-reason class is the accepted reading; the not-selected alternative follows.",
         "rule": "Known failure (worktree.clean false OR ownership.conflict true) -> check fail, blocked_dependency. Else any unavailable (status unknown/absent) -> check unknown. Else both known ok -> pass. All applicable codes retained; check reason_codes ascending bytewise. reasons[] sort key unchanged (class rank, check order, code) with per-reason class: worktree_dirty/ownership_conflict = blocked_dependency (2); worktree_unknown/ownership_unknown = uncertain (5) even when the check status is fail.",
         "cases": [
           { "id": "o_both_clean", "worktree": "known clean", "ownership": "known conflict false", "check_status": "pass", "reasons": [], "verdict": "feasible (all else pass)" },
@@ -641,9 +649,9 @@
           { "id": "o_conflict_unknown_worktree", "worktree": "status unknown, no value", "ownership": "known conflict true", "check_status": "fail", "check_reason_codes": ["ownership_conflict", "worktree_unknown"], "reasons": ["ownership.files:ownership_conflict", "ownership.files:worktree_unknown"], "reason_classes": ["blocked_dependency", "uncertain"], "verdict": "blocked_dependency" },
           { "id": "o_dirty_and_conflict", "worktree": "known dirty", "ownership": "known conflict true", "check_status": "fail", "check_reason_codes": ["ownership_conflict", "worktree_dirty"], "reasons": ["ownership.files:ownership_conflict", "ownership.files:worktree_dirty"], "reason_classes": ["blocked_dependency", "blocked_dependency"], "verdict": "blocked_dependency" }
         ],
-        "alternative_A3_alt_owner": "Keep the class rule strictly per check status: same check status and same codes, but every reason of a fail check has class blocked_dependency, so o_dirty_unknown_owner lists ownership.files:ownership_unknown before ownership.files:worktree_dirty and o_conflict_unknown_worktree keeps ownership_conflict before worktree_unknown (both by code). section 6 item 4 is unchanged under this alternative. A lossy variant that drops the unavailable reasons is rejected."
+        "alternative_A3_alt_owner": "NOT SELECTED historical alternative. Keep the class rule strictly per check status: same check status and same codes, but every reason of a fail check has class blocked_dependency, so o_dirty_unknown_owner lists ownership.files:ownership_unknown before ownership.files:worktree_dirty and o_conflict_unknown_worktree keeps ownership_conflict before worktree_unknown (both by code). section 6 item 4 is unchanged under this alternative. A lossy variant that drops the unavailable reasons is rejected."
       },
-      "alternative": "A3-alt: no artifact_contract/worktree facts; contract.artifact is always unknown, so every case is uncertain with contract.artifact:artifact_evidence_unknown."
+      "alternative": "NOT SELECTED, A3-alt: no artifact_contract/worktree facts; contract.artifact is always unknown, so every case is uncertain with contract.artifact:artifact_evidence_unknown."
     },
     "a4_authority": {
       "illustrates": "A4",
@@ -656,18 +664,19 @@
         { "id": "p_none_with_not_required", "envelope_ref": "none/none", "evidence": "none/none not_required, verified", "check_status_overrides": {}, "expected": { "verdict": "feasible", "reasons": [] } },
         { "id": "p_not_required_cannot_bypass_ref", "envelope_ref": "operator_decision/decision-0001", "evidence": "none/none not_required", "check_status_overrides": { "authority.reference": "unknown" }, "expected": { "verdict": "uncertain", "reasons": ["authority.reference:authority_evidence_mismatch"] } }
       ],
-      "alternative": "A4-alt: kind none is always unknown (authority_applicability_unknown); p_none_with_not_required becomes uncertain, other cases unchanged."
+      "alternative": "NOT SELECTED, A4-alt: kind none is always unknown (authority_applicability_unknown, not an accepted code); p_none_with_not_required would become uncertain, other cases unchanged."
     },
     "a5_input_errors": {
       "illustrates": "A5",
       "cases": [
         { "id": "p_malformed_lexical", "input": "envelope raw text with duplicate key", "expected": { "result": "throw FeasibilityInputError", "input": "envelope", "code": "duplicate_key", "path": "(root)" }, "note": "No report, no sentinel ids or digests, offending key not echoed." },
+        { "id": "p_schema_unknown_key", "input": "envelope with an extra, unlisted top-level key", "expected": { "result": "throw FeasibilityInputError", "input": "envelope", "code": "unknown_key", "path": "(root)" }, "note": "Sanitized input error, not a report with binding.schema fail; the offending key is not echoed." },
         { "id": "p_schema_bad_range", "input": "snapshot captured_at_ms > expires_at_ms", "expected": { "result": "throw FeasibilityInputError", "input": "snapshot", "code": "bad_range", "path": "expires_at_ms" } },
         { "id": "p_clock_not_integer", "input": "nowMs = 1.5", "expected": { "result": "throw FeasibilityInputError", "input": "clock", "code": "forbidden_number", "path": "nowMs" } },
         { "id": "p_valid_stale", "legacy_case": "task_and_capability_both_expired", "input": "well-formed, verified, same slot, past window", "expected": { "result": "report", "verdict": "uncertain", "note": "stale is a valid report, not an error; binding.schema is pass." } },
         { "id": "p_valid_wrong_slot", "legacy_case": "wrong_slot", "input": "well-formed snapshot for slot-y", "expected": { "result": "report", "verdict": "uncertain" } }
       ],
-      "alternative": "A5-alt: malformed cases return a sanitized schema-failure report; the sentinel/binding policy is undesigned and these cases have no defined expected result."
+      "alternative": "NOT SELECTED, A5-alt: malformed cases would return a sanitized schema-failure report; the sentinel/binding policy was never designed. Accepted A5: malformed input throws a sanitized FeasibilityInputError and never yields a binding report (binding.schema is pass in every returned report)."
     },
     "a6_malformed_report_consumption": {
       "illustrates": "A6",
@@ -704,11 +713,11 @@
         { "id": "p_consume_malformed_envelope", "input": "presented envelope malformed", "expected": { "result": "throw FeasibilityInputError (A5)", "input": "envelope" } },
         { "id": "p_consume_valid_report_mismatch", "legacy_case": "same_epoch_fresh_capability_change", "expected": { "valid": false, "reasons": ["consume.capability_digest:capability_digest_mismatch", "consume.capability_revision:capability_revision_mismatch"] }, "note": "Schema-valid report: all eight checks run; mismatch is distinct from expiry." }
       ],
-      "alternative": "A6-alt: a schema-invalid report makes validate_report_for_consumption throw FeasibilityInputError (input: report); there is no ConsumptionResult for it."
+      "alternative": "NOT SELECTED, A6-alt: a schema-invalid report would make validate_report_for_consumption throw FeasibilityInputError (input: report). Accepted A6: a ConsumptionResult with valid=false, consume.report_schema fail report_schema_invalid, and seven checks unknown report_not_evaluable."
     },
-    "snapshot_derived_list_note": "Committed list = the 11 entries of meta.snapshot_derived_checks (audited entry by entry, unchanged). Adopted lists (check order): none = those 11; A3 only = 11 plus contract.artifact after ownership.files (12); A4 only = 11 plus authority.reference first (12); A3+A4 = authority.reference, authority.paths, authority.commands, identity.os, permission.profile, matcher.compat, repo.base, ownership.files, contract.artifact, dependency.declared, fixtures.data, slot.idle, bounds.explicit (13). binding.* checks and estimate.advisory are never in the list. Evidence dependencies: authority.paths<-path_policy,mandatory_writes; authority.commands<-command_decisions; identity.os<-os_identity; permission.profile<-permission_profile; matcher.compat<-permission_profile,command_decisions; repo.base<-repo_base; ownership.files<-ownership(+worktree, A3); contract.artifact<-artifact_contract (A3); authority.reference<-authority_decision (A4); dependency.declared<-dependencies; fixtures.data<-fixtures; slot.idle<-slot_state; bounds.explicit<-limits,mandatory_writes; binding.attempt_unique<-attempts_seen.",
+    "snapshot_derived_list_note": "Accepted list = the 13 entries of meta.snapshot_derived_checks, in check order: authority.reference, authority.paths, authority.commands, identity.os, permission.profile, matcher.compat, repo.base, ownership.files, contract.artifact, dependency.declared, fixtures.data, slot.idle, bounds.explicit (history: the pre-acceptance list had 11, without authority.reference and contract.artifact). binding.* checks and estimate.advisory are never in the list. Evidence dependencies: authority.paths<-path_policy,mandatory_writes; authority.commands<-command_decisions; identity.os<-os_identity; permission.profile<-permission_profile; matcher.compat<-permission_profile,command_decisions; repo.base<-repo_base; ownership.files<-ownership(+worktree, A3); contract.artifact<-artifact_contract (A3); authority.reference<-authority_decision (A4); dependency.declared<-dependencies; fixtures.data<-fixtures; slot.idle<-slot_state; bounds.explicit<-limits,mandatory_writes; binding.attempt_unique<-attempts_seen.",
     "snapshot_derived_expansion": {
-      "expectation_status": "PENDING (A3+A4 both adopted); illustrative, not executed. Legacy cases keep the 11-list.",
+      "expectation_status": "ACCEPTED DESIGN (A3+A4); illustrative, not executed. The legacy cases carry the same 13-entry expansion (see meta.superseded_illustrative_expectations).",
       "note": "Each adopted check appears exactly once; an explicit reason for a check IS its entry (authority.reference:authority_unverified is not repeated as evidence_not_evaluable). Order: binding entries (rank 0), then uncertain class by check order.",
       "cases": [
         {
