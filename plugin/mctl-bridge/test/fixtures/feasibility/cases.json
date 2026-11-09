@@ -1,0 +1,442 @@
+{
+  "_note": "Executable synthetic evaluate() cases over baseline.json, derived from the reviewed design expectations (design doc sections 5, 6, 13, 14; fixtures proposals/cases). Each case applies dotted-path `set` values and `unset` paths (numeric segments index arrays; roots are envelope, snapshot, now) to a deep copy of the baseline. `expand` appends the thirteen snapshot-derived entries in check order with the given code after the listed explicit reasons (`authority_unverified` replaces the generic code for authority.reference when given as `authority_reference`). No live source.",
+  "evaluate": [
+    { "id": "allowed_small_task", "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] } },
+    {
+      "id": "forbidden_path_dir_dir",
+      "set": { "envelope.allowed_files": ["docs/"], "snapshot.facts.path_policy.value.forbidden": ["docs/secret/"] },
+      "expect": { "binding_valid": true, "verdict": "unauthorized", "reasons": ["authority.paths:path_forbidden"] }
+    },
+    {
+      "id": "forbidden_path_alias",
+      "set": { "envelope.allowed_files": ["docs/**"], "snapshot.facts.path_policy.value.forbidden": ["docs/example-146.md"] },
+      "expect": { "binding_valid": true, "verdict": "unauthorized", "reasons": ["authority.paths:path_forbidden"] }
+    },
+    {
+      "id": "forbidden_disjoint_boundary_passes",
+      "set": { "envelope.allowed_files": ["docs/"], "snapshot.facts.path_policy.value.forbidden": ["docs-x/"], "snapshot.facts.mandatory_writes.value.paths": ["docs/a.md"] },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "mandatory_write_outside_allowed",
+      "set": { "snapshot.facts.mandatory_writes.value.paths": ["docs/example-146.md", "other/x.md"] },
+      "expect": { "binding_valid": true, "verdict": "unauthorized", "reasons": ["authority.paths:mandatory_write_outside_allowed"] }
+    },
+    {
+      "id": "mandatory_writes_unknown_blocks_path_pass",
+      "set": { "snapshot.facts.mandatory_writes": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["authority.paths:mandatory_writes_unknown", "bounds.explicit:mandatory_writes_unknown"] }
+    },
+    {
+      "id": "path_policy_unknown",
+      "set": { "snapshot.facts.path_policy": { "status": "absent", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["authority.paths:path_policy_unknown"] }
+    },
+    {
+      "id": "forbidden_and_unknown_mandatory_both_retained",
+      "set": { "envelope.allowed_files": ["docs/"], "snapshot.facts.path_policy.value.forbidden": ["docs/"], "snapshot.facts.mandatory_writes": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "unauthorized", "reasons": ["authority.paths:path_forbidden", "authority.paths:mandatory_writes_unknown", "bounds.explicit:mandatory_writes_unknown"] }
+    },
+    {
+      "id": "busy",
+      "set": { "snapshot.facts.slot_state.value.idle": false },
+      "expect": { "binding_valid": true, "verdict": "busy", "reasons": ["slot.idle:slot_busy"] }
+    },
+    {
+      "id": "slot_idle_unknown",
+      "set": { "snapshot.facts.slot_state": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["slot.idle:slot_idle_unknown"] }
+    },
+    {
+      "id": "busy_listed_before_unknown_identity",
+      "set": { "snapshot.facts.slot_state.value.idle": false, "snapshot.facts.os_identity": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "busy", "reasons": ["slot.idle:slot_busy", "identity.os:identity_os_unknown"] }
+    },
+    {
+      "id": "duplicate_attempt",
+      "set": { "snapshot.facts.attempts_seen.value.ids": ["a-00000000-0000-4000-8000-000000000002"] },
+      "expect": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.attempt_unique:attempt_duplicate"], "retained": ["authority.reference", "authority.paths", "authority.commands", "identity.os", "permission.profile", "matcher.compat", "repo.base", "ownership.files", "contract.artifact", "dependency.declared", "fixtures.data", "slot.idle", "bounds.explicit"] }
+    },
+    {
+      "id": "attempt_other_id_passes",
+      "set": { "snapshot.facts.attempts_seen.value.ids": ["a-00000000-0000-4000-8000-000000000001"] },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "attempts_seen_unavailable",
+      "set": { "snapshot.facts.attempts_seen": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.attempt_unique:attempt_unverified"] }
+    },
+    {
+      "id": "changed_base",
+      "set": { "snapshot.facts.repo_base.value.sha": "1123456789abcdef0123456789abcdef01234567" },
+      "expect": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["repo.base:base_moved"] }
+    },
+    {
+      "id": "repo_base_absent",
+      "set": { "snapshot.facts.repo_base": { "status": "absent", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["repo.base:repo_base_unknown"] }
+    },
+    {
+      "id": "unavailable_fixture",
+      "set": { "snapshot.facts.fixtures.value.entries": [{ "id": "fixture:synthetic-a", "available": false }] },
+      "expect": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["fixtures.data:fixture_unavailable"] }
+    },
+    {
+      "id": "fixture_entry_missing",
+      "set": { "snapshot.facts.fixtures.value.entries": [] },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["fixtures.data:fixture_unknown"] }
+    },
+    {
+      "id": "empty_fixture_set_passes_without_fact",
+      "set": { "envelope.fixtures": [], "snapshot.facts.fixtures": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "prohibited_command",
+      "set": { "snapshot.facts.command_decisions.value.entries": [{ "command": "cmd:git-diff-check", "decision": "denied" }] },
+      "expect": { "binding_valid": true, "verdict": "unauthorized", "reasons": ["authority.commands:command_denied"] }
+    },
+    {
+      "id": "denial_not_waived_by_matcher_gap",
+      "set": { "snapshot.facts.command_decisions.value.entries": [{ "command": "cmd:git-diff-check", "decision": "denied" }], "snapshot.facts.matcher_attestation": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "unauthorized", "reasons": ["authority.commands:command_denied", "matcher.compat:matcher_unverified"] }
+    },
+    {
+      "id": "mixed_commands_denied_and_unknown",
+      "set": {
+        "envelope.required_commands": ["cmd:a", "cmd:git-diff-check"],
+        "snapshot.facts.command_decisions.value.entries": [{ "command": "cmd:a", "decision": "denied" }]
+      },
+      "expect": { "binding_valid": true, "verdict": "unauthorized", "reasons": ["authority.commands:command_denied", "authority.commands:command_decision_unknown"], "check_status": { "authority.commands": "fail" } }
+    },
+    {
+      "id": "command_decision_unknown_entry",
+      "set": { "snapshot.facts.command_decisions.value.entries": [{ "command": "cmd:git-diff-check", "decision": "unknown" }] },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["authority.commands:command_decision_unknown"] }
+    },
+    {
+      "id": "empty_required_commands_passes_commands_but_matcher_not_waived",
+      "set": { "envelope.required_commands": [], "snapshot.facts.command_decisions": { "status": "unknown", "observed_ms": 1789999000000 }, "snapshot.facts.matcher_attestation": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["matcher.compat:matcher_unverified"], "check_status": { "authority.commands": "pass", "matcher.compat": "unknown" } }
+    },
+    {
+      "id": "matcher_revision_mismatch",
+      "set": { "snapshot.facts.matcher_attestation.value.matcher_revision": "mctl.matcher-contract/2" },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["matcher.compat:matcher_attestation_mismatch"], "check_status": { "matcher.compat": "unknown" } }
+    },
+    {
+      "id": "matcher_digest_mismatch",
+      "set": { "snapshot.facts.matcher_attestation.value.profile_digest": "0000000000000000000000000000000000000000000000000000000000000002" },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["matcher.compat:matcher_attestation_mismatch"] }
+    },
+    {
+      "id": "matcher_incompatible",
+      "set": { "snapshot.facts.matcher_attestation.value.compatible": false },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["matcher.compat:matcher_attestation_mismatch"] }
+    },
+    {
+      "id": "matcher_profile_unavailable",
+      "set": { "snapshot.facts.permission_profile": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["permission.profile:permission_profile_unknown", "matcher.compat:matcher_unverified"] }
+    },
+    {
+      "id": "permission_profile_absent",
+      "set": { "snapshot.facts.permission_profile": { "status": "absent", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["permission.profile:permission_profile_absent", "matcher.compat:matcher_unverified"], "check_status": { "permission.profile": "absent" } }
+    },
+    {
+      "id": "identity_trusted_false_is_unknown",
+      "set": { "snapshot.facts.os_identity.value.trusted": false },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["identity.os:identity_os_unknown"], "check_status": { "identity.os": "unknown" } }
+    },
+    {
+      "id": "identity_absent",
+      "set": { "snapshot.facts.os_identity": { "status": "absent", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["identity.os:identity_os_absent"], "check_status": { "identity.os": "absent" } }
+    },
+    {
+      "id": "conflict_files_owner",
+      "set": { "snapshot.facts.ownership.value.conflict": true },
+      "expect": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["ownership.files:ownership_conflict"] }
+    },
+    {
+      "id": "worktree_dirty_and_ownership_unknown_mixed",
+      "set": { "snapshot.facts.worktree.value.clean": false, "snapshot.facts.ownership": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["ownership.files:worktree_dirty", "ownership.files:ownership_unknown"], "check_status": { "ownership.files": "fail" } }
+    },
+    {
+      "id": "conflict_and_worktree_unknown_mixed",
+      "set": { "snapshot.facts.ownership.value.conflict": true, "snapshot.facts.worktree": { "status": "absent", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["ownership.files:ownership_conflict", "ownership.files:worktree_unknown"] }
+    },
+    {
+      "id": "dirty_and_conflict_ordered_by_code",
+      "set": { "snapshot.facts.ownership.value.conflict": true, "snapshot.facts.worktree.value.clean": false },
+      "expect": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["ownership.files:ownership_conflict", "ownership.files:worktree_dirty"] }
+    },
+    {
+      "id": "both_unknown_ownership_before_worktree",
+      "set": { "snapshot.facts.ownership": { "status": "unknown", "observed_ms": 1789999000000 }, "snapshot.facts.worktree": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["ownership.files:ownership_unknown", "ownership.files:worktree_unknown"] }
+    },
+    {
+      "id": "artifact_trailer_mismatch",
+      "set": { "snapshot.facts.artifact_contract.value.trailer": "Agent: other" },
+      "expect": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["contract.artifact:artifact_contract_mismatch"] }
+    },
+    {
+      "id": "artifact_evidence_unknown",
+      "set": { "snapshot.facts.artifact_contract": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["contract.artifact:artifact_evidence_unknown"] }
+    },
+    {
+      "id": "authority_denied",
+      "set": { "snapshot.facts.authority_decision.value.decision": "denied" },
+      "expect": { "binding_valid": true, "verdict": "unauthorized", "reasons": ["authority.reference:authority_denied"] }
+    },
+    {
+      "id": "authority_unbound_id",
+      "set": { "snapshot.facts.authority_decision.value.id": "decision-0002" },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["authority.reference:authority_evidence_mismatch"] }
+    },
+    {
+      "id": "authority_not_required_for_non_none_ref",
+      "set": { "snapshot.facts.authority_decision.value.decision": "not_required" },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["authority.reference:authority_evidence_mismatch"] }
+    },
+    {
+      "id": "authority_none_with_verified_not_required_passes",
+      "set": { "envelope.authority_ref": { "kind": "none", "id": "none" }, "snapshot.facts.authority_decision.value": { "kind": "none", "id": "none", "decision": "not_required" } },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "authority_none_with_allowed_is_mismatch",
+      "set": { "envelope.authority_ref": { "kind": "none", "id": "none" }, "snapshot.facts.authority_decision.value": { "kind": "none", "id": "none", "decision": "allowed" } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["authority.reference:authority_evidence_mismatch"] }
+    },
+    {
+      "id": "authority_fact_unavailable",
+      "set": { "snapshot.facts.authority_decision": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["authority.reference:authority_unverified"] }
+    },
+    {
+      "id": "dependency_unmet_and_human_step_both_retained",
+      "set": {
+        "envelope.dependencies": [{ "id": "dep:a", "kind": "pr", "step": "automatic" }, { "id": "dep:b", "kind": "review", "step": "human" }],
+        "snapshot.facts.dependencies.value.entries": [{ "id": "dep:a", "met": false }]
+      },
+      "expect": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["dependency.declared:dependency_unmet", "dependency.declared:human_step_required"], "check_status": { "dependency.declared": "fail" } }
+    },
+    {
+      "id": "human_step_only_needs_split",
+      "set": { "envelope.dependencies": [{ "id": "dep:b", "kind": "review", "step": "human" }] },
+      "expect": { "binding_valid": true, "verdict": "needs_split", "reasons": ["dependency.declared:human_step_required"] }
+    },
+    {
+      "id": "dependency_entry_missing",
+      "set": { "envelope.dependencies": [{ "id": "dep:a", "kind": "pr", "step": "automatic" }] },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["dependency.declared:dependency_unknown"] }
+    },
+    {
+      "id": "dependency_met_passes",
+      "set": { "envelope.dependencies": [{ "id": "dep:a", "kind": "pr", "step": "automatic" }], "snapshot.facts.dependencies.value.entries": [{ "id": "dep:a", "met": true }] },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "no_dependencies_pass_without_fact",
+      "set": { "snapshot.facts.dependencies": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "verified_bound_exceeded_by_envelope_bound",
+      "set": { "envelope.allowed_files": ["docs/"], "snapshot.facts.mandatory_writes.value.paths": ["docs/a", "docs/b", "docs/c", "docs/d"] },
+      "expect": { "binding_valid": true, "verdict": "needs_split", "reasons": ["bounds.explicit:verified_bound_exceeded"] }
+    },
+    {
+      "id": "verified_bound_exceeded_by_limits",
+      "set": { "snapshot.facts.limits.value.max_changed_files": 0 },
+      "expect": { "binding_valid": true, "verdict": "needs_split", "reasons": ["bounds.explicit:verified_bound_exceeded"] }
+    },
+    {
+      "id": "limits_unknown_alone",
+      "set": { "snapshot.facts.limits": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["bounds.explicit:limits_unknown"] }
+    },
+    {
+      "id": "exceeded_by_envelope_bound_retained_beside_limits_unknown",
+      "set": { "envelope.allowed_files": ["docs/"], "snapshot.facts.mandatory_writes.value.paths": ["docs/a", "docs/b", "docs/c", "docs/d"], "snapshot.facts.limits": { "status": "absent", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "needs_split", "reasons": ["bounds.explicit:verified_bound_exceeded", "bounds.explicit:limits_unknown"] }
+    },
+    {
+      "id": "allowed_files_width_alone_never_fails_bounds",
+      "set": { "envelope.allowed_files": ["docs/"] },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "advisory_estimate_exceeds_bound_never_changes_verdict",
+      "set": { "envelope.advisory.est_changed_files": 9 },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [], "advisory_codes": ["estimate_exceeds_bound"] }
+    },
+    {
+      "id": "advisory_bigint_exact_minutes",
+      "set": { "envelope.advisory.est_minutes": 9007199254740991, "envelope.bounds.max_wall_ms": 9007199254740991 },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [], "advisory_codes": ["estimate_exceeds_bound", "wall_budget_exceeds_runner_limit"] }
+    },
+    {
+      "id": "advisory_wall_budget_above_runner_limit",
+      "set": { "envelope.bounds.max_wall_ms": 8000000 },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [], "advisory_codes": ["wall_budget_exceeds_runner_limit"] }
+    },
+    {
+      "id": "advisory_wall_not_emitted_when_limits_unknown",
+      "set": { "envelope.bounds.max_wall_ms": 8000000, "snapshot.facts.limits": { "status": "unknown", "observed_ms": 1789999000000 } },
+      "expect": { "binding_valid": true, "verdict": "uncertain", "reasons": ["bounds.explicit:limits_unknown"], "advisory_codes": [] }
+    },
+    {
+      "id": "stale_epoch",
+      "set": { "snapshot.slot_epoch": "8" },
+      "expect": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.epoch:epoch_stale", "binding.attempt_unique:attempt_unverified"], "expand": "evidence_not_evaluable" }
+    },
+    {
+      "id": "wrong_slot",
+      "set": { "snapshot.slot": "slot-y" },
+      "expect": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.slot:slot_mismatch", "binding.attempt_unique:attempt_unverified"], "expand": "evidence_not_evaluable" }
+    },
+    {
+      "id": "unverified_provenance",
+      "set": { "snapshot.provenance.verified": false },
+      "expect": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.provenance:provenance_unverified", "binding.attempt_unique:attempt_unverified"], "expand": "evidence_not_evaluable", "expand_authority": "authority_unverified" }
+    },
+    {
+      "id": "unverified_and_wrong_epoch_not_evaluable_wins_over_stale",
+      "set": { "snapshot.provenance.verified": false, "snapshot.slot_epoch": "9", "now": 1789999950000 },
+      "expect": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.provenance:provenance_unverified", "binding.epoch:epoch_stale", "binding.capability_fresh:capability_stale", "binding.attempt_unique:attempt_unverified"], "expand": "evidence_not_evaluable", "expand_authority": "authority_unverified" }
+    },
+    {
+      "id": "capability_stale_after_window",
+      "set": { "now": 1789999950000 },
+      "expect": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.capability_fresh:capability_stale", "binding.attempt_unique:attempt_unverified"], "expand": "evidence_stale" }
+    },
+    {
+      "id": "capability_stale_captured_in_future",
+      "set": { "now": 1788999999999 },
+      "expect": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.capability_fresh:capability_stale", "binding.attempt_unique:attempt_unverified"], "expand": "evidence_stale" }
+    },
+    {
+      "id": "window_edges_inclusive_captured",
+      "set": { "now": 1789999000000 },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "window_edges_inclusive_expires",
+      "set": { "now": 1789999900000 },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "task_expired_only_retains_evaluable_checks",
+      "set": { "envelope.expires_at_ms": 1789999400000 },
+      "expect": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.not_expired:task_expired"], "retained": ["authority.reference", "authority.paths", "authority.commands", "identity.os", "permission.profile", "matcher.compat", "repo.base", "ownership.files", "contract.artifact", "dependency.declared", "fixtures.data", "slot.idle", "bounds.explicit"] }
+    },
+    {
+      "id": "task_expiry_inclusive_boundary",
+      "set": { "envelope.expires_at_ms": 1789999500000 },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "task_and_capability_both_expired",
+      "set": { "now": 1790000100000 },
+      "expect": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.capability_fresh:capability_stale", "binding.not_expired:task_expired", "binding.attempt_unique:attempt_unverified"], "expand": "evidence_stale" }
+    },
+    {
+      "id": "retained_known_failure_under_invalid_binding_stays_uncertain",
+      "set": { "envelope.expires_at_ms": 1789999400000, "snapshot.facts.slot_state.value.idle": false },
+      "expect": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.not_expired:task_expired", "slot.idle:slot_busy"] }
+    },
+    {
+      "id": "stale_snapshot_never_denies",
+      "set": { "now": 1789999950000, "snapshot.facts.command_decisions.value.entries": [{ "command": "cmd:git-diff-check", "decision": "denied" }] },
+      "expect": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.capability_fresh:capability_stale", "binding.attempt_unique:attempt_unverified"], "expand": "evidence_stale" }
+    },
+    {
+      "id": "slot_32_chars_accepted",
+      "set": { "envelope.slot": "abcdefghijklmnopqrstuvwxyz012345", "snapshot.slot": "abcdefghijklmnopqrstuvwxyz012345" },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "epoch_zero_and_max_accepted",
+      "set": { "envelope.slot_epoch": "9007199254740991", "snapshot.slot_epoch": "9007199254740991" },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "epoch_zero_accepted",
+      "set": { "envelope.slot_epoch": "0", "snapshot.slot_epoch": "0" },
+      "expect": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "zero_bounds_and_zero_estimates_accepted",
+      "set": { "envelope.bounds": { "max_changed_files": 0, "max_wall_ms": 0 }, "envelope.advisory": { "est_changed_files": 0, "est_minutes": 0 }, "snapshot.revision": 0 },
+      "expect": { "binding_valid": true, "verdict": "needs_split", "reasons": ["bounds.explicit:verified_bound_exceeded"], "advisory_codes": [] }
+    }
+  ],
+  "input_errors": [
+    { "id": "env_unknown_key", "set": { "envelope.extra": 1 }, "error": { "input": "envelope", "code": "unknown_key", "path": "" } },
+    { "id": "env_missing_key", "unset": ["envelope.bounds"], "error": { "input": "envelope", "code": "missing_key", "path": "bounds" } },
+    { "id": "env_null", "set": { "envelope.base.branch": null }, "error": { "input": "envelope", "code": "null_value", "path": "base.branch" } },
+    { "id": "env_float", "set": { "envelope.advisory.est_minutes": 1.5 }, "error": { "input": "envelope", "code": "forbidden_number", "path": "advisory.est_minutes" } },
+    { "id": "env_negative", "set": { "envelope.bounds.max_wall_ms": -1 }, "error": { "input": "envelope", "code": "bad_range", "path": "bounds.max_wall_ms" } },
+    { "id": "env_unsafe", "set": { "envelope.expires_at_ms": 9007199254740992 }, "error": { "input": "envelope", "code": "unsafe_integer", "path": "expires_at_ms" } },
+    { "id": "env_wrong_type", "set": { "envelope.allowed_files": "docs/" }, "error": { "input": "envelope", "code": "wrong_type", "path": "allowed_files" } },
+    { "id": "env_schema_constant", "set": { "envelope.schema": "mctl.task-envelope/2" }, "error": { "input": "envelope", "code": "bad_value", "path": "schema" } },
+    { "id": "env_set_unsorted", "set": { "envelope.allowed_files": ["docs/b", "docs/a"] }, "error": { "input": "envelope", "code": "unsorted_set", "path": "allowed_files" } },
+    { "id": "env_set_duplicate", "set": { "envelope.required_commands": ["cmd:a", "cmd:a"] }, "error": { "input": "envelope", "code": "unsorted_set", "path": "required_commands" } },
+    { "id": "env_command_uppercase_is_grammar", "set": { "envelope.required_commands": ["cmd:Z"] }, "error": { "input": "envelope", "code": "bad_pattern", "path": "required_commands" } },
+    { "id": "env_slot_33", "set": { "envelope.slot": "abcdefghijklmnopqrstuvwxyz0123456" }, "error": { "input": "envelope", "code": "bad_pattern", "path": "slot" } },
+    { "id": "env_slot_empty", "set": { "envelope.slot": "" }, "error": { "input": "envelope", "code": "bad_pattern", "path": "slot" } },
+    { "id": "env_slot_upper", "set": { "envelope.slot": "Slot" }, "error": { "input": "envelope", "code": "bad_pattern", "path": "slot" } },
+    { "id": "env_epoch_leading_zero", "set": { "envelope.slot_epoch": "07" }, "error": { "input": "envelope", "code": "bad_pattern", "path": "slot_epoch" } },
+    { "id": "env_epoch_over_max", "set": { "envelope.slot_epoch": "9007199254740992" }, "error": { "input": "envelope", "code": "bad_range", "path": "slot_epoch" } },
+    { "id": "env_epoch_number", "set": { "envelope.slot_epoch": 7 }, "error": { "input": "envelope", "code": "wrong_type", "path": "slot_epoch" } },
+    { "id": "env_task_id_format", "set": { "envelope.task_id": "t-00000000-0000-4000-8000-00000000000G" }, "error": { "input": "envelope", "code": "bad_pattern", "path": "task_id" } },
+    { "id": "env_trailing_newline_not_matched", "set": { "envelope.worktree_label": "wt-1\n" }, "error": { "input": "envelope", "code": "bad_pattern", "path": "worktree_label" } },
+    { "id": "env_authority_none_needs_none_id", "set": { "envelope.authority_ref": { "kind": "none", "id": "decision-0001" } }, "error": { "input": "envelope", "code": "bad_value", "path": "authority_ref.id" } },
+    { "id": "env_authority_kind_with_none_id", "set": { "envelope.authority_ref": { "kind": "operator_decision", "id": "none" } }, "error": { "input": "envelope", "code": "bad_value", "path": "authority_ref.id" } },
+    { "id": "env_glob_grammar", "set": { "envelope.allowed_files": ["docs/*.md"] }, "error": { "input": "envelope", "code": "bad_path_grammar", "path": "allowed_files" } },
+    { "id": "env_empty_pattern", "set": { "envelope.allowed_files": [""] }, "error": { "input": "envelope", "code": "bad_path_grammar", "path": "allowed_files" } },
+    { "id": "env_drive_prefix", "set": { "envelope.allowed_files": ["C:/x"] }, "error": { "input": "envelope", "code": "bad_path_grammar", "path": "allowed_files" } },
+    { "id": "env_repo_dotdot", "set": { "envelope.repo": "example-org/.." }, "error": { "input": "envelope", "code": "bad_pattern", "path": "repo" } },
+    { "id": "env_branch_traversal", "set": { "envelope.base.branch": "a..b" }, "error": { "input": "envelope", "code": "bad_pattern", "path": "base.branch" } },
+    { "id": "env_trailer_control", "set": { "envelope.expected.trailer": "a\tb" }, "error": { "input": "envelope", "code": "bad_pattern", "path": "expected.trailer" } },
+    { "id": "env_artifact_kind_enum", "set": { "envelope.expected.artifact_kind": "other" }, "error": { "input": "envelope", "code": "bad_value", "path": "expected.artifact_kind" } },
+    { "id": "env_dependency_step_enum", "set": { "envelope.dependencies": [{ "id": "dep:a", "kind": "pr", "step": "manual" }] }, "error": { "input": "envelope", "code": "bad_value", "path": "dependencies.step" } },
+    { "id": "snap_missing_fact_key", "unset": ["snapshot.facts.matcher_attestation"], "error": { "input": "snapshot", "code": "missing_key", "path": "facts.matcher_attestation" } },
+    { "id": "snap_unknown_fact_key", "set": { "snapshot.facts.extra_fact": { "status": "unknown", "observed_ms": 1 } }, "error": { "input": "snapshot", "code": "unknown_key", "path": "facts" } },
+    { "id": "snap_known_without_value", "unset": ["snapshot.facts.slot_state.value"], "error": { "input": "snapshot", "code": "missing_key", "path": "facts.slot_state.value" } },
+    { "id": "snap_unknown_with_value", "set": { "snapshot.facts.slot_state": { "status": "unknown", "observed_ms": 1789999000000, "value": { "idle": true } } }, "error": { "input": "snapshot", "code": "bad_value", "path": "facts.slot_state.value" } },
+    { "id": "snap_fact_missing_observed", "unset": ["snapshot.facts.slot_state.observed_ms"], "error": { "input": "snapshot", "code": "missing_key", "path": "facts.slot_state.observed_ms" } },
+    { "id": "snap_observed_after_captured", "set": { "snapshot.facts.slot_state.observed_ms": 1789999000001 }, "error": { "input": "snapshot", "code": "bad_range", "path": "facts.slot_state.observed_ms" } },
+    { "id": "snap_captured_after_expires", "set": { "snapshot.captured_at_ms": 1789999900001 }, "error": { "input": "snapshot", "code": "bad_range", "path": "expires_at_ms" } },
+    { "id": "snap_value_extra_key", "set": { "snapshot.facts.slot_state.value.extra": true }, "error": { "input": "snapshot", "code": "unknown_key", "path": "facts.slot_state.value" } },
+    { "id": "snap_trusted_not_bool", "set": { "snapshot.facts.os_identity.value.trusted": "yes" }, "error": { "input": "snapshot", "code": "wrong_type", "path": "facts.os_identity.value.trusted" } },
+    { "id": "snap_negative_revision", "set": { "snapshot.revision": -1 }, "error": { "input": "snapshot", "code": "bad_range", "path": "revision" } },
+    { "id": "snap_verified_not_bool", "set": { "snapshot.provenance.verified": 1 }, "error": { "input": "snapshot", "code": "wrong_type", "path": "provenance.verified" } },
+    { "id": "snap_digest_format", "set": { "snapshot.facts.permission_profile.value.digest": "ABC" }, "error": { "input": "snapshot", "code": "bad_pattern", "path": "facts.permission_profile.value.digest" } },
+    { "id": "snap_matcher_revision_format", "set": { "snapshot.facts.matcher_attestation.value.matcher_revision": "Bad Rev" }, "error": { "input": "snapshot", "code": "bad_pattern", "path": "facts.matcher_attestation.value.matcher_revision" } },
+    { "id": "snap_command_entries_unsorted", "set": { "snapshot.facts.command_decisions.value.entries": [{ "command": "cmd:b", "decision": "allowed" }, { "command": "cmd:a", "decision": "allowed" }] }, "error": { "input": "snapshot", "code": "unsorted_set", "path": "facts.command_decisions.value.entries.command" } },
+    { "id": "snap_command_entries_duplicate_identity", "set": { "snapshot.facts.command_decisions.value.entries": [{ "command": "cmd:a", "decision": "allowed" }, { "command": "cmd:a", "decision": "denied" }] }, "error": { "input": "snapshot", "code": "duplicate_identity", "path": "facts.command_decisions.value.entries.command" } },
+    { "id": "snap_command_uppercase_is_grammar", "set": { "snapshot.facts.command_decisions.value.entries": [{ "command": "cmd:Z", "decision": "allowed" }] }, "error": { "input": "snapshot", "code": "bad_pattern", "path": "facts.command_decisions.value.entries.command" } },
+    { "id": "snap_dependency_entries_duplicate", "set": { "snapshot.facts.dependencies.value.entries": [{ "id": "dep:a", "met": true }, { "id": "dep:a", "met": false }] }, "error": { "input": "snapshot", "code": "duplicate_identity", "path": "facts.dependencies.value.entries.id" } },
+    { "id": "snap_fixture_entries_unsorted", "set": { "snapshot.facts.fixtures.value.entries": [{ "id": "fixture:b", "available": true }, { "id": "fixture:a", "available": true }] }, "error": { "input": "snapshot", "code": "unsorted_set", "path": "facts.fixtures.value.entries.id" } },
+    { "id": "snap_attempt_ids_unsorted", "set": { "snapshot.facts.attempts_seen.value.ids": ["a-00000000-0000-4000-8000-000000000009", "a-00000000-0000-4000-8000-000000000001"] }, "error": { "input": "snapshot", "code": "unsorted_set", "path": "facts.attempts_seen.value.ids" } },
+    { "id": "snap_mandatory_write_dir_pattern", "set": { "snapshot.facts.mandatory_writes.value.paths": ["docs/"] }, "error": { "input": "snapshot", "code": "bad_path_grammar", "path": "facts.mandatory_writes.value.paths" } },
+    { "id": "snap_mandatory_write_alias_pattern", "set": { "snapshot.facts.mandatory_writes.value.paths": ["docs/**"] }, "error": { "input": "snapshot", "code": "bad_path_grammar", "path": "facts.mandatory_writes.value.paths" } },
+    { "id": "snap_forbidden_traversal", "set": { "snapshot.facts.path_policy.value.forbidden": ["a/../b"] }, "error": { "input": "snapshot", "code": "bad_path_grammar", "path": "facts.path_policy.value.forbidden" } },
+    { "id": "snap_artifact_trailer_empty", "set": { "snapshot.facts.artifact_contract.value.trailer": "" }, "error": { "input": "snapshot", "code": "bad_pattern", "path": "facts.artifact_contract.value.trailer" } },
+    { "id": "snap_authority_decision_none_kind_bad_id", "set": { "snapshot.facts.authority_decision.value": { "kind": "none", "id": "x", "decision": "not_required" } }, "error": { "input": "snapshot", "code": "bad_value", "path": "facts.authority_decision.value.id" } },
+    { "id": "clock_float", "set": { "now": 1.5 }, "error": { "input": "clock", "code": "forbidden_number", "path": "nowMs" } },
+    { "id": "clock_negative", "set": { "now": -1 }, "error": { "input": "clock", "code": "bad_range", "path": "nowMs" } },
+    { "id": "clock_string", "set": { "now": "1" }, "error": { "input": "clock", "code": "wrong_type", "path": "nowMs" } },
+    { "id": "clock_nan", "set": { "now": null }, "error": { "input": "clock", "code": "null_value", "path": "nowMs" } },
+    { "id": "clock_unsafe", "set": { "now": 9007199254740992 }, "error": { "input": "clock", "code": "unsafe_integer", "path": "nowMs" } }
+  ]
+}
