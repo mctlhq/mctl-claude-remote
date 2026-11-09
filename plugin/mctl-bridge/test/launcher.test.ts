@@ -21,9 +21,9 @@ function stub(file: string, body: string) {
   fs.writeFileSync(file, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
 }
 
-function setup() {
+function setup(homeName = `home ${NASTY}`) {
   const root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "launcher-")));
-  const home = path.join(root, `home ${NASTY}`);
+  const home = path.join(root, homeName);
   const H = path.join(root, `bridge ${NASTY}`);
   const repo = path.join(root, `repo ${NASTY}`);
   const bin = path.join(root, "bin");
@@ -117,6 +117,42 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(fs.existsSync(path.join(d, "log", "slot-s1.err"))).toBe(true);
     fs.rmSync(t.root, { recursive: true, force: true });
   });
+
+  // The slot's own $HOME/.local/bin/golangci-lint gets the same narrow rule as the bare command.
+  function lintRules(homeName?: string) {
+    const t = setup(homeName);
+    const r = spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s1", t.repo], { env: t.env, encoding: "utf8" });
+    expect(r.status).toBe(0);
+    const settings = JSON.parse(fs.readFileSync(path.join(t.H, "slots", "s1", "settings.json"), "utf8"));
+    fs.rmSync(t.root, { recursive: true, force: true });
+    return { home: t.home, allow: settings.permissions.allow as string[], deny: settings.permissions.deny as string[] };
+  }
+
+  test("slot.sh allows exactly the slot's own golangci-lint run, with the bare rule's limits", () => {
+    const { home, allow, deny } = lintRules("home-clean");
+    const own = `${home}/.local/bin/golangci-lint`;
+    // positive: the exact own path, run only, and the --fix deny for that same path
+    expect(allow).toContain(`Bash(${own} run:*)`);
+    expect(deny).toContain(`Bash(${own} *--fix*)`);
+    // the bare rule and its deny are untouched
+    expect(allow).toContain("Bash(golangci-lint run:*)");
+    expect(deny).toContain("Bash(golangci-lint *--fix*)");
+    // negative: no other golangci-lint allow exists (no fmt, custom, bare path, wildcard path, other home)
+    expect(allow.filter((a) => a.includes("golangci-lint")).sort()).toEqual([`Bash(${own} run:*)`, "Bash(golangci-lint run:*)"].sort());
+    for (const a of allow.filter((a) => a.includes("golangci-lint"))) {
+      expect(a.endsWith(" run:*)")).toBe(true);
+      expect(a).not.toMatch(/\*.*golangci|\.\.|~/);
+    }
+    expect(allow.filter((r) => deny.includes(r))).toEqual([]);
+  });
+
+  test("slot.sh emits no own-path golangci-lint rule when the home path could widen or break a rule", () => {
+    for (const name of ["home*", "home(x)", "home:x", "home x", "home..x", `home ${NASTY}`]) {
+      const { allow, deny } = lintRules(name);
+      expect(allow.filter((a) => a.includes("golangci-lint"))).toEqual(["Bash(golangci-lint run:*)"]);
+      expect(deny.filter((a) => a.includes("golangci-lint"))).toEqual(["Bash(golangci-lint *--fix*)"]);
+    }
+  }, 60000);
 
   const SID = "0f8fad5b-d9cb-469f-a165-70867728950e";
   const BASE_ARGV = (d: string) => [
@@ -328,7 +364,10 @@ describe.skipIf(!usable)("launcher scripts", () => {
     expect(spawnSync("zsh", [path.join(OPS, "slot.sh"), "start", "s2", t.repo], { env, encoding: "utf8" }).status).toBe(0);
     const bounded = allowOf(path.join(homes, "mctl-slot-s2", ".mctl-bridge", "settings.json"));
     expect(bounded).toContain("Bash(kill:*)");
-    expect(bounded.filter((r) => r !== "Bash(kill:*)")).toEqual(trusted);
+    // the bounded slot's home path is plain, so it also gets its own-path golangci-lint run rule
+    const ownLint = `Bash(${path.join(homes, "mctl-slot-s2")}/.local/bin/golangci-lint run:*)`;
+    expect(bounded).toContain(ownLint);
+    expect(bounded.filter((r) => r !== "Bash(kill:*)" && r !== ownLint)).toEqual(trusted);
     fs.rmSync(t.root, { recursive: true, force: true });
   });
 

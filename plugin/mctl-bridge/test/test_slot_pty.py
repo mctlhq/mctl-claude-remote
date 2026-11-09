@@ -157,6 +157,35 @@ class PromptHash(unittest.TestCase):
         self.assertEqual(mod.prompt_hash(self.FIXTURE), "a0459369c629")
         self.assertIsNone(mod.prompt_hash(None))
 
+    # Twins of CANON in test/reconcile.test.ts (which also crosses Python -> JSON -> JS): realistic
+    # Unicode, astral emoji, U+2028, DEL, control characters, null question, empty options/detail.
+    CANON = {
+        "unicode": ({"kind": "permission", "question": "Run ‘naïve’ 日本語 \U0001F680   \x7f \x01 ok?", "options": [{"n": 1, "text": "Да"}, {"n": 2, "text": "Yes, and don’t ask again for: é́"}, {"n": 3, "text": "No"}], "detail": ["Bash command", "echo \"q\" \\ / \x1b[0m \U0001F680", "x"], "truncated": True}, "0d805bb692b9"),
+        "dialogNull": ({"kind": "dialog", "question": None, "options": [], "detail": []}, "2233330efddf"),
+        "dialogDetail": ({"kind": "dialog", "question": None, "options": [], "detail": ["Esc to cancel", "  indented ", ""]}, "0a3bb51c9424"),
+    }
+
+    def test_canonical_fixtures_pin_the_same_hashes_as_the_waker(self):
+        mod = load_pty()
+        for name, (p, want) in self.CANON.items():
+            with self.subTest(name):
+                self.assertEqual(mod.prompt_hash(p), want)
+
+    def test_hash_is_of_the_object_not_its_escaping(self):
+        # whatever escaping the printed JSON used, the consumer that parses it gets the same object
+        mod = load_pty()
+        for name, (p, want) in self.CANON.items():
+            for ascii_ in (True, False):
+                with self.subTest(name, ensure_ascii=ascii_):
+                    self.assertEqual(mod.prompt_hash(json.loads(json.dumps(p, ensure_ascii=ascii_))), want)
+
+    def test_a_changed_prompt_changes_the_hash(self):
+        mod = load_pty()
+        base, want = self.CANON["unicode"]
+        for field, value in (("question", base["question"] + "!"), ("question", None), ("detail", base["detail"] + ["extra"]), ("truncated", False), ("options", base["options"][:2])):
+            with self.subTest(field=field):
+                self.assertNotEqual(mod.prompt_hash({**base, field: value}), want)
+
 
 class FindPrompt(unittest.TestCase):
     RULE = "\u2500" * 60

@@ -420,6 +420,36 @@ If the MVP keeps one shared uid, that mode is called a **trusted experiment**, i
 documented as an accepted risk, and is not used for working slots. End-to-end
 scenario 8 tests the boundary either way.
 
+### Slot lint rule and the canonical prompt hash
+
+**Own-path lint.** A slot may run `golangci-lint run` by the bare name or by its own installed
+path. `slot.sh start` writes one extra allow rule, `Bash(<slot home>/.local/bin/golangci-lint
+run:*)`, with the matching deny `Bash(<slot home>/.local/bin/golangci-lint *--fix*)`, next to
+the bare `Bash(golangci-lint run:*)` / `Bash(golangci-lint *--fix*)` pair. The path is the
+slot's own `$HOME` (the slot user's home under the user boundary), written exactly, never a
+wildcard and never another user's home. It is emitted only when that home matches
+`^/[A-Za-z0-9._/-]+$` without `..`, `//` or a trailing `/`; otherwise the slot keeps just the
+bare rule and the path form prompts. `fmt`, `custom`, `--fix` and every other path still prompt
+or are denied. The rules are command-text patterns, not a boundary (see the deny comment in
+`ops/slot.sh`).
+
+**Prompt identity.** The identity of a waiting prompt is one value: the `hash` field that
+`slot.sh prompt` and `slot.sh state` print beside `prompt`
+(`ops/slot-pty.py` `prompt_hash`). It is sha256 of the compact JSON (`separators=(",", ":")`,
+`ensure_ascii=False`, UTF-8) of the printed `prompt` object, first 12 hex digits. The waker's
+`promptHash` (`src/reconcile.ts`) hashes the same object after parsing it from that JSON, with
+`JSON.stringify`, and reaches the same bytes for the prompt shape (strings, integers, booleans,
+`null`, arrays, objects with fixed non-numeric keys). Floats and numeric-looking keys are not part
+of that shape and are not covered. Shared fixtures in `test/test_slot_pty.py` and
+`test/reconcile.test.ts` pin the same values, and the TS test runs the real Python on them.
+
+**Host helper (`~/slot-approve.py`, outside this repo).** It must not hash anything itself. It
+reads `slot.sh prompt <slot>`, takes `hash` from that JSON as the identity of what it saw, and
+compares it with the hash in the `[bridge]` reminder. It acts only when the two are equal and
+`pending` is true, and it re-reads and re-compares immediately before sending a key, so a
+prompt that changed in between is never approved. Applying this change to the host file is a
+deployment step for the lead, not part of this repository.
+
 ### Busy signal
 
 Hooks write a local file `~/.mctl-bridge/state/<claude_pid>.json` (`busy|idle`,
