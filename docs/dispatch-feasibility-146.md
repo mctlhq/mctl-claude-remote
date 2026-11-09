@@ -1,7 +1,8 @@
 # Dispatch feasibility report: design (B1), refs #146
 
 Status: **accepted design contracts, not implemented**. The operator accepted every choice proposed in section
-13 (A1–A6 and the object-set rule); they are now the normative **design** of this document. Acceptance of a
+13 (A1–A6 and the object-set rule) and every recommendation of the residual-contract review table in section
+14.12 (R1–R11); they are now the normative **design** of this document. Acceptance of a
 design contract is **not** authorization to implement it. The evaluator, the consumption function and schema
 validation are **not implemented**; the only merged code is the canonical encoder/strict parser/digest
 (`canonical.ts`, #169, see the legend). Nothing here is measured or probed. This document adds no
@@ -10,22 +11,28 @@ runtime code, no dispatch/reservation/launch/ack change, and no enforcement. The
 design expectations* for the accepted contracts; they are not executable feature tests, not a conformance
 measurement and not evidence of readiness.
 
-**Residual-contract amendment (docs-only, this PR).** Section 14 closes eleven residual design items (R1–R11)
-left open after A1–A6. The operator **accepted the overall approach** of all eleven and made five explicit
-choices (matcher attestation as an injected fact; `trusted:false` is `unknown`; no fact-age limit in B1;
-closed reason vocabulary; per-reason classification). The **concrete new limits, field tables, ranges,
-constants and codes** written in section 14 and threaded through the sections below were **not previously
-presented to the operator** and stay **NEW PROPOSED, pending operator review on this PR**; the one review table
-is section 14.12. Nothing here is implemented, no runtime work is resumed, and merging this document authorizes none.
+**Residual-contract amendment (docs-only).** Section 14 closes eleven residual design items (R1–R11)
+left open after A1–A6. Earlier revisions of this PR recorded the operator's acceptance of the overall approach
+and five explicit choices (matcher attestation as an injected fact; `trusted:false` is `unknown`; no fact-age
+limit in B1; closed reason vocabulary; per-reason classification), and listed the concrete limits, field
+tables, ranges, constants and codes as proposals awaiting review. **ACCEPTED DESIGN, operator decision
+2026-11-09: "Всё по рекомендациям"** ("all as recommended"): the operator accepted every recommendation of the
+review table (14.12), with **one change to a recommendation: the `slot` length is 1-32 (not the drafted
+1-64)**. The `slot_epoch` is a canonical decimal **string** with numerical value <= 2^53−1 (an accepted
+application constraint, 14.9), and the matcher attestation is the sixteenth fact `matcher_attestation` with
+the constant `mctl.matcher-contract/1`. Every other exact table, code, format, range and alternative follows
+the review-table recommendation unchanged; the alternatives are **NOT SELECTED** historical provenance. Nothing
+here is implemented, no runtime work is resumed, and merging this document authorizes none.
 
-**Status legend (read this first).** Five kinds of statement appear in this document and must not be confused:
+**Status legend (read this first).** Six kinds of label appear in this document and must not be confused:
 
 | Label | Meaning |
 |---|---|
 | **IMPLEMENTED (#169)** | A fact about merged code: only `plugin/mctl-bridge/src/feasibility/canonical.ts` (MCTL-CJ1 encoder, strict parser, digest). Nothing else (no evaluator, no consumption function, no schema validator) exists. |
-| **ACCEPTED DESIGN CONTRACT** | Normative design text: the original design commitments plus A1–A6 and the object-set rule, accepted by the operator (section 13). Design only: nothing here is implemented, and acceptance or merge of this document authorizes no implementation. |
-| **NEW PROPOSED (pending operator review)** | A concrete value, limit, field, table, constant or code first written in section 14 (or the sections it amends) whose *approach* the operator accepted but whose *exact value* has not been shown to them. Listed in the review table 14.12. Not an accepted fact and not an invented source fact. |
-| **NOT SELECTED (historical alternative)** | An alternative that was proposed and not chosen (listed in section 13 for provenance). It is not a pending default and does not describe behavior. |
+| **ACCEPTED DESIGN CONTRACT** | Normative design text: the original design commitments, A1–A6 and the object-set rule (section 13), and the residual contracts R1–R11 with every exact value of section 14 (operator decision 2026-11-09, "Всё по рекомендациям", slot length 1-32). Design only: nothing here is implemented, and acceptance or merge of this document authorizes no implementation. |
+| **ACCEPTED APPLICATION CONSTRAINT** | An accepted design limit that is a choice of this design, not a source fact and not forced by an encoding: the `slot_epoch` value ceiling 2^53−1 (14.9). |
+| **[NEW] tag (historical provenance)** | A tag inside section 14 and 14.12 marking a value that was **first written** in the residual amendment (as opposed to [SRC] and earlier [DES]). Every [NEW] value is now ACCEPTED DESIGN; the tag records origin only and means neither pending nor proposed. |
+| **NOT SELECTED (historical alternative)** | An alternative that was proposed and not chosen (listed in sections 13 and 14.12 for provenance). It is not a pending default and does not describe behavior. |
 | **OPEN / FUTURE APPROVAL** | Decisions that still do not exist: gate G8 (owner decision to start the B1 evaluator implementation, and separately B2), and the unresolved provider/matcher/isolation gates G1–G7. All runtime work is held. |
 
 Index of accepted contracts: A1 path grammar (13.1), A2 closed fact schemas and key-presence semantics (13.2),
@@ -94,7 +101,7 @@ Fixed ASCII keys, all required (absence of a feature is expressed with an empty 
 |---|---|---|
 | `schema` | string | `mctl.task-envelope/1` |
 | `task_id`, `attempt_id` | string | ids shaped like the store's `t-<uuid>` / `a-<uuid>`; exact formats in 14.9 |
-| `slot` | string | `[a-z0-9-]` like the store's slot names; exact format in 14.9 |
+| `slot` | string | `[a-z0-9-]{1,32}`, equal to the store's slot validator; exact format in 14.9 |
 | `slot_epoch` | string | canonical decimal string, as the store keeps epochs as strings; exact format in 14.9 |
 | `repo` | string | `owner/name`; syntax only, existence is never proven (14.9) |
 | `worktree_label` | string | opaque label, never a filesystem path (14.9) |
@@ -365,7 +372,7 @@ snapshot's `revision`), `task_id`, `attempt_id`, `slot`, `slot_epoch`,
 `not_authorization`, `not_reservation`, `not_os_isolation`, `not_toctou_closure`), and `report_digest`
 (domain `.../report`, over the canonical bytes of every other field; the field itself is excluded, see 6.1).
 Output is MCTL-CJ1 bytes; identical inputs give byte-identical output. **The closed field table of every
-member, with types, requiredness and constants, is 14.6b (NEW PROPOSED); this paragraph is its summary.**
+member, with types, requiredness and constants, is 14.6b (ACCEPTED DESIGN); this paragraph is its summary.**
 
 ### 6.1 Report consumption validation (separate contract)
 
@@ -515,7 +522,7 @@ B2 is a different decision and a different change. Prerequisites and obligations
 | G6 | Cross-language equivalence of MCTL-CJ1 (second implementation, rejection corpus). |
 | G7 | Where the declared `Agent: claude` trailer expectation is verified. The publisher (`publish.ts`) is in this repo but validates actual commits only after the fact and today refuses `Co-Authored-By` lines, not a missing `Agent:` trailer; whether and where a presence check belongs, and what pre-dispatch fact would carry it, is undecided. |
 | G8 | Owner decision to proceed to B1 implementation (evaluator, consumption function, schema validator, fixtures-as-tests), and separately to B2. **Not started and not given**: G9 acceptance and the merge of this document do not authorize it. B2 stays separately gated (section 11). |
-| G9 | **RESOLVED (design only).** The operator accepted every proposed choice in section 13 (A1–A6 and the object-set rule); the stated alternatives were not selected. This resolves design contracts only; it implies nothing about G1–G8. |
+| G9 | **RESOLVED (design only).** The operator accepted every proposed choice in section 13 (A1–A6 and the object-set rule), and on 2026-11-09 every recommendation of the residual review table (14.12, slot length 1-32); the stated alternatives were not selected. This resolves design contracts only; it implies nothing about G1–G8. |
 
 ## 13. ACCEPTED design contracts (A1–A6 and object-set rule)
 
@@ -626,8 +633,7 @@ Each `facts.<id>` is exactly `{status, observed_ms}` plus `value` **only when `s
 `unknown`/`absent`, `value` must be missing (present value is an input error). `observed_ms` is a required
 integer in `[0, 2^53-1]` and, in addition, `observed_ms <= captured_at_ms` of the snapshot (14.6; a violation
 is `bad_range`, path `facts.<id>.observed_ms`). `facts` has exactly the **sixteen** keys below (the thirteen original facts plus
-`artifact_contract` (A3), `authority_decision` (A4) and `matcher_attestation` (R3, 14.4; NEW PROPOSED, adds the
-sixteenth key to the previously accepted fifteen)).
+`artifact_contract` (A3), `authority_decision` (A4) and `matcher_attestation` (R3, 14.4; ACCEPTED DESIGN, the sixteenth key, added to the fifteen accepted earlier)).
 
 **Missing key versus unknown status (three distinct situations, never conflated):**
 
@@ -660,7 +666,7 @@ Value objects are closed (exact keys, no extras):
 | `mandatory_writes` | `{paths: [string]}` | A1 exact paths; string **set** |
 | `artifact_contract` (A3, 13.4) | `{artifact_kind, trailer}` | `artifact_kind` string in the closed enum `handoff_bundle`; `trailer` string of 1-128 printable ASCII characters (U+0020..U+007E) |
 | `authority_decision` (A4, 13.5) | `{kind, id, decision}` | `kind` string in `none`\|`operator_decision`; `id` string `[a-z0-9:._-]{1,64}`, and `id` is the literal `none` when `kind` is `none`; `decision` string in `allowed`\|`denied`\|`not_required` |
-| `matcher_attestation` (R3, 14.4; NEW PROPOSED) | `{profile_digest, matcher_revision, compatible}` | `profile_digest` 64 lowercase hex; `matcher_revision` string `[a-z0-9._/-]{1,64}`; `compatible` bool |
+| `matcher_attestation` (R3, 14.4; ACCEPTED DESIGN) | `{profile_digest, matcher_revision, compatible}` | `profile_digest` 64 lowercase hex; `matcher_revision` string `[a-z0-9._/-]{1,64}`; `compatible` bool |
 
 The envelope's `expected.artifact_kind` uses the same enum and `expected.trailer` the same character rule;
 `authority_ref.kind` / `authority_ref.id` use the same `kind` enum and `id` pattern (`kind` `none` requires
@@ -889,7 +895,7 @@ closed code), **type/schema validation** (A1/A2/object-set rules, plus clock int
   `estimate_exceeds_bound`. **The vocabulary is now complete for every status of every check** (R1): every
   unavailable-evidence case has an explicit code, the per-code class/evidence kind/status table is 14.2, and no
   "code needs future design" hole remains for the cases enumerated there. Any further code still needs a design
-  edit. Codes added by R1/R3 are NEW PROPOSED names (14.12); the generic `evidence_unavailable` code was the
+  edit. Codes added by R1/R3 are ACCEPTED DESIGN names (14.12); the generic `evidence_unavailable` code was the
   not-selected alternative.
 - **Per-check evidence dependencies:** `authority.paths` <- `path_policy`, `mandatory_writes`, A1;
   `authority.commands` <- `command_decisions`; `identity.os` <- `os_identity`; `permission.profile` <-
@@ -906,22 +912,26 @@ closed code), **type/schema validation** (A1/A2/object-set rules, plus clock int
   baseline is **not** executable under the accepted schemas (its facts are prose summaries, not closed value
   objects, and lack `artifact_contract`/`authority_decision`); the accepted-schema baseline is a separate
   entry (`proposals.proposed_schema_baseline`). Accepted design contracts remain unimplemented; G8 is not started. The accepted closed baseline is now **sixteen**
-  facts (the matcher attestation is NEW PROPOSED, 14.4); the legacy envelope bytes and vectors A/B are unaffected
+  facts (the matcher attestation is ACCEPTED DESIGN, 14.4); the legacy envelope bytes and vectors A/B are unaffected
   (14.13).
 
-## 14. Residual contracts R1–R11 (approach ACCEPTED; exact values NEW PROPOSED, pending operator review)
+## 14. Residual contracts R1–R11 (ACCEPTED DESIGN, operator decision 2026-11-09)
 
-**Provenance and labels.** The operator accepted the overall recommendation for all eleven residual items and
-chose explicitly: R3 (matcher attestation is an external injected fact bound to the permission-profile digest
-and the matcher contract revision; an empty `required_commands` set does not waive it), R2 (`trusted:false` is
-`unknown` / `identity_os_unknown`, never feasible and never unauthorized), R5 (no fact-age limit in B1; only
-`observed_ms <= captured_at_ms <= expires_at_ms`; G3 stays open). The operator has **not** seen the exact
-field tables, ranges, patterns, constants and code names below. Every value is labeled:
+**Provenance and labels.** **ACCEPTED DESIGN, operator decision 2026-11-09: "Всё по рекомендациям".** History:
+the operator first accepted the overall approach of all eleven residual items and chose explicitly: R3 (matcher
+attestation is an external injected fact bound to the permission-profile digest and the matcher contract
+revision; an empty `required_commands` set does not waive it), R2 (`trusted:false` is `unknown` /
+`identity_os_unknown`, never feasible and never unauthorized), R5 (no fact-age limit in B1; only
+`observed_ms <= captured_at_ms <= expires_at_ms`; G3 stays open). The exact field tables, ranges, patterns,
+constants and code names below were then reviewed through the table in 14.12 and **accepted as recommended**,
+with one change: **`slot` length is 1-32** (the draft proposed 1-64). The matcher is the sixteenth fact
+`matcher_attestation` with the constant `mctl.matcher-contract/1`. Nothing below is implemented. Every value
+carries a tag that records its **origin** only:
 
 - **[SRC]** existing source fact with its pin (checked by reading source only; nothing was run);
-- **[DES]** design choice already accepted (A1–A6, object-set rule, the five explicit choices above);
-- **[NEW]** new proposed limit / field detail / constant / code, **awaiting operator review on this PR**, each
-  listed with its main alternative in 14.12. A [NEW] value is not an accepted fact and not a source fact.
+- **[DES]** design choice accepted before the residual amendment (A1–A6, object-set rule, the five explicit choices above);
+- **[NEW]** value first written in the residual amendment (limit, field detail, constant, code). It is now
+  **ACCEPTED DESIGN** (14.12); the tag is historical provenance, not a pending state. It is not a source fact.
 
 Source facts relied on: MCTL-CJ1 integer ceiling 2^53−1 and `MAX_DEPTH` 64 (`canonical.ts:44-45`, #169); the store
 keeps `epoch` and task/attempt ids as plain strings (`store.ts:22-34`; no format validator appears **in those
@@ -933,7 +943,8 @@ exact pins: `bridge.lua:72-74` `valid_id` (string, 1-128 bytes, only `[%w%-_:.]`
 `^(feat|fix|ci|docs|chore|refactor|test)/[A-Za-z0-9._/-]{1,100}$` plus rejection of `..`, `//` and a trailing `.lock`,
 `/` or `.`; `sha256` `^[0-9a-f]{64}$`; `publish.ts:281` path `allowed()`). Only these lines were read; this document
 does **not** claim they are the only validators in `bridge.lua`, `store.ts` or `publish.ts`, and no other file was
-inspected for this point. No new numeric cap below is a source fact.
+inspected for this point. Apart from the `slot` length 32 (equal to `valid_slot`, see 14.9), no numeric cap
+below is a source fact; the others are accepted design choices.
 
 ### 14.1 R1 — complete reason vocabulary
 
@@ -1196,8 +1207,8 @@ case folding or Unicode normalization. A violation is an input error (A5): `bad_
 |---|---|---|
 | `task_id` | `t-` + lowercase UUID text `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}` (38 chars) | [DES] shape `t-<uuid>` (3.1); lowercase 8-4-4-4-12 hex form [NEW]; no version/variant check |
 | `attempt_id` | same with prefix `a-` | as above; also the `attempts_seen.ids` member format (13.2) |
-| `slot` | `[a-z0-9-]{1,64}` | character set [DES] (3.1) and equal to the Lua `valid_slot` set [SRC `bridge.lua:77`]; length bound 64 [NEW] **differs from the source limit of 32** (`bridge.lua:77`), so a 33-64 byte slot would pass B1 but not the Lua `valid_slot`; flagged for operator review (14.12 row 21) |
-| `slot_epoch` | canonical decimal: `0` or `[1-9][0-9]*`, value <= 2^53−1 (compared as BigInt) | store keeps epochs as strings [SRC `store.ts:26,33`]; ceiling = MCTL-CJ1 integer ceiling [SRC]; **no 16-digit or other invented cap**; leading zeros rejected [NEW] |
+| `slot` | `[a-z0-9-]{1,32}` | character set [DES] (3.1) and **equal to the Lua `valid_slot` set and length** [SRC `bridge.lua:77`: 1-32 bytes, `[a-z0-9-]`]; the operator chose 1-32 over the drafted 1-64 (14.12 row 21), so the evaluator never accepts a slot the Lua validator rejects. Illustrative synthetic boundary: a 32-character slot is accepted and a 33-character slot is rejected (`bad_pattern`) |
+| `slot_epoch` | canonical decimal **string**: `0` or `[1-9][0-9]*`, numerical value <= 2^53−1 (compared as BigInt) | store keeps epochs as strings [SRC `store.ts:26,33`]; leading zeros rejected [NEW]; **no 16-digit or other invented digit cap**. The `<= 2^53−1` ceiling is an **ACCEPTED APPLICATION CONSTRAINT** on this string: it is **not forced by the MCTL-CJ1 integer encoding**, because the epoch is a string and never an encoded integer. The MCTL-CJ1 ceiling 2^53−1 [SRC `canonical.ts:45`] applies to JSON integers only and is a separate source fact |
 | `repo` | `<owner>/<name>`; owner `[A-Za-z0-9-]{1,39}`, name `[A-Za-z0-9._-]{1,100}` and name not `.`/`..` | syntax only; existence of the repo is **never** proven by the regex; the 39/100 lengths [NEW] |
 | `worktree_label` | `[a-z0-9._-]{1,64}` | opaque label, no `/`; never a path; length [NEW] |
 | `base.branch`, `expected.branch` | `[A-Za-z0-9._/-]{1,128}`, no `..`, no leading or trailing `/` | accepted syntax of 13.4 [DES] applied to `base.branch` too [NEW application]; **not** full git ref-format validation (e.g. `a//b`, trailing `.lock` are not rejected here) |
@@ -1217,15 +1228,15 @@ case folding or Unicode normalization. A violation is an input error (A5): `bad_
 | every integer | safe integer in `[0, 2^53-1]` | [SRC] ceiling (`canonical.ts:45`); floor 0 for all timestamps, counts, budgets, revisions [NEW application] |
 
 **Review against the validators that were read (the pins at the start of section 14; not a complete audit):** `slot`'s character
-set equals `valid_slot` (`bridge.lua:77`) but its proposed length 64 exceeds the source 32; the `t-`/`a-` UUID
+set and length equal `valid_slot` (`bridge.lua:77`, 1-32 of `[a-z0-9-]`; accepted length 1-32); the `t-`/`a-` UUID
 shapes are stricter than `valid_id` (`bridge.lua:73`, 1-128 of `[%w%-_:.]`) and than the publisher manifest `TASK`
 (`publish.ts:41`, 1-100 of `[A-Za-z0-9._-]`, which has no `:`); `base_sha`/`repo_base.sha` equal the publisher `SHA`
-(`publish.ts:39`); the proposed branch grammar is **looser** than the publisher `BRANCH` check (`publish.ts:40,274`:
+(`publish.ts:39`); the accepted branch grammar is **looser** than the publisher `BRANCH` check (`publish.ts:40,274`:
 required type prefix, `//` and trailing `.lock`, `/` or `.` rejected). For `repo`, `worktree_label`, the owner/name
 lengths, `dependencies[].kind`, `snapshot_id`, `source_kind` and `issuer_ref` no matching validator was found in the
-lines read; that is not a claim that none exists elsewhere. The 64/128/39/100/32 lengths remain proposals, listed
-individually in 14.12 with alternatives; none is claimed to match production data. **No element-count or total-size cap** on set arrays, paths or the envelope is
-proposed here (the open alternative is a count cap); `canonical.ts` `MAX_DEPTH` 64 [SRC] is the only structural
+lines read; that is not a claim that none exists elsewhere. The 64/128/39/100/32 lengths are accepted design choices (except `slot` 32, which also equals the source), listed
+individually in 14.12 with the not-selected alternatives; none is claimed to match production data. **No element-count or total-size cap** on set arrays, paths or the envelope is
+part of the design (a count cap is a not-selected alternative); `canonical.ts` `MAX_DEPTH` 64 [SRC] is the only structural
 limit. No credential or host fact was read to choose any of these values.
 
 ### 14.10 R9 — revision
@@ -1254,11 +1265,15 @@ elsewhere is not forbidden. Boundary examples:
 
 Not selected: banning every colon (narrower, not approved).
 
-### 14.12 Review table: every NEW PROPOSED value and its main alternative
+### 14.12 Review table: every residual value, ACCEPTED DESIGN, and its not-selected alternative
 
-All rows are **NEW PROPOSED, awaiting operator review on this PR**, though the approach of the item is accepted.
+**ACCEPTED DESIGN, operator decision 2026-11-09: "Всё по рекомендациям".** Every row below is accepted as the
+value in the second-to-last column; the last column is a **NOT SELECTED** historical alternative, not a pending
+default. The table is kept at its review numbering for traceability. Only row 21 differs from the drafted
+recommendation: the operator chose `slot` length **1-32**, and the drafted 1-64 is the not-selected alternative.
+Nothing here is implemented.
 
-| # | Item | Proposed value | Main alternative |
+| # | Item | ACCEPTED value | NOT SELECTED alternative |
 |---|---|---|---|
 | 1 | R1 new codes | `permission_profile_unknown`, `slot_idle_unknown`, `path_policy_unknown`, `attempt_unverified` | generic `evidence_unavailable` (history) |
 | 2 | R1 `mandatory_writes_unknown` under `authority.paths` | allowed; blocks the path pass | keep only under `bounds.explicit` |
@@ -1280,13 +1295,13 @@ All rows are **NEW PROPOSED, awaiting operator review on this PR**, though the a
 | 18 | R7 advisory object | `{est_changed_files, est_minutes, advisory_codes}`; codes only there | echo-only, no codes |
 | 19 | R7 conditions and ranges | BigInt `est_minutes*60000`; all counts/budgets/estimates `[0, 2^53-1]`, 0 allowed | smaller caps (e.g. a minutes cap) |
 | 20 | R8 `task_id`/`attempt_id` | `t-`/`a-` + lowercase 8-4-4-4-12 hex UUID, no version check | UUIDv4-only |
-| 21 | R8 `slot` length | `[a-z0-9-]{1,64}` (exceeds the source `valid_slot` limit 32, `bridge.lua:77`) | 1-32 (equals the source limit; the evaluator would then never accept a slot the Lua validator rejects) |
-| 22 | R8 `slot_epoch` | canonical decimal, no leading zeros, value <= 2^53-1, no digit cap | 16-digit cap or unbounded decimal |
+| 21 | R8 `slot` length | `[a-z0-9-]{1,32}` (**operator-chosen**; equals the source `valid_slot` set and limit, `bridge.lua:77`, so the evaluator never accepts a slot the Lua validator rejects) | `[a-z0-9-]{1,64}` as drafted (exceeded the source limit 32: a 33-64 character slot would have passed B1 but not `valid_slot`) |
+| 22 | R8 `slot_epoch` | canonical decimal **string**, no leading zeros except literal `0`, numerical value <= 2^53-1 (ACCEPTED APPLICATION CONSTRAINT on a string, not forced by MCTL-CJ1 integer encoding), no digit cap | 16-digit cap or unbounded decimal |
 | 23 | R8 `repo` | owner `{1,39}`, name `{1,100}`, syntax only | looser `[^/]+/[^/]+` |
 | 24 | R8 `worktree_label` | `[a-z0-9._-]{1,64}` | 1-32 |
 | 25 | R8 branches | 13.4 syntax applied to `base.branch` as well; not full ref-format | full git ref validation |
 | 26 | R8 `dependencies[].kind`, `snapshot_id`, `source_kind`, `issuer_ref` | `[a-z0-9._-]{1,32/64/32/64}` | other lengths |
-| 27 | R8 no count/size caps | none proposed | a count cap per set |
+| 27 | R8 no count/size caps | none (no count or size cap in the design) | a count cap per set |
 | 28 | R9 | revision `[0, 2^53-1]`, 0 allowed | `>= 1` with a bootstrap |
 | 29 | R11 | `^[A-Za-z]:` on raw start; empty pattern rejected; other colons allowed | ban every colon |
 | 30 | Baseline | 16 facts, symbolic digest `digest:cap-P-rev-1` for the new snapshot body | keep 15 and fold the attestation elsewhere |
