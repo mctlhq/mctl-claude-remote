@@ -360,7 +360,7 @@ plus all others above. A missing OS identity, permission profile or base can pro
 `schema` (`mctl.feasibility-report/1`), `task_digest`, `capability_digest`, `capability_revision` (the
 snapshot's `revision`), `task_id`, `attempt_id`, `slot`, `slot_epoch`,
 `evaluated_at_ms` (the **injected** clock value; the function never reads time), `expires_at_ms`
-(= min of envelope and snapshot expiry), `binding_valid`, `verdict`, `checks[]` (ordered, section 5),
+(= min of envelope and snapshot expiry; it may be earlier than `evaluated_at_ms` when an input is already expired, and that is a valid report, not an input error), `binding_valid`, `verdict`, `checks[]` (ordered, section 5),
 `reasons[]` (ordered, rule in item 4), `advisory` (section 8), `non_claims` (constant list:
 `not_authorization`, `not_reservation`, `not_os_isolation`, `not_toctou_closure`), and `report_digest`
 (domain `.../report`, over the canonical bytes of every other field; the field itself is excluded, see 6.1).
@@ -924,9 +924,16 @@ field tables, ranges, patterns, constants and code names below. Every value is l
   listed with its main alternative in 14.12. A [NEW] value is not an accepted fact and not a source fact.
 
 Source facts relied on: MCTL-CJ1 integer ceiling 2^53−1 and `MAX_DEPTH` 64 (`canonical.ts:44-45`, #169); the store
-keeps `epoch` and task/attempt ids as plain strings (`store.ts:22-34`, no format validator at those lines; the
-Lua library was not audited for id-format validators, so none is claimed); the Lua entry-id pattern `^%d+%-%d+$`
-(`bridge.lua:737-745`) concerns stream entry ids, unrelated. No new numeric cap below is a source fact.
+keeps `epoch` and task/attempt ids as plain strings (`store.ts:22-34`; no format validator appears **in those
+lines**, which is all of `store.ts` that was read for this point). Existing validators that were read, with their
+exact pins: `bridge.lua:72-74` `valid_id` (string, 1-128 bytes, only `[%w%-_:.]`), `bridge.lua:76-78` `valid_slot`
+(string, 1-32 bytes, only `[a-z0-9-]`; used at call sites such as `bridge.lua:281,359,503`), `bridge.lua:745`
+`valid_entry` (`^%d+%-%d+$`, stream entry ids, unrelated to our ids), and `publish.ts:39-41,269-276` (manifest
+`SHA` `^[0-9a-f]{40}$`; `TASK` `^[A-Za-z0-9._-]{1,100}$` applied to manifest `task_id` and `attempt_id`; `BRANCH`
+`^(feat|fix|ci|docs|chore|refactor|test)/[A-Za-z0-9._/-]{1,100}$` plus rejection of `..`, `//` and a trailing `.lock`,
+`/` or `.`; `sha256` `^[0-9a-f]{64}$`; `publish.ts:281` path `allowed()`). Only these lines were read; this document
+does **not** claim they are the only validators in `bridge.lua`, `store.ts` or `publish.ts`, and no other file was
+inspected for this point. No new numeric cap below is a source fact.
 
 ### 14.1 R1 — complete reason vocabulary
 
@@ -1110,7 +1117,7 @@ Key order is MCTL-CJ1; no key is optional; no `null`; no extra key.
 | `task_digest`, `capability_digest`, `report_digest` | string | 64 lowercase hex |
 | `capability_revision` | integer | `[0, 2^53-1]` (14.10) |
 | `task_id`, `attempt_id`, `slot`, `slot_epoch` | string | formats of 14.9 |
-| `evaluated_at_ms`, `expires_at_ms` | integer | `[0, 2^53-1]`, `evaluated_at_ms <= expires_at_ms` |
+| `evaluated_at_ms`, `expires_at_ms` | integer | each `[0, 2^53-1]`; **no ordering relation between them**: `expires_at_ms` is the min of the envelope and snapshot expiries (section 6) and a well-formed expired input (`evaluated_at_ms` after an expiry) yields a valid `uncertain` report whose `expires_at_ms < evaluated_at_ms`; such a report is schema-valid and is rejected at consumption only through `consume.report_expired` (14.7) |
 | `binding_valid` | bool | true iff the seven `binding.*` checks are all `pass` |
 | `verdict` | string | the six verdicts |
 | `checks` | array of Check | exactly 21 entries, ids and order of the fixed check list |
@@ -1148,7 +1155,10 @@ eight checks exist: **no re-evaluation and no ninth authenticity check.**
   `checks` has exactly the 21 fixed ids in order; each `required` matches its id; each `reason_codes` is
   ascending, distinct, a subset of that check's codes in 14.2, empty iff `pass`, and consistent with `status`
   (14.2 status effects); evidence references use allowed facts for the check (14.6a) and `revision ==
-  capability_revision`; `evaluated_at_ms <= expires_at_ms`; [NEW, listed 14.12] `binding_valid` equals "all seven
+  capability_revision`; the two timestamps are checked only as safe integers: there is **no**
+  `evaluated_at_ms <= expires_at_ms` relation (an expired-input report is schema-valid, section 6; expiry is the
+  separate `consume.report_expired` check, status `stale`, and no new freshness policy or fact-age limit is
+  added); [NEW, listed 14.12] `binding_valid` equals "all seven
   binding checks `pass`", `reasons` equals the ordered rule of section 6 applied to the report's own `checks`,
   and `verdict` equals the section 6 derivation from the report's own `checks` and `binding_valid`.
 - **Not** performed (semantic, outside the consumption function): that the evaluator produced these checks
@@ -1186,7 +1196,7 @@ case folding or Unicode normalization. A violation is an input error (A5): `bad_
 |---|---|---|
 | `task_id` | `t-` + lowercase UUID text `[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}` (38 chars) | [DES] shape `t-<uuid>` (3.1); lowercase 8-4-4-4-12 hex form [NEW]; no version/variant check |
 | `attempt_id` | same with prefix `a-` | as above; also the `attempts_seen.ids` member format (13.2) |
-| `slot` | `[a-z0-9-]{1,64}` | character set [DES] (3.1); length bound 64 [NEW]; no existing validator pinned |
+| `slot` | `[a-z0-9-]{1,64}` | character set [DES] (3.1) and equal to the Lua `valid_slot` set [SRC `bridge.lua:77`]; length bound 64 [NEW] **differs from the source limit of 32** (`bridge.lua:77`), so a 33-64 byte slot would pass B1 but not the Lua `valid_slot`; flagged for operator review (14.12 row 21) |
 | `slot_epoch` | canonical decimal: `0` or `[1-9][0-9]*`, value <= 2^53−1 (compared as BigInt) | store keeps epochs as strings [SRC `store.ts:26,33`]; ceiling = MCTL-CJ1 integer ceiling [SRC]; **no 16-digit or other invented cap**; leading zeros rejected [NEW] |
 | `repo` | `<owner>/<name>`; owner `[A-Za-z0-9-]{1,39}`, name `[A-Za-z0-9._-]{1,100}` and name not `.`/`..` | syntax only; existence of the repo is **never** proven by the regex; the 39/100 lengths [NEW] |
 | `worktree_label` | `[a-z0-9._-]{1,64}` | opaque label, no `/`; never a path; length [NEW] |
@@ -1206,10 +1216,15 @@ case folding or Unicode normalization. A violation is an input error (A5): `bad_
 | path patterns | A1 grammar (13.1, 14.11) | [DES] plus 14.11 clarifications |
 | every integer | safe integer in `[0, 2^53-1]` | [SRC] ceiling (`canonical.ts:45`); floor 0 for all timestamps, counts, budgets, revisions [NEW application] |
 
-**Review against existing validators:** none of the slot/id/branch/repo patterns above mirrors a validator that
-exists in the audited source (`store.ts:22-34` has none; `publish.ts` has path-list rules only, `publish.ts:281`).
-The 64/128/39/100/32 lengths are therefore proposals, listed individually in 14.12 with alternatives; none is
-claimed to match production data. **No element-count or total-size cap** on set arrays, paths or the envelope is
+**Review against the validators that were read (the pins at the start of section 14; not a complete audit):** `slot`'s character
+set equals `valid_slot` (`bridge.lua:77`) but its proposed length 64 exceeds the source 32; the `t-`/`a-` UUID
+shapes are stricter than `valid_id` (`bridge.lua:73`, 1-128 of `[%w%-_:.]`) and than the publisher manifest `TASK`
+(`publish.ts:41`, 1-100 of `[A-Za-z0-9._-]`, which has no `:`); `base_sha`/`repo_base.sha` equal the publisher `SHA`
+(`publish.ts:39`); the proposed branch grammar is **looser** than the publisher `BRANCH` check (`publish.ts:40,274`:
+required type prefix, `//` and trailing `.lock`, `/` or `.` rejected). For `repo`, `worktree_label`, the owner/name
+lengths, `dependencies[].kind`, `snapshot_id`, `source_kind` and `issuer_ref` no matching validator was found in the
+lines read; that is not a claim that none exists elsewhere. The 64/128/39/100/32 lengths remain proposals, listed
+individually in 14.12 with alternatives; none is claimed to match production data. **No element-count or total-size cap** on set arrays, paths or the envelope is
 proposed here (the open alternative is a count cap); `canonical.ts` `MAX_DEPTH` 64 [SRC] is the only structural
 limit. No credential or host fact was read to choose any of these values.
 
@@ -1261,11 +1276,11 @@ All rows are **NEW PROPOSED, awaiting operator review on this PR**, though the a
 | 14 | R6 Check/Evidence/Report tables | 14.6b: 21 checks always, evidence rule 14.6a, retained flag rule | optional/tagged fields; omit non-evaluated checks |
 | 15 | R6 class representation | derived from the closed code table, not serialized | serialize class per reason |
 | 16 | R10 ConsumptionCheck | `{id, status, reason_codes(0..1)}` | copy the evaluator Check shape |
-| 17 | R10 extra local relations | `binding_valid`, `reasons`, `verdict` consistency with the report's own checks | omit the verdict/reasons relations (structure and times only) |
+| 17 | R10 extra local relations | `binding_valid`, `reasons`, `verdict` consistency with the report's own checks; **no** `evaluated_at_ms <= expires_at_ms` relation (expired-input reports are schema-valid) | omit the verdict/reasons relations (structure and ranges only) |
 | 18 | R7 advisory object | `{est_changed_files, est_minutes, advisory_codes}`; codes only there | echo-only, no codes |
 | 19 | R7 conditions and ranges | BigInt `est_minutes*60000`; all counts/budgets/estimates `[0, 2^53-1]`, 0 allowed | smaller caps (e.g. a minutes cap) |
 | 20 | R8 `task_id`/`attempt_id` | `t-`/`a-` + lowercase 8-4-4-4-12 hex UUID, no version check | UUIDv4-only |
-| 21 | R8 `slot` length | `[a-z0-9-]{1,64}` | 1-32 |
+| 21 | R8 `slot` length | `[a-z0-9-]{1,64}` (exceeds the source `valid_slot` limit 32, `bridge.lua:77`) | 1-32 (equals the source limit; the evaluator would then never accept a slot the Lua validator rejects) |
 | 22 | R8 `slot_epoch` | canonical decimal, no leading zeros, value <= 2^53-1, no digit cap | 16-digit cap or unbounded decimal |
 | 23 | R8 `repo` | owner `{1,39}`, name `{1,100}`, syntax only | looser `[^/]+/[^/]+` |
 | 24 | R8 `worktree_label` | `[a-z0-9._-]{1,64}` | 1-32 |
