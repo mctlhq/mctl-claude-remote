@@ -1,0 +1,336 @@
+{
+  "meta": {
+    "title": "Dispatch feasibility fixture matrix, refs #146",
+    "status": "ILLUSTRATIVE DESIGN EXPECTATIONS. Not executable feature tests, not measured readiness, not host facts. All identifiers, digests and values are synthetic.",
+    "design_doc": "dispatch-feasibility-146.md",
+    "encoding": "MCTL-CJ1 (see design doc section 4). Digests here are symbolic labels, except where a case cites design vector B.",
+    "verdicts": ["feasible", "busy", "needs_split", "blocked_dependency", "unauthorized", "uncertain"],
+    "check_statuses": ["pass", "fail", "unknown", "absent", "stale"],
+    "precedence_after_valid_binding": ["unauthorized", "blocked_dependency", "needs_split", "busy", "uncertain", "feasible"],
+    "check_order": [
+      "binding.schema", "binding.provenance", "binding.slot", "binding.epoch", "binding.capability_fresh",
+      "binding.not_expired", "binding.task_digest", "binding.attempt_unique",
+      "authority.reference", "authority.paths", "authority.commands", "identity.os", "permission.profile",
+      "matcher.compat", "repo.base", "ownership.files", "contract.artifact", "dependency.declared",
+      "fixtures.data", "slot.idle", "bounds.explicit", "estimate.advisory"
+    ],
+    "required_checks": "every check_order entry except estimate.advisory",
+    "snapshot_derived_checks": [
+      "authority.paths", "authority.commands", "identity.os", "permission.profile", "matcher.compat",
+      "repo.base", "ownership.files", "dependency.declared", "fixtures.data", "slot.idle", "bounds.explicit"
+    ],
+    "reason_format": "check_id:code. reasons[] lists every non-pass reason of every evaluable check, ordered by (class precedence, check order, code).",
+    "expand_token": "The token expand:snapshot_derived_not_evaluable stands for one 'check_id:evidence_not_evaluable' entry per snapshot_derived_checks item, in check_order. Those checks have status unknown (never pass, never fail).",
+    "expectation_reading": "check_status_overrides lists only checks that differ from the all-pass baseline. A case's expected.verdict, binding_valid and reasons are the full expected result.",
+    "non_claims": ["not_authorization", "not_reservation", "not_os_isolation", "not_toctou_closure"]
+  },
+  "baseline": {
+    "description": "Small allowed task. All required checks pass. Envelope is design vector B (sha256 43e77d4fafa97cc56fe831d1bdcb145468f821b940bdf1519a074157c9527880).",
+    "task_envelope_digest": "43e77d4fafa97cc56fe831d1bdcb145468f821b940bdf1519a074157c9527880",
+    "capability_digest": "digest:cap-A-rev-3",
+    "task_envelope": {
+      "schema": "mctl.task-envelope/1",
+      "task_id": "t-00000000-0000-4000-8000-000000000001",
+      "attempt_id": "a-00000000-0000-4000-8000-000000000002",
+      "slot": "slot-x",
+      "slot_epoch": "7",
+      "repo": "example-org/example-repo",
+      "worktree_label": "wt-1",
+      "base": { "branch": "main", "base_sha": "0123456789abcdef0123456789abcdef01234567" },
+      "allowed_files": ["docs/example-146.md"],
+      "expected": { "artifact_kind": "handoff_bundle", "branch": "docs/example-146", "trailer": "Agent: claude" },
+      "required_commands": ["cmd:git-diff-check"],
+      "fixtures": ["fixture:synthetic-a"],
+      "dependencies": [],
+      "bounds": { "max_changed_files": 3, "max_wall_ms": 3600000 },
+      "expires_at_ms": 1790000000000,
+      "authority_ref": { "kind": "operator_decision", "id": "decision-0001" },
+      "advisory": { "est_changed_files": 2, "est_minutes": 20 }
+    },
+    "capability_snapshot_summary": {
+      "schema": "mctl.capability-snapshot/1",
+      "slot": "slot-x",
+      "slot_epoch": "7",
+      "revision": 3,
+      "captured_at_ms": 1789999000000,
+      "expires_at_ms": 1789999900000,
+      "provenance": { "source_kind": "synthetic", "issuer_ref": "issuer-1", "verified": true },
+      "facts": {
+        "os_identity": "known",
+        "permission_profile": "known",
+        "command_decisions": "known: cmd:git-diff-check=allowed",
+        "repo_base": "known: matches bound base_sha",
+        "worktree": "known",
+        "ownership": "known: no overlapping claim",
+        "dependencies": "known: none declared",
+        "fixtures": "known: fixture:synthetic-a available",
+        "slot_state": "known: idle, same epoch",
+        "attempts_seen": "known: attempt not seen",
+        "limits": "known: max_changed_files 10",
+        "path_policy": "known: no forbidden pattern matches"
+      }
+    },
+    "evaluated_at_ms": 1789999500000
+  },
+  "cases": [
+    {
+      "id": "allowed_small_task",
+      "description": "Baseline: every required check passes, binding valid.",
+      "mutation": "none",
+      "check_status_overrides": {},
+      "expected": { "binding_valid": true, "verdict": "feasible", "reasons": [] }
+    },
+    {
+      "id": "forbidden_path",
+      "description": "allowed_files contains a path matching a verified forbidden pattern in the known path_policy.",
+      "mutation": "envelope.allowed_files = [\"secrets/example.txt\"]; snapshot path_policy known and forbids secrets/**",
+      "check_status_overrides": { "authority.paths": "fail" },
+      "expected": { "binding_valid": true, "verdict": "unauthorized", "reasons": ["authority.paths:path_forbidden"] }
+    },
+    {
+      "id": "stale_epoch",
+      "description": "Envelope slot_epoch 7 but the snapshot describes epoch 8: the slot was re-registered.",
+      "mutation": "snapshot.slot_epoch = \"8\"",
+      "check_status_overrides": { "binding.epoch": "fail" },
+      "expected": {
+        "binding_valid": false,
+        "verdict": "uncertain",
+        "reasons": ["binding.epoch:epoch_stale", "expand:snapshot_derived_not_evaluable"]
+      }
+    },
+    {
+      "id": "wrong_slot",
+      "description": "Snapshot describes a different slot than the envelope names.",
+      "mutation": "snapshot.slot = \"slot-y\"",
+      "check_status_overrides": { "binding.slot": "fail" },
+      "expected": {
+        "binding_valid": false,
+        "verdict": "uncertain",
+        "reasons": ["binding.slot:slot_mismatch", "expand:snapshot_derived_not_evaluable"]
+      }
+    },
+    {
+      "id": "busy",
+      "description": "Verified fresh slot_state says the slot has an inflight task.",
+      "mutation": "snapshot.facts.slot_state = known: busy, inflight present",
+      "check_status_overrides": { "slot.idle": "fail" },
+      "expected": { "binding_valid": true, "verdict": "busy", "reasons": ["slot.idle:slot_busy"] }
+    },
+    {
+      "id": "duplicate_attempt",
+      "description": "attempts_seen already contains this attempt_id.",
+      "mutation": "snapshot.facts.attempts_seen = known: contains a-00000000-0000-4000-8000-000000000002",
+      "check_status_overrides": { "binding.attempt_unique": "fail" },
+      "expected": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.attempt_unique:attempt_duplicate"] },
+      "note": "Substantive evidence is individually evaluable here, so those checks stay pass and are retained under invalid binding; the report is still not feasible."
+    },
+    {
+      "id": "changed_base",
+      "description": "Base moved since the envelope bound base_sha.",
+      "mutation": "snapshot.facts.repo_base = known: head differs from bound base_sha",
+      "check_status_overrides": { "repo.base": "fail" },
+      "expected": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["repo.base:base_moved"] }
+    },
+    {
+      "id": "unavailable_test_data",
+      "description": "A required fixture/test-data id is known to be unavailable.",
+      "mutation": "snapshot.facts.fixtures = known: fixture:synthetic-a unavailable",
+      "check_status_overrides": { "fixtures.data": "fail" },
+      "expected": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["fixtures.data:fixture_unavailable"] }
+    },
+    {
+      "id": "missing_permission",
+      "description": "No permission profile in the snapshot, so command decisions cannot be tied to one.",
+      "mutation": "snapshot.facts.permission_profile = absent; command_decisions = unknown",
+      "check_status_overrides": { "permission.profile": "absent", "matcher.compat": "unknown", "authority.commands": "unknown" },
+      "expected": {
+        "binding_valid": true,
+        "verdict": "uncertain",
+        "reasons": ["authority.commands:command_decision_unknown", "permission.profile:permission_profile_absent", "matcher.compat:matcher_unverified"]
+      }
+    },
+    {
+      "id": "prohibited_command",
+      "description": "The real matcher (future provider) decided a required command is denied. B1 does not evaluate the matcher; it consumes the decision.",
+      "mutation": "snapshot.facts.command_decisions = known: cmd:git-diff-check=denied",
+      "check_status_overrides": { "authority.commands": "fail" },
+      "expected": { "binding_valid": true, "verdict": "unauthorized", "reasons": ["authority.commands:command_denied"] }
+    },
+    {
+      "id": "conflict_files_owner",
+      "description": "Another owner holds a claim overlapping allowed_files.",
+      "mutation": "snapshot.facts.ownership = known: overlapping claim by another owner",
+      "check_status_overrides": { "ownership.files": "fail" },
+      "expected": { "binding_valid": true, "verdict": "blocked_dependency", "reasons": ["ownership.files:ownership_conflict"] }
+    },
+    {
+      "id": "incomplete_capability",
+      "description": "Snapshot lacks OS identity and repo base facts.",
+      "mutation": "snapshot.facts.os_identity = absent; repo_base = unknown",
+      "check_status_overrides": { "identity.os": "absent", "repo.base": "unknown" },
+      "expected": {
+        "binding_valid": true,
+        "verdict": "uncertain",
+        "reasons": ["identity.os:identity_os_absent", "repo.base:repo_base_unknown"]
+      },
+      "note": "Missing identity or base can never produce feasible."
+    },
+    {
+      "id": "expired_report",
+      "description": "evaluated_at_ms is after the envelope expires_at_ms (or a consumer re-checks an old report after its expires_at_ms).",
+      "mutation": "evaluated_at_ms = 1790000000001",
+      "check_status_overrides": { "binding.not_expired": "fail" },
+      "expected": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.not_expired:report_expired"] }
+    },
+    {
+      "id": "task_digest_drift",
+      "description": "The envelope presented at consumption differs from the one the report bound (any byte change, for example allowed_files).",
+      "mutation": "bound task_digest != digest of presented envelope",
+      "check_status_overrides": { "binding.task_digest": "fail" },
+      "expected": { "binding_valid": false, "verdict": "uncertain", "reasons": ["binding.task_digest:task_digest_drift"] }
+    },
+    {
+      "id": "unverified_provenance",
+      "description": "Snapshot provenance.verified is false, or the authority reference cannot be verified. A matching digest does not substitute.",
+      "mutation": "snapshot.provenance.verified = false",
+      "check_status_overrides": { "binding.provenance": "unknown", "authority.reference": "unknown" },
+      "expected": {
+        "binding_valid": false,
+        "verdict": "uncertain",
+        "reasons": ["binding.provenance:provenance_unverified", "authority.reference:authority_unverified", "expand:snapshot_derived_not_evaluable"]
+      }
+    },
+    {
+      "id": "matcher_not_reproducible",
+      "description": "Task needs a command whose allow/deny status depends on the proprietary matcher; no faithful decision is supplied. A textual prefix match with the slot rules does not count.",
+      "mutation": "snapshot.facts.command_decisions = unknown",
+      "check_status_overrides": { "authority.commands": "unknown", "matcher.compat": "unknown" },
+      "expected": {
+        "binding_valid": true,
+        "verdict": "uncertain",
+        "reasons": ["authority.commands:command_decision_unknown", "matcher.compat:matcher_unverified"]
+      }
+    },
+    {
+      "id": "needs_split_human_step",
+      "description": "A declared dependency requires an intermediate human step.",
+      "mutation": "envelope.dependencies = [{id: dep-1, kind: review, step: human}]",
+      "check_status_overrides": { "dependency.declared": "fail" },
+      "expected": { "binding_valid": true, "verdict": "needs_split", "reasons": ["dependency.declared:human_step_required"] }
+    },
+    {
+      "id": "needs_split_verified_bound",
+      "description": "A verified limit makes the declared scope impossible (4 files declared against a known max of 3).",
+      "mutation": "envelope.allowed_files has 4 entries; snapshot.facts.limits = known: max_changed_files 3",
+      "check_status_overrides": { "bounds.explicit": "fail" },
+      "expected": { "binding_valid": true, "verdict": "needs_split", "reasons": ["bounds.explicit:verified_bound_exceeded"] }
+    },
+    {
+      "id": "pessimistic_heuristic_no_override",
+      "description": "Advisory estimate exceeds the bound, but all trusted checks pass. The estimate neither blocks nor authorizes.",
+      "mutation": "envelope.advisory = {est_changed_files: 9, est_minutes: 900}",
+      "check_status_overrides": {},
+      "expected": { "binding_valid": true, "verdict": "feasible", "reasons": [], "advisory_codes": ["estimate_exceeds_bound"] }
+    }
+  ],
+  "combined_failures": [
+    {
+      "id": "combined_all_classes",
+      "description": "Forbidden path + ownership conflict + busy slot + unknown OS identity at once.",
+      "check_status_overrides": { "authority.paths": "fail", "ownership.files": "fail", "slot.idle": "fail", "identity.os": "unknown" },
+      "expected": {
+        "binding_valid": true,
+        "verdict": "unauthorized",
+        "reasons": ["authority.paths:path_forbidden", "ownership.files:ownership_conflict", "slot.idle:slot_busy", "identity.os:identity_os_unknown"]
+      },
+      "proves": "highest class wins; all findings retained in class/check order"
+    },
+    {
+      "id": "combined_busy_hides_nothing",
+      "description": "Busy slot and unknown OS identity.",
+      "check_status_overrides": { "slot.idle": "fail", "identity.os": "unknown" },
+      "expected": {
+        "binding_valid": true,
+        "verdict": "busy",
+        "reasons": ["slot.idle:slot_busy", "identity.os:identity_os_unknown"]
+      },
+      "proves": "busy does not hide missing identity"
+    },
+    {
+      "id": "combined_dependency_over_split",
+      "description": "Unmet automatic dependency and a verified bound exceeded.",
+      "check_status_overrides": { "dependency.declared": "fail", "bounds.explicit": "fail" },
+      "expected": {
+        "binding_valid": true,
+        "verdict": "blocked_dependency",
+        "reasons": ["dependency.declared:dependency_unmet", "bounds.explicit:verified_bound_exceeded"]
+      },
+      "proves": "blocked_dependency outranks needs_split"
+    },
+    {
+      "id": "combined_invalid_binding_retains_evaluable_denial",
+      "description": "Task digest drift while fresh, verified evidence of a denied command is individually evaluable.",
+      "check_status_overrides": { "binding.task_digest": "fail", "authority.commands": "fail" },
+      "expected": {
+        "binding_valid": false,
+        "verdict": "uncertain",
+        "reasons": ["binding.task_digest:task_digest_drift", "authority.commands:command_denied"],
+        "retained_under_invalid_binding": ["authority.commands"]
+      },
+      "proves": "invalid binding forces uncertain (design default, gate G5) while still reporting the safe evidence"
+    },
+    {
+      "id": "combined_stale_denial_is_not_denial",
+      "description": "The snapshot is stale and its decision said denied. Stale evidence must not pose as a proven denial.",
+      "check_status_overrides": { "binding.capability_fresh": "stale", "authority.commands": "stale" },
+      "expected": {
+        "binding_valid": false,
+        "verdict": "uncertain",
+        "reasons": ["binding.capability_fresh:capability_stale", "authority.commands:evidence_stale", "expand:snapshot_derived_not_evaluable"]
+      },
+      "proves": "stale evidence cannot yield unauthorized"
+    },
+    {
+      "id": "combined_stale_epoch_expiry_and_drift",
+      "description": "Stale epoch, report expiry and task digest drift together.",
+      "check_status_overrides": { "binding.epoch": "fail", "binding.not_expired": "fail", "binding.task_digest": "fail" },
+      "expected": {
+        "binding_valid": false,
+        "verdict": "uncertain",
+        "reasons": ["binding.epoch:epoch_stale", "binding.not_expired:report_expired", "binding.task_digest:task_digest_drift", "expand:snapshot_derived_not_evaluable"]
+      },
+      "proves": "binding failures are all listed in check order"
+    }
+  ],
+  "properties": [
+    {
+      "id": "identical_input_identical_json",
+      "statement": "Two evaluations of the same (envelope, snapshot, evaluated_at_ms) produce byte-identical MCTL-CJ1 output and the same report_digest, also when input object key insertion order differs."
+    },
+    {
+      "id": "capability_change_invalidates_report",
+      "statement": "Changing any snapshot fact changes capability_digest. A report bound to the old capability_digest and revision is not accepted against the new snapshot (binding.task_digest or binding.capability_fresh fails; verdict uncertain, binding_valid false)."
+    },
+    {
+      "id": "privacy_non_sensitive_output",
+      "statement": "Output contains only closed-enum strings and schema-validated identifiers. It never contains credentials, tokens, absolute or private filesystem paths, host names, message/question text, tool output or task prose.",
+      "forbidden_substrings_in_any_output": ["/Users/", "/home/", "password", "token=", "BEGIN PRIVATE KEY", "question_text"]
+    },
+    {
+      "id": "no_arbitrary_side_effects",
+      "statement": "Evaluation performs no store write, send, ack, reservation, commit, push, PR, worktree write, subprocess, network call, clock read or random read."
+    },
+    {
+      "id": "feasible_requires_all_required_pass",
+      "statement": "verdict is feasible only if binding_valid is true and every required check has status pass. unknown, absent and stale are never read as pass."
+    },
+    {
+      "id": "report_is_not_authority",
+      "statement": "A feasible report carries non_claims not_authorization, not_reservation, not_os_isolation, not_toctou_closure; none of them is ever absent or false."
+    },
+    {
+      "id": "unknown_absent_false_distinct",
+      "statement": "absent (does not exist), unknown (not determinable or not faithfully evaluable) and fail (evaluated and not met) produce different check statuses and different reason codes."
+    }
+  ]
+}
