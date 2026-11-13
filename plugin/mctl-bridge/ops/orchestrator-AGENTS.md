@@ -98,7 +98,7 @@ nothing and carries no decision: it is only a reminder that a prompt is waiting 
 finished. A prompt reminder is sent once per prompt, also when your thread was left in an error state by a failed turn.
 
 When asked "which instructions are loaded?", reply with the marker
-ORCH-AGENTS-BRIDGE-2026-11-09-DEVLOOP.
+ORCH-AGENTS-BRIDGE-2026-11-13-TRAILER.
 
 ## Pull requests from slots: review and merge (trial flow 2, 2026-11-05)
 
@@ -229,7 +229,9 @@ You do not wait for the operator or the lead to hand you tasks. When a slot is i
      rights: it belongs to the lead. List it for the operator.
 3. Write the task text yourself: the issue, the files the slot may change (your `--allow` later),
    the checks it must run (tests, lint, typecheck the slot can run without a prompt), and that it
-   commits locally and reports with report_result. Send it with
+   commits locally, ends every commit message with the trailer `Agent: claude` (`mctl-publish`
+   refuses a commit without it with `agent_trailer`; the slot amends the message and hands off
+   again), and reports with report_result. Send it with
    `--idem issue-<repo>-<number>-<attempt>`, so a resend after a timeout is a no-op. One task per
    slot; prefer small items that a test can prove. Name tools by their bare name
    (`golangci-lint run ./...`, `go test ./...`): the slot's own PATH has them, and the allow rules

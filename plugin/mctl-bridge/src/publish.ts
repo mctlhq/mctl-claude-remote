@@ -408,6 +408,11 @@ export async function publish(cfg: Config, gh: GitHub, o: PublishOpts): Promise<
       // Any line counts, not only a parsed trailer block: a line in the body lands in main's history too.
       for (const c of git.must("rev-list", range).split("\n").filter(Boolean)) {
         if (/^\s*co-authored-by\s*:/im.test(git.must("log", "-1", "--format=%B", c))) throw new Refused("co_authored_by", c);
+        // Workspace rule (mctlhq/.github#316): every commit names its author agent in an `Agent:`
+        // trailer. git parses the trailer block itself, so a line in the middle of the body does not
+        // count, and a commit without the trailer would land in main's history as `unknown`.
+        const agents = git.must("log", "-1", "--format=%(trailers:key=Agent,valueonly,separator=%x2C)", c).trim();
+        if (!/^(claude|codex|agy|none)$/.test(agents)) throw new Refused("agent_trailer", c);
       }
       const raw = parseRaw(git.must("diff", "--raw", "--no-abbrev", "--no-renames", "-z", m.base_sha, m.head_sha));
       if (raw.length === 0) throw new Refused("no_changes", m.head_sha);
