@@ -197,6 +197,6 @@ describe.skipIf(requiresValkey)("continuation after a planned restart", () => {
     expect(flat).toContain("Never approve, and never ask the lead to approve.");
     expect(flat).not.toContain("You cannot start DevLoop; list it for the operator");
     // the marker line the orchestrator answers with is untouched
-    expect(md).toContain("ORCH-AGENTS-BRIDGE-2026-11-09-DEVLOOP.");
+    expect(md).toContain("ORCH-AGENTS-BRIDGE-2026-11-13-TRAILER.");
   });
 });

@@ -156,7 +156,7 @@ function handoff(edit: (dir: string) => void = (d) => fs.writeFileSync(path.join
   git(work, "checkout", "-q", "-B", "feat/x", base);
   edit(work);
   git(work, "add", "-A");
-  git(work, "commit", "-qm", "feat: x");
+  git(work, "commit", "-qm", "feat: x\n\nAgent: claude");
   const head = git(work, "rev-parse", "HEAD");
   const files = git(work, "diff", "--name-only", base, head).split("\n");
   const bundle = path.join(tmp, "h.bundle");
@@ -170,7 +170,7 @@ function handoff(edit: (dir: string) => void = (d) => fs.writeFileSync(path.join
 function commit(file: string, text: string): void {
   fs.writeFileSync(path.join(work, file), text);
   git(work, "add", "-A");
-  git(work, "commit", "-qm", `change ${file}`);
+  git(work, "commit", "-qm", `change ${file}\n\nAgent: claude`);
 }
 /** A handoff of whatever the given branch holds on top of `from`. */
 function seal(branch: string, from: string, files: string[]): { bundle: string; manifest: string } {
@@ -275,7 +275,7 @@ describe("publish", () => {
     git(work, "checkout", "-q", "-B", "feat/y", base);
     commit("secret.txt", "x\n");
     git(work, "rm", "-q", "secret.txt");
-    git(work, "commit", "-qm", "revert");
+    git(work, "commit", "-qm", "revert\n\nAgent: claude");
     commit("src/a.txt", "c\n");
     await refused(publish(cfg, gh, opts(seal("feat/y", base, ["src/a.txt"]))), "outside_allowed_files");
   });
@@ -298,6 +298,35 @@ describe("publish", () => {
     await refused(publish(cfg, gh, opts(seal("feat/y", base, ["src/a.txt"]))), "co_authored_by");
     expect(remoteRefs()).not.toContain("feat/y");
     expect(writes()).toEqual([]);
+  });
+
+  for (const [name, msg] of [
+    ["no Agent trailer", "feat: y"],
+    ["an Agent line outside the trailer block", "feat: y\n\nAgent: claude\n\nmore body"],
+    ["an unknown Agent value", "feat: y\n\nAgent: someone"],
+    ["two Agent trailers", "feat: y\n\nAgent: claude\nAgent: codex"],
+  ] as const) {
+    test(`${name} on any commit is refused before anything is pushed`, async () => {
+      git(work, "checkout", "-q", "-B", "feat/y", base);
+      fs.writeFileSync(path.join(work, "src/a.txt"), "c\n");
+      git(work, "add", "-A");
+      git(work, "commit", "-qm", msg);
+      commit("src/a.txt", "d\n"); // a clean commit on top does not hide the earlier one
+      await refused(publish(cfg, gh, opts(seal("feat/y", base, ["src/a.txt"]))), "agent_trailer");
+      expect(remoteRefs()).not.toContain("feat/y");
+      expect(writes()).toEqual([]);
+    });
+  }
+
+  test("each allowed Agent value is accepted", async () => {
+    for (const v of ["codex", "agy", "none"]) {
+      git(work, "checkout", "-q", "-B", `feat/${v}`, base);
+      fs.writeFileSync(path.join(work, "src/a.txt"), `${v}\n`);
+      git(work, "add", "-A");
+      git(work, "commit", "-qm", `feat: ${v}\n\nAgent: ${v}`);
+      const r = await publish(cfg, gh, opts(seal(`feat/${v}`, base, ["src/a.txt"])));
+      expect((r as { ok: boolean }).ok).toBe(true);
+    }
   });
 
   test("a commit that only mentions the trailer mid-line is not refused", async () => {
@@ -848,6 +877,17 @@ describe("publish --update-from", () => {
     const y = seal("feat/x", base, ["src/a.txt"]);
     fake.pulls = [own(first)];
     await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "co_authored_by");
+    expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
+  });
+
+  test("a follow-up commit without the Agent trailer is refused before anything is pushed", async () => {
+    const { first } = await published();
+    fs.writeFileSync(path.join(work, "src/a.txt"), "c\n");
+    git(work, "add", "-A");
+    git(work, "commit", "-qm", "fix: c");
+    const y = seal("feat/x", base, ["src/a.txt"]);
+    fake.pulls = [own(first)];
+    await refused(publish(cfg, gh, { ...opts(y), updateFrom: first }), "agent_trailer");
     expect(remoteRefs()).toContain(`refs/heads/feat/x ${first}`);
   });
 
