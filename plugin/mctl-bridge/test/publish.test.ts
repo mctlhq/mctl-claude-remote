@@ -969,15 +969,23 @@ describe("enqueue", () => {
     expect(mutations()).toHaveLength(0);
   });
 
-  test("already queued on this head is reported, not queued twice", async () => {
-    fake.queue.pr.mergeQueueEntry = { state: "AWAITING_CHECKS", position: 2, headCommit: { oid: HEAD } };
+  test("already queued is reported, not queued twice; the entry's commit is the queue's, not the PR head", async () => {
+    fake.queue.pr.mergeQueueEntry = { state: "AWAITING_CHECKS", position: 2, headCommit: { oid: "c".repeat(40) } };
+    expect(await go()).toMatchObject({ ok: true, queued: true, already: true, entry: { queue_commit: "c".repeat(40) } });
+    expect(mutations()).toHaveLength(0);
+  });
+
+  test("a fresh entry with no commit yet is still queued", async () => {
+    fake.queue.pr.mergeQueueEntry = { state: "QUEUED", position: 1, headCommit: null };
+    expect(await queueStatus(cfg, gh, REPO, 7)).toMatchObject({ ok: true, queued: true, entry: { queue_commit: null } });
     expect(await go()).toMatchObject({ ok: true, queued: true, already: true });
     expect(mutations()).toHaveLength(0);
   });
 
-  test("queued on another head is refused", async () => {
+  test("a queued PR whose head moved is refused", async () => {
     fake.queue.pr.mergeQueueEntry = { state: "QUEUED", position: 1, headCommit: { oid: "c".repeat(40) } };
-    await refused(go(), "queued_other_head");
+    fake.queue.pr.headRefOid = "b".repeat(40);
+    await refused(go(), "head_moved");
   });
 
   test("already merged is reported as merged, nothing is sent", async () => {
@@ -1004,7 +1012,9 @@ describe("enqueue", () => {
   test("a failed or malformed state read is unreadable, never 'not queued'", async () => {
     fake.queue.pr = null;
     await expect(go()).rejects.toThrow(Unreadable);
-    fake.queue.pr = { id: "N1", state: "OPEN", merged: false, headRefOid: HEAD, mergeQueueEntry: { state: "QUEUED" } };
+    fake.queue.pr = { id: "N1", state: "OPEN", merged: false, headRefOid: HEAD, mergeQueueEntry: { position: 1 } };
+    await expect(go()).rejects.toThrow(Unreadable);
+    fake.queue.pr = { id: "N1", state: "OPEN", merged: false, headRefOid: HEAD, mergeQueueEntry: { state: "QUEUED", headCommit: { oid: 5 } } };
     await expect(go()).rejects.toThrow(Unreadable);
     expect(mutations()).toHaveLength(0);
   });
