@@ -10,7 +10,56 @@ env:
   IMAGE_NAME: mctlhq/mctl-claude-remote
 
 jobs:
+  # A tag also releases plugin/mctl-bridge, which the Mac mini installs from the tag and
+  # which is not in the image. The image and its gitops bump (a rollout of labs/claude-remote)
+  # run only if something the Dockerfile COPYs changed since the previous release tag.
+  # Anything that cannot be established (no previous tag, a failed diff, an unreadable
+  # list) builds: an unknown change is never "no change".
+  scope:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      image: ${{ steps.scope.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Test the relevance script
+        run: sh .github/scripts/test-image-relevant.sh
+
+      - name: Decide whether the image changed
+        id: scope
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          image=true
+          tags=$(git tag --list '[0-9]*.[0-9]*.[0-9]*' --sort=-v:refname | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' || true)
+          prev=$(printf '%s\n' "$tags" | awk -v t="$TAG" 'f { print; exit } $0 == t { f = 1 }')
+          if [ -z "$prev" ]; then
+            echo "no previous release tag found; building to be safe"
+          # --no-renames: a file moved out of an input path must show up under its old path too.
+          # quotepath=false keeps paths literal.
+          elif files=$(git -c core.quotepath=false diff --no-renames --name-only "$prev" "$TAG"); then
+            echo "changed since $prev:"; echo "$files"
+            if printf '%s\n' "$files" | sh .github/scripts/image-relevant.sh; then
+              image=true
+            else
+              image=false
+            fi
+          else
+            echo "git diff failed; building to be safe"
+          fi
+          echo "image=$image"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          if [ "$image" = false ]; then
+            echo "Tag $TAG changes nothing in the image: no image built, no gitops bump." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
   build:
+    needs: scope
+    if: needs.scope.outputs.image == 'true'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,7 +92,8 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
 
   bump-gitops:
-    needs: build
+    needs: [scope, build]
+    if: needs.scope.outputs.image == 'true'
     runs-on: ubuntu-latest
     steps:
       - name: Validate semver tag
