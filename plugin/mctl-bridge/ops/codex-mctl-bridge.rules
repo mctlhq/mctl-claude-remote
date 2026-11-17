@@ -14,10 +14,10 @@ prefix_rule(
 # The orchestrator's GitHub writes, as the mctl-codex App. There is no approve command, the
 # merge checks the gate itself, and reading the App key directly still prompts.
 prefix_rule(
-    pattern = ["mctl-publish", ["status", "publish", "ready", "merge", "update-branch"]],
+    pattern = ["mctl-publish", ["status", "publish", "ready", "merge", "enqueue", "queue-status", "update-branch"]],
     decision = "allow",
     justification = "mctl-publish: GitHub writes as the mctl-codex App, without admin rights",
-    match = [["mctl-publish", "status"], ["mctl-publish", "merge", "--repo", "r", "--pr", "1", "--head", "a"]],
+    match = [["mctl-publish", "status"], ["mctl-publish", "merge", "--repo", "r", "--pr", "1", "--head", "a"], ["mctl-publish", "enqueue", "--repo", "r", "--pr", "1", "--head", "a"]],
     not_match = [["mctl-publish", "approve"], ["mctl-publish-x", "status"], ["cat", "codex-github-app.pem"]],
 )
 

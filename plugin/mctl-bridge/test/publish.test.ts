@@ -5,7 +5,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { GitHub, OutcomeUnknown, Refused, Unreadable, allowed, config, main, merge, parseManifest, parseRaw, publish, ready, updateBranch } from "../src/publish.ts";
+import { GitHub, OutcomeUnknown, Refused, Unreadable, allowed, config, enqueue, main, merge, queueStatus, parseManifest, parseRaw, publish, ready, updateBranch } from "../src/publish.ts";
 import type { Config, Manifest } from "../src/publish.ts";
 
 const REPO = "mctlhq/r";
@@ -41,6 +41,7 @@ type Fake = {
   dropUpdate: boolean;
   tokenSeen: string[];
   app: any;
+  queue: { pr: any; mutation: { status: number; body: any } | "drop" };
 };
 
 let server: ReturnType<typeof Bun.serve>;
@@ -78,7 +79,14 @@ function handle(req: Request, url: URL, body: any): Response {
     if (fake.dropUpdate) throw new Error("drop");
     return J(fake.updateReply.body, fake.updateReply.status);
   }
-  if (key === "POST /graphql") return J({ data: {} });
+  if (key === "POST /graphql") {
+    if (String(body?.query).startsWith("mutation($id:ID!,$h")) {
+      if (fake.queue.mutation === "drop") throw new Error("drop");
+      return J(fake.queue.mutation.body, fake.queue.mutation.status);
+    }
+    if (String(body?.query).startsWith("query(")) return J({ data: { repository: { pullRequest: fake.queue.pr } } });
+    return J({ data: {} });
+  }
   if (key === "GET /repos/mctlhq/r/rules/branches/main") return J(fake.rules);
   if (key === "GET /repos/mctlhq/r/branches/main") return J(fake.branch);
   if (p.endsWith("/check-runs")) return J({ total_count: fake.runs.length, check_runs: fake.runs });
@@ -125,6 +133,10 @@ beforeEach(() => {
     behindBy: 3,
     updateReply: { status: 202, body: { message: "Updating pull request branch." } },
     dropUpdate: false,
+    queue: {
+      pr: { id: "N1", state: "OPEN", merged: false, headRefOid: HEAD, mergeQueueEntry: null },
+      mutation: { status: 200, body: { data: { enqueuePullRequest: { mergeQueueEntry: { state: "QUEUED", position: 1 } } } } },
+    },
   };
   tmp = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "publish-")));
   fs.writeFileSync(path.join(tmp, "key.pem"), PEM, { mode: 0o600 });
@@ -932,4 +944,80 @@ test("the source offers no way to approve, force or bypass", () => {
   const src = fs.readFileSync(path.join(import.meta.dir, "..", "src", "publish.ts"), "utf8");
   const code = src.split("\n").filter((l) => !l.trim().startsWith("//")).join("\n");
   for (const bad of ['"APPROVE"', "--force", '"-f"', "--admin", "/reviews`, {"]) expect(code, bad).not.toContain(bad);
+});
+
+describe("enqueue", () => {
+  const go = () => enqueue(cfg, gh, REPO, 7, HEAD);
+  const mutations = () => fake.calls.filter((c) => c.path === "/graphql" && String(c.body?.query).startsWith("mutation($id:ID!,$h"));
+
+  test("queues a green, approved head, pinned to the checked SHA, and says queued, not merged", async () => {
+    expect(await go()).toMatchObject({ ok: true, queued: true, merged: false });
+    expect(mutations()).toHaveLength(1);
+    expect(mutations()[0]!.body.variables).toEqual({ id: "N1", h: HEAD });
+    expect(fake.calls.some((c) => c.path.endsWith("/merge"))).toBe(false);
+  });
+
+  test("a head that moved is refused and nothing is queued", async () => {
+    fake.queue.pr.headRefOid = "b".repeat(40);
+    await refused(go(), "head_moved");
+    expect(mutations()).toHaveLength(0);
+  });
+
+  test("the same gate as merge: an unapproved head is refused", async () => {
+    fake.reviews = [];
+    await refused(go(), "not_approved");
+    expect(mutations()).toHaveLength(0);
+  });
+
+  test("already queued on this head is reported, not queued twice", async () => {
+    fake.queue.pr.mergeQueueEntry = { state: "AWAITING_CHECKS", position: 2, headCommit: { oid: HEAD } };
+    expect(await go()).toMatchObject({ ok: true, queued: true, already: true });
+    expect(mutations()).toHaveLength(0);
+  });
+
+  test("queued on another head is refused", async () => {
+    fake.queue.pr.mergeQueueEntry = { state: "QUEUED", position: 1, headCommit: { oid: "c".repeat(40) } };
+    await refused(go(), "queued_other_head");
+  });
+
+  test("already merged is reported as merged, nothing is sent", async () => {
+    fake.queue.pr.merged = true;
+    expect(await go()).toMatchObject({ ok: true, merged: true, queued: false });
+    expect(mutations()).toHaveLength(0);
+  });
+
+  test("a GraphQL refusal is refused", async () => {
+    fake.queue.mutation = { status: 200, body: { data: null, errors: [{ message: "head changed" }] } };
+    await refused(go(), "enqueue_refused");
+  });
+
+  test("a lost reply, a 5xx and an empty reply are unknown and never retried", async () => {
+    fake.queue.mutation = "drop";
+    await expect(go()).rejects.toThrow(OutcomeUnknown);
+    fake.queue.mutation = { status: 502, body: {} };
+    await expect(go()).rejects.toThrow(OutcomeUnknown);
+    fake.queue.mutation = { status: 200, body: { data: { enqueuePullRequest: null } } };
+    await expect(go()).rejects.toThrow(OutcomeUnknown);
+    expect(mutations()).toHaveLength(3);
+  });
+
+  test("a failed or malformed state read is unreadable, never 'not queued'", async () => {
+    fake.queue.pr = null;
+    await expect(go()).rejects.toThrow(Unreadable);
+    fake.queue.pr = { id: "N1", state: "OPEN", merged: false, headRefOid: HEAD, mergeQueueEntry: { state: "QUEUED" } };
+    await expect(go()).rejects.toThrow(Unreadable);
+    expect(mutations()).toHaveLength(0);
+  });
+
+  test("merge on a queue-only repository points at enqueue", async () => {
+    fake.mergeReply = { status: 405, body: { message: "Repository rule violations found\n\nChanges must be made through the merge queue\n\n" } };
+    await refused(merge(cfg, gh, REPO, 7, HEAD), "use_enqueue");
+  });
+
+  test("queue-status reads and never writes; a repository off the list is refused", async () => {
+    fake.queue.pr.mergeQueueEntry = { state: "QUEUED", position: 1, headCommit: { oid: HEAD } };
+    expect(await queueStatus(cfg, gh, REPO, 7)).toMatchObject({ ok: true, queued: true, merged: false });
+    expect(mutations()).toHaveLength(0);
+    await refused(enqueue(cfg, gh, "mctlhq/api", 7, HEAD), "repo_not_allowed");
+  });
 });
