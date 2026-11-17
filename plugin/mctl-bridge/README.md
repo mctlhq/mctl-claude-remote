@@ -255,6 +255,8 @@ mctl-publish publish --repo R --bundle F --manifest F --allow PATH --title T --b
 mctl-publish publish ... --update-from SHA
 mctl-publish ready --repo R --pr N --head SHA
 mctl-publish merge --repo R --pr N --head SHA
+mctl-publish enqueue --repo R --pr N --head SHA   # repositories with a merge queue
+mctl-publish queue-status --repo R --pr N
 ```
 
 Exit status: 0 ok, 1 usage, 2 unreadable, 3 refused, 4 outcome unknown (not retried).

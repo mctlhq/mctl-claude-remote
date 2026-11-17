@@ -5,6 +5,8 @@
 //            with --update-from, fast-forward the App's own open PR instead
 //   ready    mark a Draft PR ready for review
 //   merge    merge a PR whose current head is approved by claude[bot] and fully green
+//   enqueue  put such a PR into the merge queue of a repository that requires one
+//   queue-status  read where a PR stands in the merge queue (read only)
 //
 // There is no approve command, and there must never be one. GitHub lets the App approve a
 // PR written by somebody else, and such an approval satisfies the ruleset, so the only thing
@@ -680,7 +682,74 @@ export async function merge(cfg: Config, gh: GitHub, repo: string, pr: number, h
   }
   if (r.status === 200 && r.data?.merged === true) return { ok: true, pr, head, merge_commit: r.data.sha };
   if (r.status >= 500) throw new OutcomeUnknown(`merge: status ${r.status}`);
+  if (r.status === 405 && /merge queue/i.test(String(r.data?.message))) throw new Refused("use_enqueue", `${repo} merges through a merge queue: use enqueue`);
   throw new Refused("merge_refused", `status ${r.status}: ${String(r.data?.message)}`);
+}
+
+type QueueState = { merged: boolean; state: string; id: string; headOid: string; entry: { state: string; position: number | null; headOid: string | null } | null };
+
+/** Where a PR stands, read through GraphQL. Anything unexpected is a failed read, never "not queued". */
+export async function readQueue(gh: GitHub, repo: string, pr: number): Promise<QueueState> {
+  const [owner, name] = repo.split("/");
+  let r: Reply;
+  try {
+    r = await gh.write("POST", "/graphql", {
+      query: "query($o:String!,$n:String!,$p:Int!){repository(owner:$o,name:$n){pullRequest(number:$p){id state merged headRefOid mergeQueueEntry{state position headCommit{oid}}}}}",
+      variables: { o: owner, n: name, p: pr },
+    });
+  } catch (err) {
+    if (err instanceof TransportError) throw new Unreadable(err.message);
+    throw err;
+  }
+  if (r.status !== 200 || r.data?.errors) throw new Unreadable(`queue read: status ${r.status} ${JSON.stringify(r.data?.errors ?? "").slice(0, 300)}`);
+  const q = r.data?.data?.repository?.pullRequest;
+  if (typeof q?.id !== "string" || typeof q?.state !== "string" || typeof q?.merged !== "boolean" || typeof q?.headRefOid !== "string") throw new Unreadable("queue read: the PR has an unexpected shape");
+  // The entry is null only when the PR is not queued; a present entry must say what it is.
+  const e = q.mergeQueueEntry;
+  if (e !== null && (typeof e?.state !== "string" || typeof e?.headCommit?.oid !== "string")) throw new Unreadable("queue read: the queue entry has an unexpected shape");
+  return { merged: q.merged, state: q.state, id: q.id, headOid: q.headRefOid, entry: e === null ? null : { state: e.state, position: typeof e.position === "number" ? e.position : null, headOid: e.headCommit.oid } };
+}
+
+export async function queueStatus(cfg: Config, gh: GitHub, repo: string, pr: number): Promise<Record<string, unknown>> {
+  checkRepo(cfg, repo);
+  const q = await readQueue(gh, repo, pr);
+  return { ok: true, pr, head: q.headOid, merged: q.merged, pr_state: q.state, queued: q.entry !== null, entry: q.entry };
+}
+
+/**
+ * Puts a PR into the merge queue, with the same gate `merge` applies and the mutation pinned
+ * to the head that was checked (`expectedHeadOid`). "Queued" is not "merged": the queue still
+ * builds its own commit and runs the required checks, and merges only if they pass. A PR that
+ * is already merged or already queued on this head is reported, not enqueued twice. A lost reply
+ * is unknown and is never retried: read `queue-status` first.
+ */
+export async function enqueue(cfg: Config, gh: GitHub, repo: string, pr: number, head: string): Promise<Record<string, unknown>> {
+  checkRepo(cfg, repo);
+  const before = await readQueue(gh, repo, pr);
+  if (before.merged) return { ok: true, pr, head, merged: true, queued: false, already: true };
+  if (before.headOid !== head) throw new Refused("head_moved", `the head is ${before.headOid}`);
+  if (before.entry) {
+    if (before.entry.headOid !== head) throw new Refused("queued_other_head", `queued at ${String(before.entry.headOid)}`);
+    return { ok: true, pr, head, merged: false, queued: true, already: true, entry: before.entry };
+  }
+  await gate(gh, repo, pr, head);
+  let r: Reply;
+  try {
+    r = await gh.write("POST", "/graphql", {
+      query: "mutation($id:ID!,$h:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$h}){mergeQueueEntry{state position}}}",
+      variables: { id: before.id, h: head },
+    });
+  } catch (err) {
+    if (err instanceof TransportError) throw new OutcomeUnknown(err.message);
+    throw err;
+  }
+  if (r.status >= 500) throw new OutcomeUnknown(`enqueue: status ${r.status}`);
+  if (r.status !== 200) throw new Refused("enqueue_refused", `status ${r.status}: ${String(r.data?.message)}`);
+  if (r.data?.errors) throw new Refused("enqueue_refused", JSON.stringify(r.data.errors).slice(0, 400));
+  const entry = r.data?.data?.enqueuePullRequest?.mergeQueueEntry;
+  // Neither an error nor an entry: the outcome is not established.
+  if (typeof entry?.state !== "string") throw new OutcomeUnknown("enqueue: no queue entry in the reply");
+  return { ok: true, pr, head, merged: false, queued: true, entry, next: "queued, not merged: the queue runs the required checks on its own commit; read queue-status until merged is true" };
 }
 
 export async function status(cfg: Config, gh: GitHub): Promise<Record<string, unknown>> {
@@ -722,6 +791,8 @@ const USAGE = `usage: mctl-publish status
        mctl-publish ready --repo R --pr N --head SHA
        mctl-publish merge --repo R --pr N --head SHA
        mctl-publish update-branch --repo R --pr N --head SHA
+       mctl-publish enqueue --repo R --pr N --head SHA
+       mctl-publish queue-status --repo R --pr N
 Exit: 0 ok, 1 usage, 2 unreadable, 3 refused, 4 outcome unknown.`;
 
 export async function main(argv: string[], cfg: Config = config()): Promise<number> {
@@ -759,6 +830,18 @@ export async function main(argv: string[], cfg: Config = config()): Promise<numb
       case "merge": {
         const p = prArgs(rest);
         print(await merge(cfg, gh, p.repo, p.pr, p.head));
+        return 0;
+      }
+      case "enqueue": {
+        const p = prArgs(rest);
+        print(await enqueue(cfg, gh, p.repo, p.pr, p.head));
+        return 0;
+      }
+      case "queue-status": {
+        const a = args(rest, ["--repo", "--pr"]);
+        const pr = Number(need(a, "--pr"));
+        if (!Number.isInteger(pr) || pr <= 0) throw new UsageError("--pr must be a number");
+        print(await queueStatus(cfg, gh, need(a, "--repo"), pr));
         return 0;
       }
       case "update-branch": {

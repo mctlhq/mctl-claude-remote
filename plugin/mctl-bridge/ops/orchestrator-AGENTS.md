@@ -111,6 +111,8 @@ admin rights:
     mctl-publish publish --repo R --bundle F --manifest F --allow PATH --title T --body-file F --update-from SHA
     mctl-publish ready --repo R --pr N --head SHA
     mctl-publish merge --repo R --pr N --head SHA
+    mctl-publish enqueue --repo R --pr N --head SHA
+    mctl-publish queue-status --repo R --pr N
     mctl-publish update-branch --repo R --pr N --head SHA
 
 Use the GitHub connector for reading only. It acts as the owner with admin rights and can
@@ -121,6 +123,14 @@ do not work around it: report the exact output with `[operator-question]`. Exit 
 outcome is unknown: read the state, never repeat the call blindly.
 
 `--allow` comes from the task's allowed files, never from the slot's manifest.
+
+A repository whose `main` requires a merge queue (mctl-gitops) refuses `merge` with
+`use_enqueue`: use `enqueue` there, with the same `--head` you verified. It applies the same
+gate as `merge` and pins the GitHub mutation to that head. `queued: true` is not merged: the
+queue builds its own commit and runs the required checks, and the PR is merged only when
+`queue-status` reports `merged: true`. Say "queued" until then. If `enqueue` exits 4, or the
+head moved, read `queue-status` first and never repeat the call blindly. An already queued PR
+is reported as `already`, not queued twice. There is no admin bypass and no direct merge.
 
 `update-branch` merges main into the App's own PR on GitHub, for a repository that only merges
 an up-to-date branch (`merge` refuses with `not_mergeable ... behind`). It is the last step
