@@ -19,6 +19,9 @@ jobs:
       - name: Shell syntax
         run: sh -n entrypoint.sh
 
+      - name: Test the image relevance script
+        run: sh .github/scripts/test-image-relevant.sh
+
       - name: Node syntax
         run: node --check health-proxy.js
 
