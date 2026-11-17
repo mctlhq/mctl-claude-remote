@@ -686,7 +686,7 @@ export async function merge(cfg: Config, gh: GitHub, repo: string, pr: number, h
   throw new Refused("merge_refused", `status ${r.status}: ${String(r.data?.message)}`);
 }
 
-type QueueState = { merged: boolean; state: string; id: string; headOid: string; entry: { state: string; position: number | null; headOid: string | null } | null };
+type QueueState = { merged: boolean; state: string; id: string; headOid: string; entry: { state: string; position: number | null; queue_commit: string | null } | null };
 
 /** Where a PR stands, read through GraphQL. Anything unexpected is a failed read, never "not queued". */
 export async function readQueue(gh: GitHub, repo: string, pr: number): Promise<QueueState> {
@@ -704,10 +704,14 @@ export async function readQueue(gh: GitHub, repo: string, pr: number): Promise<Q
   if (r.status !== 200 || r.data?.errors) throw new Unreadable(`queue read: status ${r.status} ${JSON.stringify(r.data?.errors ?? "").slice(0, 300)}`);
   const q = r.data?.data?.repository?.pullRequest;
   if (typeof q?.id !== "string" || typeof q?.state !== "string" || typeof q?.merged !== "boolean" || typeof q?.headRefOid !== "string") throw new Unreadable("queue read: the PR has an unexpected shape");
-  // The entry is null only when the PR is not queued; a present entry must say what it is.
+  // The entry is null only when the PR is not queued; a present entry must at least have a state.
+  // Its headCommit is the queue's own temporary merge commit, not the PR head, and GitHub leaves
+  // it null for a moment after enqueueing, so it is informational and may be absent.
   const e = q.mergeQueueEntry;
-  if (e !== null && (typeof e?.state !== "string" || typeof e?.headCommit?.oid !== "string")) throw new Unreadable("queue read: the queue entry has an unexpected shape");
-  return { merged: q.merged, state: q.state, id: q.id, headOid: q.headRefOid, entry: e === null ? null : { state: e.state, position: typeof e.position === "number" ? e.position : null, headOid: e.headCommit.oid } };
+  if (e !== null && typeof e?.state !== "string") throw new Unreadable("queue read: the queue entry has an unexpected shape");
+  const qc = e === null ? null : e.headCommit === null || e.headCommit === undefined ? null : e.headCommit.oid;
+  if (qc !== null && typeof qc !== "string") throw new Unreadable("queue read: the queue commit has an unexpected shape");
+  return { merged: q.merged, state: q.state, id: q.id, headOid: q.headRefOid, entry: e === null ? null : { state: e.state, position: typeof e.position === "number" ? e.position : null, queue_commit: qc } };
 }
 
 export async function queueStatus(cfg: Config, gh: GitHub, repo: string, pr: number): Promise<Record<string, unknown>> {
@@ -729,7 +733,7 @@ export async function enqueue(cfg: Config, gh: GitHub, repo: string, pr: number,
   if (before.merged) return { ok: true, pr, head, merged: true, queued: false, already: true };
   if (before.headOid !== head) throw new Refused("head_moved", `the head is ${before.headOid}`);
   if (before.entry) {
-    if (before.entry.headOid !== head) throw new Refused("queued_other_head", `queued at ${String(before.entry.headOid)}`);
+    // The PR head was just checked against `head`, and a push to a queued PR removes it from the queue.
     return { ok: true, pr, head, merged: false, queued: true, already: true, entry: before.entry };
   }
   await gate(gh, repo, pr, head);
