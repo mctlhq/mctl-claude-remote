@@ -169,9 +169,9 @@ ensure_json /workspace/.claude.json \
 }
 JSON
 
-# Always ensure settings.json suppresses the bypass-permissions warning dialog and renderer prompts.
-# Without skipDangerousModePermissionPrompt, --dangerously-skip-permissions
-# blocks at a "Yes, I accept" prompt that we can't answer non-interactively.
+# Always ensure settings.json suppresses the renderer prompts and pins the permission mode.
+# (skipDangerousModePermissionPrompt is kept as a harmless suppressor; the session
+# no longer runs in bypass mode, see the permission-mode block below.)
 # resumeReturnDismissed is a belt-and-suspenders modal suppressor: it persists
 # the "don't ask me again" choice for the resume-from-summary modal, so a headless
 # (stdin=/dev/null) --remote-control bridge never wedges on it even if a future
@@ -215,20 +215,51 @@ case "$CLAUDE_REMOTE_MODEL" in
     echo "[entrypoint] WARN CLAUDE_REMOTE_MODEL='$CLAUDE_REMOTE_MODEL' is not a model alias/ID; using haiku" >&2
     CLAUDE_REMOTE_MODEL=haiku ;;
 esac
+# Permission mode (#61): the session runs in `dontAsk`, not bypass. dontAsk
+# denies every tool call that would otherwise prompt, so the session still runs
+# unattended but anything not listed in permissions.allow is DENIED instead of
+# silently executed. The allowlist is the fixed hydration surface of the events
+# channel (the mctl-events ack, mctl-telegram get_messages, `gh pr view`); an
+# operator who needs more tools for interactive work adds them through
+# CLAUDE_REMOTE_EXTRA_ALLOW (comma-separated permission rules). Bypass mode is
+# switched off at the settings level too, so a workspace restored from MinIO
+# cannot bring it back. permissions.allow is REBUILT from base plus extra on every
+# start: an entry in the restored file that is in neither (a stale rule, a removed
+# CLAUDE_REMOTE_EXTRA_ALLOW item, a tampered `Bash(*)`) is dropped. Other keys
+# (deny, ask, operator settings) are kept.
+CLAUDE_REMOTE_BASE_ALLOW='mcp__mctl-events__ack_event,mcp__mctl-telegram__get_messages,Bash(gh pr view *)'
+CLAUDE_REMOTE_EXTRA_ALLOW="${CLAUDE_REMOTE_EXTRA_ALLOW:-}"
+# The list is interpolated into jq programs and a JSON seed. A rule is a tool
+# name plus an optional parenthesised specifier; quotes, backslashes and control
+# characters never occur in one, and anything else fails the start rather than
+# yielding a broken or widened allowlist.
+case "$CLAUDE_REMOTE_EXTRA_ALLOW" in
+  *[!A-Za-z0-9_\ *\(\):.,/@=-]*)
+    echo "[entrypoint] ERROR CLAUDE_REMOTE_EXTRA_ALLOW contains a character a permission rule cannot have" >&2
+    exit 2 ;;
+esac
+CLAUDE_REMOTE_ALLOW_JSON=$(printf '%s,%s' "$CLAUDE_REMOTE_BASE_ALLOW" "$CLAUDE_REMOTE_EXTRA_ALLOW" \
+  | jq -Rc 'split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0)) | unique') \
+  || { echo "[entrypoint] ERROR could not build the permissions allowlist" >&2; exit 2; }
+[ -n "$CLAUDE_REMOTE_ALLOW_JSON" ] || { echo "[entrypoint] ERROR empty permissions allowlist" >&2; exit 2; }
 ensure_json /workspace/.claude/settings.json \
   "if (.skipDangerousModePermissionPrompt == true
        and .skipAutoPermissionPrompt == true
-       and .permissions.defaultMode? == \"auto\"
-       and .permissions.allow_bypass_permissions? == true
+       and .permissions.defaultMode? == \"dontAsk\"
+       and .permissions.disableBypassPermissionsMode? == \"disable\"
+       and (.permissions | has(\"allow_bypass_permissions\")) == false
+       and ((.permissions.allow? // [] | if type == \"array\" then unique else null end) == $CLAUDE_REMOTE_ALLOW_JSON)
        and .model == \"$CLAUDE_REMOTE_MODEL\")
    then \"ok\" else \"no\" end" \
   ".skipDangerousModePermissionPrompt = true
    | .skipAutoPermissionPrompt = true
-   | .permissions.defaultMode = \"auto\"
-   | .permissions.allow_bypass_permissions = true
+   | .permissions.defaultMode = \"dontAsk\"
+   | .permissions.disableBypassPermissionsMode = \"disable\"
+   | del(.permissions.allow_bypass_permissions)
+   | .permissions.allow = $CLAUDE_REMOTE_ALLOW_JSON
    | .model = \"$CLAUDE_REMOTE_MODEL\"" <<JSON || true
 {
-  "permissions": { "defaultMode": "auto", "allow_bypass_permissions": true },
+  "permissions": { "defaultMode": "dontAsk", "disableBypassPermissionsMode": "disable", "allow": $CLAUDE_REMOTE_ALLOW_JSON },
   "skipDangerousModePermissionPrompt": true,
   "skipAutoPermissionPrompt": true,
   "tui": "default",
@@ -353,7 +384,8 @@ seed_claude_md() {  # $1 = destination (default /workspace/CLAUDE.md)
 You are running inside a container as a Claude Code remote worker.
 
 - Workspace: `/workspace` (persisted across restarts via external storage)
-- Mode: `--remote-control` with `--dangerously-skip-permissions`
+- Mode: `--remote-control` with `--permission-mode dontAsk`: a tool call not in the
+  `permissions.allow` list of `~/.claude/settings.json` is denied, not prompted
 - All file operations work under `/workspace`; git is available
 
 ## Stay responsive — never block the event loop
@@ -717,11 +749,50 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
   # Explicit --model, independent of whatever /workspace/.claude/settings.json pins
   # for the interactive remote-control session (HOME=/workspace makes that file the
   # user settings for every claude process here, steward included). The steward
-  # edits code, pushes with --dangerously-skip-permissions, resolves bot review
+  # edits code, pushes, resolves bot review
   # threads and calls `gh pr merge` under merge_mode: when-green -- a smaller model
   # degrades exactly at that long, precise instruction-following, so its model is
   # pinned on the invocation itself rather than inherited.
   STEWARD_MODEL="${PR_STEWARD_MODEL:-sonnet}"
+  # The tick runs headless in `dontAsk` (#61) with exactly the tools the skill's
+  # flow uses, on top of the user settings' allowlist: gh (list/view/api/merge/
+  # comment/update-branch), git (clone/fetch/checkout/commit/push), jq for the
+  # skill's own JSON handling, file read/edit for review fixes, and three exact
+  # commands: `printenv` of the two PR_STEWARD_* values the skill reads (enable
+  # gate, tick id), `rm -f` of the lock file, and the structured-log writer.
+  # Anything else is denied. Everything else the skill needed from a shell is
+  # done HERE instead (the token and git credential helper are exported below, the
+  # gate is the `if` above), and test_steward_skill_coverage.py fails when the
+  # skill asks the model for a command this list does not cover.
+  # PR_STEWARD_WATCH_SCRIPT (absolute path of the operator's codex-watch
+  # launcher) adds exactly that one script as a rule. PR_STEWARD_ALLOWED_TOOLS
+  # replaces the list (space-separated rules, as `claude --allowedTools` takes
+  # them); an empty value is not accepted, so a typo cannot turn into "no tools"
+  # silently or "all tools".
+  STEWARD_ALLOWED_TOOLS="${PR_STEWARD_ALLOWED_TOOLS:-Read Edit Write Bash(gh:*) Bash(git:*) Bash(jq:*) Bash(printenv PR_STEWARD_ENABLED) Bash(printenv PR_STEWARD_TICK_ID) Bash(rm -f /workspace/.steward.lock) Bash(/opt/steward/bin/pr-steward-log:*)}"
+  case "$STEWARD_ALLOWED_TOOLS" in
+    *[!A-Za-z0-9_\ *\(\):.,/@=-]*|"")
+      echo "[entrypoint] WARN PR_STEWARD_ALLOWED_TOOLS is empty or has a character a permission rule cannot have; using the default" >&2
+      STEWARD_ALLOWED_TOOLS="Read Edit Write Bash(gh:*) Bash(git:*) Bash(jq:*) Bash(printenv PR_STEWARD_ENABLED) Bash(printenv PR_STEWARD_TICK_ID) Bash(rm -f /workspace/.steward.lock) Bash(/opt/steward/bin/pr-steward-log:*)" ;;
+  esac
+  if [ -n "${PR_STEWARD_WATCH_SCRIPT:-}" ]; then
+    case "$PR_STEWARD_WATCH_SCRIPT" in
+      /*[!A-Za-z0-9_./@=-]*) _w_bad=1 ;;
+      /*) _w_bad=0 ;;
+      *) _w_bad=1 ;;
+    esac
+    if [ "$_w_bad" -eq 0 ]; then
+      STEWARD_ALLOWED_TOOLS="$STEWARD_ALLOWED_TOOLS Bash($PR_STEWARD_WATCH_SCRIPT:*)"
+    else
+      echo "[entrypoint] WARN PR_STEWARD_WATCH_SCRIPT is not an absolute path of plain characters; no watcher rule added" >&2
+    fi
+  fi
+  # The token the tick's gh and git use. The tick itself may not read the token
+  # file or export anything under dontAsk, so this shell does it for every tick:
+  # re-read from the file (the refresh loop rotates it), exported into the tick's
+  # environment only, never printed. Same default path as the precheck.
+  STEWARD_TOKEN_FILE="${GH_APP_TOKEN_FILE:-/run/steward/gh-token}"
+  STEWARD_GH_HOST="${GH_HOST:-github.com}"
   # Auth-loss escalation (#64): a tick that dies because the OAuth session is gone
   # sends one Telegram message, then a reminder at most every this many seconds
   # (not once per tick). Last-alert epoch lives beside the scheduler log.
@@ -747,10 +818,32 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
     return 0
   }
   (
+    # No pathname expansion: the unquoted --allowedTools list below holds `*`.
+    set -f
     while true; do
       sleep "${PR_STEWARD_SCHEDULE_SECONDS}"
       if [ -x "$STEWARD_PRECHECK" ] && "$STEWARD_PRECHECK" >>"$STEWARD_SCHED_LOG" 2>&1; then
-        echo "[scheduler $(date -u +%FT%TZ)] work found; firing tick" >>"$STEWARD_SCHED_LOG"
+        # A missing or empty token is a visible failure, not a tick that starts
+        # and silently ends as auth_error: log it (also to stderr, the pod log)
+        # and do not fire.
+        STEWARD_TOKEN="$(cat "$STEWARD_TOKEN_FILE" 2>/dev/null || true)"
+        if [ -z "$STEWARD_TOKEN" ]; then
+          echo "[scheduler $(date -u +%FT%TZ)] ERROR result=auth_error reason=token_missing: $STEWARD_TOKEN_FILE is unreadable or empty; tick NOT fired" \
+            | tee -a "$STEWARD_SCHED_LOG" >&2
+          continue
+        fi
+        case "$STEWARD_GH_HOST" in
+          github.com|*.ghe.com) export GH_TOKEN="$STEWARD_TOKEN" ;;
+          *) export GH_ENTERPRISE_TOKEN="$STEWARD_TOKEN" ;;
+        esac
+        unset STEWARD_TOKEN
+        # git push/clone: a credential helper that re-reads the token file on
+        # every call and never embeds the token in a URL or on a command line.
+        export GIT_CONFIG_COUNT=1
+        export GIT_CONFIG_KEY_0="credential.https://${STEWARD_GH_HOST}.helper"
+        export GIT_CONFIG_VALUE_0="!f() { echo username=x-access-token; echo \"password=\$(cat '$STEWARD_TOKEN_FILE')\"; }; f"
+        export PR_STEWARD_TICK_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+        echo "[scheduler $(date -u +%FT%TZ)] work found; firing tick $PR_STEWARD_TICK_ID" >>"$STEWARD_SCHED_LOG"
         # --no-session-persistence: headless steward ticks must NOT write their
         # own transcript into /workspace/.claude/projects, or the resume-on-restart
         # "newest on disk" heuristic would resolve to a steward tick instead of the
@@ -775,9 +868,13 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
         # Both redirects below truncate, so a stale result/stderr from an earlier
         # run is never classified.
         STEWARD_TICK_RC=0
+        # STEWARD_ALLOWED_TOOLS is passed as ONE argument: some rules contain spaces
+        # inside the parentheses (Bash(printenv PR_STEWARD_ENABLED)) and must reach
+        # claude intact, not word-split into broken fragments.
         timeout "$STEWARD_TICK_TIMEOUT" "$STEWARD_CLAUDE_BIN" -p "Run the pr-steward skill" \
           --model "$STEWARD_MODEL" --output-format json \
-          --no-session-persistence --dangerously-skip-permissions >"$STEWARD_RESULT" 2>"$STEWARD_STDERR" \
+          --no-session-persistence --permission-mode dontAsk \
+          --allowedTools "$STEWARD_ALLOWED_TOOLS" >"$STEWARD_RESULT" 2>"$STEWARD_STDERR" \
           || STEWARD_TICK_RC=$?
         cat "$STEWARD_STDERR" >>"$STEWARD_SCHED_LOG" 2>/dev/null || true
         if [ "$STEWARD_TICK_RC" -eq 0 ]; then
@@ -793,6 +890,7 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
         [ -x "$STEWARD_USAGE" ] && timeout 120 "$STEWARD_USAGE" --result "$STEWARD_RESULT" \
           --config "$STEWARD_CONFIG_PATH" --log-offset "$STEWARD_LOG_OFFSET" >>"$STEWARD_SCHED_LOG" 2>&1 || true
         rm -f "$STEWARD_RESULT" "$STEWARD_STDERR"
+        unset GH_TOKEN GH_ENTERPRISE_TOKEN GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
       fi
     done
   ) &
@@ -1436,9 +1534,9 @@ while true; do
       --model "$CLAUDE_REMOTE_MODEL" \
       --mcp-config "$MCTL_EVENTS_MCP_CONFIG" \
       --dangerously-load-development-channels server:mctl-events \
-      --dangerously-skip-permissions 2>&1 &
+      --permission-mode dontAsk 2>&1 &
   else
-    script -qfc "claude --remote-control ${DEVICE_NAME} ${RESUME_FLAG} --model ${CLAUDE_REMOTE_MODEL} --dangerously-skip-permissions 2>&1" /dev/stdout &
+    script -qfc "claude --remote-control ${DEVICE_NAME} ${RESUME_FLAG} --model ${CLAUDE_REMOTE_MODEL} --permission-mode dontAsk 2>&1" /dev/stdout &
   fi
   CLAUDE_CHILD=$!
   # Per-launch startup-wedge backstop: detects a relay that never comes up (e.g.

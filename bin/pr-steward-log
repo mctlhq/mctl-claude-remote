@@ -1,0 +1,59 @@
+#!/usr/bin/env python3
+"""pr-steward-log: append one structured steward log line (SKILL.md section 11).
+
+The steward tick runs in dontAsk and may not redirect into files, so this is the
+one allowed way to write the log that pr-steward-precheck and pr-steward-usage
+read. Usage: pr-steward-log '<one JSON object>'.
+
+Exit 0: appended and echoed. Exit 2: the argument is not one JSON object with
+string repo, integer pr and string head_sha (nothing written). Exit 1: no log
+file configured or the append failed (the caller must say so, not retry).
+"""
+import json
+import os
+import re
+import sys
+
+CONFIG = os.environ.get("PR_STEWARD_CONFIG", "/workspace/pr-steward.config.json")
+SECRET = re.compile(r"(ghs_|ghp_|github_pat_|sk-ant-)[A-Za-z0-9_\-]+")
+
+
+def main(argv):
+    if len(argv) != 2:
+        print("usage: pr-steward-log '<json object>'", file=sys.stderr)
+        return 2
+    try:
+        entry = json.loads(argv[1])
+    except ValueError:
+        entry = None
+    pr_entry = (isinstance(entry, dict)
+                and isinstance(entry.get("repo"), str)
+                and isinstance(entry.get("pr"), int) and not isinstance(entry.get("pr"), bool)
+                and isinstance(entry.get("head_sha"), str))
+    # Tick-level outcomes (skip reason=locked, auth_error) are not tied to a PR:
+    # accept them with a tick_id and an action or result.
+    tick_entry = (isinstance(entry, dict)
+                  and isinstance(entry.get("tick_id"), str) and entry["tick_id"]
+                  and (isinstance(entry.get("action"), str) or isinstance(entry.get("result"), str))
+                  and "pr" not in entry)
+    if not (pr_entry or tick_entry):
+        print("pr-steward-log: need repo, pr and head_sha, or tick_id plus action/result",
+              file=sys.stderr)
+        return 2
+    line = SECRET.sub("***", json.dumps(entry, separators=(",", ":"), ensure_ascii=False))
+    try:
+        with open(CONFIG, encoding="utf-8") as fh:
+            path = (json.load(fh).get("logging") or {}).get("file")
+        if not isinstance(path, str) or not path:
+            raise ValueError("no logging.file in the config")
+        with open(path, "a", encoding="utf-8") as out:
+            out.write(line + "\n")
+    except (OSError, ValueError) as exc:
+        print("pr-steward-log: cannot append: %s" % exc, file=sys.stderr)
+        return 1
+    print(line)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

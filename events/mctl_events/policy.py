@@ -24,6 +24,18 @@ _STREAM = re.compile(r"^mctl:events:[a-z0-9][a-z0-9_-]{0,62}$")
 # rejected and audited again, forever.
 RESERVED_STREAMS = frozenset({"mctl:events:audit", "mctl:events:state"})
 _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+# Subject kinds that are a person writing to the account (a DM). An event of
+# one of these kinds wakes the session only for a sender on the allowlist: the
+# text it points at is attacker-reachable, the session holds credentials, and
+# "anyone who can DM the account" is not a trust boundary (#61).
+SENDER_CHECKED_KINDS = frozenset({"telegram.message"})
+# Not only the kinds above: anything that comes from the Telegram source, or has
+# a telegram.* type or subject kind, is person-writable and is checked too, so an
+# unknown or future kind (telegram.dm, telegram.mention) fails closed.
+SENDER_CHECKED_SOURCES = frozenset({"mctl-telegram"})
+SENDER_CHECKED_PREFIX = "telegram."
+SENDER_KEY = "sender_id"
+_SENDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
 
 
 @dataclass(frozen=True)
@@ -81,12 +93,34 @@ class Policy:
     # retained stream. Once created, the group's position lives in Valkey and
     # restarts resume from it either way.
     group_start: str = "$"
+    # Senders allowed to wake the session through a DM-shaped event (see
+    # SENDER_CHECKED_KINDS). Exact string match against `subject.sender_id`,
+    # no globs: an entry such as "*" is rejected at load (see _SENDER), it is
+    # neither a wildcard nor a stored value. Empty means NO sender
+    # is allowed, never "everyone": a policy that omits the field, an event
+    # without a sender and an unparseable allowlist all end in rejection.
+    sender_allowlist: frozenset[str] = frozenset()
+
+    def sender_allowed(self, envelope: Envelope) -> bool:
+        kind = envelope.subject.get("kind")
+        checked = (
+            kind in SENDER_CHECKED_KINDS
+            or envelope.source in SENDER_CHECKED_SOURCES
+            or envelope.type.startswith(SENDER_CHECKED_PREFIX)
+            or (isinstance(kind, str) and kind.startswith(SENDER_CHECKED_PREFIX))
+        )
+        if not checked:
+            return True
+        sender = envelope.subject.get(SENDER_KEY)
+        return sender is not None and sender in self.sender_allowlist
 
     @property
     def streams(self) -> tuple[str, ...]:
         return tuple(sorted({route.stream for route in self.routes}))
 
     def route_for(self, stream: str, envelope: Envelope) -> Route | None:
+        if not self.sender_allowed(envelope):
+            return None
         return next((route for route in self.routes if route.matches(stream, envelope)), None)
 
 
@@ -109,7 +143,8 @@ def from_dict(doc: Any) -> Policy:
     # Only knobs this adapter honours: accepting any other field would let an
     # operator believe a setting is in effect when nothing reads it.
     allowed = {"group", "consumer", "routes", "max_inflight", "block_ms", "group_start",
-               "dedup_ttl_seconds", "reclaim_min_idle_ms", "max_attempts", "startup_grace_ms"}
+               "dedup_ttl_seconds", "reclaim_min_idle_ms", "max_attempts", "startup_grace_ms",
+               "sender_allowlist"}
     unknown = sorted(set(doc) - allowed)
     if unknown:
         raise ValueError(f"unknown policy fields: {unknown}")
@@ -141,6 +176,7 @@ def from_dict(doc: Any) -> Policy:
             )
         )
     return Policy(
+        sender_allowlist=_senders(doc.get("sender_allowlist", [])),
         group=doc["group"],
         consumer=doc["consumer"],
         routes=tuple(routes),
@@ -152,6 +188,14 @@ def from_dict(doc: Any) -> Policy:
         max_attempts=_positive(doc, "max_attempts", 5),
         startup_grace_ms=_positive(doc, "startup_grace_ms", 3000),
     )
+
+
+def _senders(value: Any) -> frozenset[str]:
+    # A wrong type or a malformed entry is an error that stops the adapter, not
+    # an empty list and not a silently shorter one.
+    if not isinstance(value, list) or not all(isinstance(v, str) and _SENDER.fullmatch(v) for v in value):
+        raise ValueError(f"sender_allowlist must be a list of sender ids matching {_SENDER.pattern}")
+    return frozenset(value)
 
 
 def _group_start(value: Any) -> str:

@@ -22,6 +22,19 @@ const STREAM_PATTERN = "^mctl:events:[a-z0-9][a-z0-9_-]{0,62}$";
 export const RESERVED_STREAMS: ReadonlySet<string> = new Set(["mctl:events:audit", "mctl:events:state"]);
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const NAME_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$";
+// Subject kinds that are a person writing to the account (a DM). An event of
+// one of these kinds wakes the session only for a sender on the allowlist: the
+// text it points at is attacker-reachable, the session holds credentials, and
+// "anyone who can DM the account" is not a trust boundary (#61).
+export const SENDER_CHECKED_KINDS: ReadonlySet<string> = new Set(["telegram.message"]);
+// Not only the kinds above: anything that comes from the Telegram source, or has
+// a telegram.* type or subject kind, is person-writable and is checked too, so an
+// unknown or future kind (telegram.dm, telegram.mention) fails closed.
+export const SENDER_CHECKED_SOURCES: ReadonlySet<string> = new Set(["mctl-telegram"]);
+export const SENDER_CHECKED_PREFIX = "telegram.";
+export const SENDER_KEY = "sender_id";
+const SENDER = /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/;
+const SENDER_PATTERN = "^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$";
 
 export class PolicyError extends Error {
   override name = "PolicyError";
@@ -86,10 +99,30 @@ export interface Policy {
   // time: "$" = only events published from now on; "0" = replay the retained
   // stream. Once created, the group's position lives in Valkey.
   readonly group_start: "$" | "0";
+  // Senders allowed to wake the session through a DM-shaped event (see
+  // SENDER_CHECKED_KINDS). Exact string match against `subject.sender_id`, no
+  // globs: an entry such as "*" is rejected at load (see SENDER), it is neither a
+  // wildcard nor a stored value. Empty means NO sender is allowed, never
+  // "everyone": a policy that omits the field, an event without a sender and an
+  // unparseable allowlist all end in rejection.
+  readonly sender_allowlist: ReadonlySet<string>;
   readonly streams: readonly string[];
 }
 
+export function senderAllowed(policy: Policy, envelope: Envelope): boolean {
+  const kind = Object.hasOwn(envelope.subject, "kind") ? envelope.subject.kind : undefined;
+  const checked =
+    (kind !== undefined && SENDER_CHECKED_KINDS.has(kind)) ||
+    SENDER_CHECKED_SOURCES.has(envelope.source) ||
+    envelope.type.startsWith(SENDER_CHECKED_PREFIX) ||
+    (typeof kind === "string" && kind.startsWith(SENDER_CHECKED_PREFIX));
+  if (!checked) return true;
+  const sender = Object.hasOwn(envelope.subject, SENDER_KEY) ? envelope.subject[SENDER_KEY] : undefined;
+  return sender !== undefined && policy.sender_allowlist.has(sender);
+}
+
 export function routeFor(policy: Policy, stream: string, envelope: Envelope): Route | undefined {
+  if (!senderAllowed(policy, envelope)) return undefined;
   return policy.routes.find((route) => route.matches(stream, envelope));
 }
 
@@ -108,6 +141,15 @@ function positive(doc: Record<string, unknown>, key: string, fallback: number): 
   return value;
 }
 
+function senders(value: unknown): ReadonlySet<string> {
+  // A wrong type or a malformed entry is an error that stops the adapter, not
+  // an empty list and not a silently shorter one.
+  if (!Array.isArray(value) || !value.every((v) => typeof v === "string" && SENDER.test(v))) {
+    throw new PolicyError(`sender_allowlist must be a list of sender ids matching ${SENDER_PATTERN}`);
+  }
+  return new Set(value as string[]);
+}
+
 function groupStart(value: unknown): "$" | "0" {
   if (value !== "$" && value !== "0") throw new PolicyError('group_start must be "$" or "0"');
   return value;
@@ -116,6 +158,7 @@ function groupStart(value: unknown): "$" | "0" {
 const ALLOWED = new Set([
   "group", "consumer", "routes", "max_inflight", "block_ms", "group_start",
   "dedup_ttl_seconds", "reclaim_min_idle_ms", "max_attempts", "startup_grace_ms",
+  "sender_allowlist",
 ]);
 const ROUTE_KEYS = new Set(["stream", "sources", "types", "subject"]);
 
@@ -160,6 +203,7 @@ export function fromDict(doc: unknown): Policy {
     routes,
     max_inflight: positive(doc, "max_inflight", 5),
     block_ms: positive(doc, "block_ms", 5000),
+    sender_allowlist: senders(Object.hasOwn(doc, "sender_allowlist") ? doc.sender_allowlist : []),
     group_start: groupStart(Object.hasOwn(doc, "group_start") ? doc.group_start : "$"),
     dedup_ttl_seconds: positive(doc, "dedup_ttl_seconds", 86400),
     reclaim_min_idle_ms: positive(doc, "reclaim_min_idle_ms", 300000),

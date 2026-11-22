@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import textwrap
 import time
+import re
 import unittest
 from pathlib import Path
 
@@ -54,10 +55,14 @@ class AuthEscalationTest(unittest.TestCase):
                    '[ "$n" -gt "$TICKS" ] && kill -9 $PPID\nexit 0\n')
         executable(self.bin / "timeout", '#!/bin/sh\nshift\nexec "$@"\n')  # not on a Mac
         executable(self.root / "precheck", "#!/bin/sh\nexit 0\n")
+        self.token = self.root / "gh-token"
+        self.token.write_text("fake-installation-token\n")
         # Per-tick behaviour comes from files "<n>.rc/.err/.out" next to the fake.
         executable(self.bin / "claude", textwrap.dedent(f"""\
             #!/bin/sh
             n=$(cat "{self.root}/n")
+            env > "{self.root}/env.$n"
+            printf '%s\\n' "$@" > "{self.root}/argv.$n"
             [ -f "{self.root}/$n.out" ] && cat "{self.root}/$n.out"
             [ -f "{self.root}/$n.err" ] && cat "{self.root}/$n.err" >&2
             exit $(cat "{self.root}/$n.rc" 2>/dev/null || echo 0)
@@ -74,7 +79,7 @@ class AuthEscalationTest(unittest.TestCase):
         script = f'DEVICE_NAME=dev\nPATH="{self.bin}:$PATH"\n' + script + "\nwait\n"
         full = {**os.environ, "PR_STEWARD_ENABLED": "true", "PR_STEWARD_SCHEDULE_SECONDS": "1",
                 "TELEGRAM_BOT_TOKEN": "tok", "STARTUP_WEDGE_ALERT_CHAT_ID": "42",
-                "TICKS": str(ticks), "PR_STEWARD_CONFIG": str(self.root / "none.json"), **env}
+                "TICKS": str(ticks), "GH_APP_TOKEN_FILE": str(self.token), "PR_STEWARD_CONFIG": str(self.root / "none.json"), **env}
         subprocess.run(["/bin/sh", "-c", script], env=full, capture_output=True, text=True, timeout=60)
         return (self.logdir / "scheduler.log").read_text()
 
@@ -175,6 +180,89 @@ class AuthEscalationTest(unittest.TestCase):
         self.run_loop(1)
         self.assertFalse((self.logdir / "tick-stderr.log").exists())
         self.assertFalse((self.logdir / "tick-result.json").exists())
+
+    # The tick runs in dontAsk and cannot read the token file or export anything,
+    # so the scheduler hands it the token (SKILL.md section 2).
+    def tick_env(self, n: int = 1) -> dict[str, str]:
+        text = (self.root / f"env.{n}").read_text()
+        return dict(line.split("=", 1) for line in text.splitlines() if "=" in line)
+
+    def test_token_reaches_the_tick_environment_but_never_its_command_line(self) -> None:
+        self.tick(1)
+        log = self.run_loop(1)
+        env = self.tick_env()
+        self.assertEqual("fake-installation-token", env["GH_TOKEN"])
+        self.assertNotIn("fake-installation-token", (self.root / "argv.1").read_text())
+        self.assertNotIn("fake-installation-token", log)
+        self.assertRegex(env["PR_STEWARD_TICK_ID"], r"^\d{8}T\d{6}Z$")
+        self.assertNotIn("GH_ENTERPRISE_TOKEN", env)
+
+    def test_git_credential_helper_rereads_the_file_and_carries_no_token(self) -> None:
+        self.tick(1)
+        self.run_loop(1)
+        env = self.tick_env()
+        self.assertEqual("1", env["GIT_CONFIG_COUNT"])
+        self.assertEqual("credential.https://github.com.helper", env["GIT_CONFIG_KEY_0"])
+        self.assertIn(str(self.token), env["GIT_CONFIG_VALUE_0"])
+        self.assertNotIn("fake-installation-token", env["GIT_CONFIG_VALUE_0"])
+
+    def test_a_ghes_host_gets_the_enterprise_token_variable(self) -> None:
+        self.tick(1)
+        self.run_loop(1, GH_HOST="git.example.com")
+        env = self.tick_env()
+        self.assertEqual("fake-installation-token", env["GH_ENTERPRISE_TOKEN"])
+        self.assertNotIn("GH_TOKEN", env)
+        self.assertEqual("credential.https://git.example.com.helper", env["GIT_CONFIG_KEY_0"])
+
+    def test_missing_or_empty_token_is_logged_loudly_and_no_tick_fires(self) -> None:
+        for content in (None, "", "\n"):
+            with self.subTest(content=content):
+                (self.root / "n").unlink(missing_ok=True)
+                (self.root / "env.1").unlink(missing_ok=True)
+                if content is None:
+                    self.token.unlink(missing_ok=True)
+                else:
+                    self.token.write_text(content)
+                self.tick(1)
+                log = self.run_loop(1)
+                self.assertIn("result=auth_error reason=token_missing", log)
+                self.assertIn("tick NOT fired", log)
+                self.assertFalse((self.root / "env.1").exists())
+
+    def test_rotated_token_is_picked_up_on_the_next_tick(self) -> None:
+        self.tick(1)
+        self.tick(2)
+        # the fake sleep runs before each tick; rotate between them via the fake claude
+        (self.bin / "claude").write_text((self.bin / "claude").read_text().replace(
+            "exit $(cat", f'echo rotated-token > "{self.token}"\nexit $(cat', 1))
+        self.run_loop(2)
+        self.assertEqual("fake-installation-token", self.tick_env(1)["GH_TOKEN"])
+        self.assertEqual("rotated-token", self.tick_env(2)["GH_TOKEN"])
+
+    def allowed(self, n: int = 1) -> list[str]:
+        argv = (self.root / f"argv.{n}").read_text().splitlines()
+        rest = argv[argv.index("--allowedTools") + 1:]
+        # The whole rule list must arrive as ONE argument (rules contain spaces).
+        self.assertEqual(1, len(rest), f"allowedTools split into {rest!r}")
+        return re.findall(r"\S*\([^)]*\)\S*|\S+", rest[0])
+
+    def test_multi_word_rules_reach_claude_as_one_intact_argument(self) -> None:
+        self.tick(1)
+        self.run_loop(1)
+        rules = self.allowed()
+        for rule in ("Bash(printenv PR_STEWARD_ENABLED)", "Bash(printenv PR_STEWARD_TICK_ID)",
+                     "Bash(rm -f /workspace/.steward.lock)"):
+            self.assertIn(rule, rules)
+
+    def test_watch_script_adds_exactly_one_rule_and_a_bad_path_adds_none(self) -> None:
+        self.tick(1)
+        self.run_loop(1, PR_STEWARD_WATCH_SCRIPT="/workspace/.claude/skills/codex-watch/launch.sh")
+        self.assertIn("Bash(/workspace/.claude/skills/codex-watch/launch.sh:*)", self.allowed())
+        for bad in ("relative/launch.sh", "/x/launch.sh;rm", "/x/a b"):
+            with self.subTest(bad=bad):
+                (self.root / "n").unlink()
+                self.run_loop(1, PR_STEWARD_WATCH_SCRIPT=bad)
+                self.assertFalse([r for r in self.allowed() if "launch" in r or "relative" in r or "a b" in r])
 
 
 if __name__ == "__main__":
