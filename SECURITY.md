@@ -12,14 +12,19 @@ Please do not include live Claude credentials, tokens, private keys, or sensitiv
 
 ## Intentional Design Decisions
 
-### `--dangerously-skip-permissions`
+### Permission mode `dontAsk` (was `--dangerously-skip-permissions`)
 
-This flag is intentional and documented. It bypasses Claude Code's interactive permission prompts so the container can run non-interactively. The security contract is:
+The session runs unattended in `--permission-mode dontAsk`: a tool call that is
+not in `permissions.allow` is denied, and bypass mode is disabled in settings
+(`permissions.disableBypassPermissionsMode`), so a restored workspace cannot
+re-enable it. The allowlist and its extension points are in the README
+("Permissions"). The security contract is:
 
-- The container **must** run in an isolated environment (dedicated namespace, restricted network policy, no sensitive volume mounts).
-- Callers are responsible for ensuring the workspace does not contain credentials or data that should not be accessible to Claude.
+- The container **must** still run in an isolated environment (dedicated namespace, restricted network policy, no sensitive volume mounts).
+- The allowlist reduces what an unlisted call can reach; it does not stop a session that has already been subverted through a listed tool.
+- Inbound DM events wake the session only for senders on the policy's `sender_allowlist`; an unreadable or missing list allows nobody.
 
-If you find a way to escape this isolation or exploit the flag in ways beyond its documented scope, please report it.
+If you find a way to run an unlisted tool, re-enable bypass mode, or get a non-allowlisted sender delivered, please report it.
 
 ### Optional `pr-steward` automation
 

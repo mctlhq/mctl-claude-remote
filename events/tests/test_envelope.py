@@ -65,11 +65,46 @@ class EnvelopeTest(unittest.TestCase):
 class PolicyTest(unittest.TestCase):
     def policy(self, **route):
         base = {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.message.*"]}
-        return policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [{**base, **route}]})
+        return policy_mod.from_dict({"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [{**base, **route}]})
 
     def test_deny_by_default(self) -> None:
-        empty = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": []})
+        empty = policy_mod.from_dict({"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": []})
         self.assertIsNone(empty.route_for("mctl:events:telegram", env_mod.from_dict(envelope())))
+
+    def with_senders(self, **extra):
+        base = {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.message.*"]}
+        return policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [base], **extra})
+
+    def test_sender_allowlist_fails_closed(self) -> None:
+        stream = "mctl:events:telegram"
+        dm = envelope()
+        dm["subject"]["sender_id"] = "42"
+        allowed = env_mod.from_dict(dm)
+        dm["subject"]["sender_id"] = "99"
+        stranger = env_mod.from_dict(dm)
+        del dm["subject"]["sender_id"]
+        anonymous = env_mod.from_dict(dm)
+        listed = self.with_senders(sender_allowlist=["42"])
+        self.assertIsNotNone(listed.route_for(stream, allowed))
+        self.assertIsNone(listed.route_for(stream, stranger))
+        self.assertIsNone(listed.route_for(stream, anonymous))
+        # No field and an empty list both mean "nobody", never "everybody".
+        for policy in (self.with_senders(), self.with_senders(sender_allowlist=[])):
+            self.assertIsNone(policy.route_for(stream, allowed))
+        # A wildcard is an ordinary value, not a pattern.
+        with self.assertRaises(ValueError):
+            self.with_senders(sender_allowlist=["*"])
+        # An allowlist that cannot be read is an error, not an empty or shorter list.
+        for bad in ("42", {"42": True}, [42], ["42", None], [""], None):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                self.with_senders(sender_allowlist=bad)
+
+    def test_sender_check_applies_only_to_dm_shaped_kinds(self) -> None:
+        pr = {**envelope(), "type": "github.pull_request.opened", "source": "mctl-github",
+              "subject": {"kind": "github.pull_request", "repository": "mctlhq/x", "number": "1"}}
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [
+            {"stream": "mctl:events:github", "sources": ["mctl-github"], "types": ["github.*"]}]})
+        self.assertIsNotNone(policy.route_for("mctl:events:github", env_mod.from_dict(pr)))
 
     def test_every_dimension_must_match(self) -> None:
         env = env_mod.from_dict(envelope())
@@ -81,27 +116,27 @@ class PolicyTest(unittest.TestCase):
         self.assertIsNone(self.policy(subject={"repository": ["*"]}).route_for("mctl:events:telegram", env))
 
     def test_only_exact_reserved_names_are_refused(self) -> None:
-        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "group_start": "0", "routes": [
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "sender_allowlist": ["42"], "group_start": "0", "routes": [
             {"stream": "mctl:events:stateful", "sources": ["a"], "types": ["a.b.c"]}]})
         self.assertEqual(("mctl:events:stateful",), policy.streams)
         self.assertEqual("0", policy.group_start)
 
     def test_invalid_policies(self) -> None:
         for doc in (
-            {"group": "g", "consumer": "c", "routes": [], "extra": 1},
+            {"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [], "extra": 1},
             {"group": "g g", "consumer": "c", "routes": []},
-            {"group": "g", "consumer": "c", "routes": [{"stream": "other", "sources": ["a"], "types": ["a.b"]}]},
-            {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:x", "sources": [], "types": ["a.b"]}]},
-            {"group": "g", "consumer": "c", "routes": [], "max_inflight": 0},
+            {"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [{"stream": "other", "sources": ["a"], "types": ["a.b"]}]},
+            {"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [{"stream": "mctl:events:x", "sources": [], "types": ["a.b"]}]},
+            {"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [], "max_inflight": 0},
             {"group": "g\n", "consumer": "c", "routes": []},
-            {"group": "g", "consumer": "c", "routes": [], "ack_timeout_seconds": 60},
-            {"group": "g", "consumer": "c", "routes": [], "dedup_ttl_seconds": 0},
-            {"group": "g", "consumer": "c", "routes": [], "reclaim_min_idle_ms": -1},
-            {"group": "g", "consumer": "c", "routes": [], "max_attempts": "3"},
-            {"group": "g", "consumer": "c", "routes": [], "group_start": ">"},
-            {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:x\n", "sources": ["a"], "types": ["a.b.c"]}]},
-            {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:audit", "sources": ["a"], "types": ["a.b"]}]},
-            {"group": "g", "consumer": "c", "routes": [{"stream": "mctl:events:state", "sources": ["a"], "types": ["a.b"]}]},
+            {"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [], "ack_timeout_seconds": 60},
+            {"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [], "dedup_ttl_seconds": 0},
+            {"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [], "reclaim_min_idle_ms": -1},
+            {"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [], "max_attempts": "3"},
+            {"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [], "group_start": ">"},
+            {"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [{"stream": "mctl:events:x\n", "sources": ["a"], "types": ["a.b.c"]}]},
+            {"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [{"stream": "mctl:events:audit", "sources": ["a"], "types": ["a.b"]}]},
+            {"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [{"stream": "mctl:events:state", "sources": ["a"], "types": ["a.b"]}]},
         ):
             with self.subTest(doc=doc), self.assertRaises(ValueError):
                 policy_mod.from_dict(doc)
@@ -124,7 +159,7 @@ class PoisonEntryTest(unittest.TestCase):
                 # been acknowledged before.
                 return 0 if args[0] == "EXISTS" else 1
 
-        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [
             {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*"]}]})
         commands = Commands()
         adapter = Adapter(policy, commands, Reader(), lambda _m: None)
@@ -156,7 +191,7 @@ class PoisonEntryTest(unittest.TestCase):
         def broken_pipe(_message):
             raise BrokenPipeError("stdout closed")
 
-        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "max_inflight": 1, "routes": [
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "sender_allowlist": ["42"], "max_inflight": 1, "routes": [
             {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*.*"]}]})
         commands = Commands()
         adapter = Adapter(policy, commands, Reader(), broken_pipe)
@@ -232,7 +267,7 @@ class OversizedBulkTest(unittest.TestCase):
                 # been acknowledged before.
                 return 0 if args[0] == "EXISTS" else 1
 
-        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [
             {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*.*"]}]})
         commands = Commands()
         adapter = Adapter(policy, commands, None, lambda _m: None)
@@ -258,7 +293,7 @@ class ExtraFieldTest(unittest.TestCase):
                 # been acknowledged before.
                 return 0 if args[0] == "EXISTS" else 1
 
-        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [
             {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*.*"]}]})
         commands = Commands()
         emitted: list = []
@@ -317,7 +352,7 @@ class AckRetryTest(unittest.TestCase):
                 return 0 if args[0] == "EXISTS" else 1
 
         commands = Flaky()
-        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [
             {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*"]}]})
         pushed: list[dict] = []
         adapter = Adapter(policy, commands, commands, pushed.append)
@@ -346,7 +381,7 @@ class ShutdownTest(unittest.TestCase):
                 written.append(args)
                 return b"1-0"
 
-        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": []})
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": []})
         adapter = Adapter(policy, SlowAuditor(), SlowAuditor(), lambda _m: None, auditor=SlowAuditor())
         for i in range(3):
             adapter.audit("acked", f"telegram:evt:{i}")
@@ -367,7 +402,7 @@ class ShutdownTest(unittest.TestCase):
                 written.append(args)
                 return b"1-0"
 
-        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": []})
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": []})
         adapter = Adapter(policy, Auditor(), Auditor(), lambda _m: None, auditor=Auditor())
 
         def finishing_entry() -> None:
@@ -394,7 +429,7 @@ class ShutdownTest(unittest.TestCase):
                 # been acknowledged before.
                 return 0 if args[0] == "EXISTS" else 1
 
-        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "routes": [
+        policy = policy_mod.from_dict({"group": "g", "consumer": "c", "sender_allowlist": ["42"], "routes": [
             {"stream": "mctl:events:telegram", "sources": ["mctl-telegram"], "types": ["telegram.*.*"]}]})
         commands = Commands()
         adapter = Adapter(policy, commands, commands, lambda _m: None)

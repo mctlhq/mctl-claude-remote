@@ -15,7 +15,7 @@ This image does not provide workspace isolation by itself. Isolation is the resp
 
 ## Security Warning
 
-**This image runs with `--dangerously-skip-permissions`, which bypasses all tool-use permission prompts.**
+**This image runs Claude Code in `--permission-mode dontAsk` (#61): every tool call that is not in an explicit allowlist is denied, nothing prompts, and bypass mode is disabled in settings. See [Permissions](#permissions).**
 
 - Run only inside an isolated container or dedicated workspace.
 - Do not mount directories containing credentials, SSH keys, or other sensitive data.
@@ -148,8 +148,8 @@ as a `repository_dispatch` (`pr-steward-usage`) to `mctlhq/.github` with the
 steward's own App token. That repository's `steward-usage.yml` validates them
 and uploads a `model-usage-records` artifact, which the in-cluster usage
 collector already sweeps into the ledger. No ledger credential ever lives in
-this pod: the tick runs with `--dangerously-skip-permissions`, so anything on
-disk is readable by the model. `target_repo` / `pr_number` are set only when the
+this pod: the tick runs in `dontAsk` with a fixed tool list, but it can still
+run `gh` and `git`, so anything on disk those can reach is readable by the model. `target_repo` / `pr_number` are set only when the
 tick's structured log window names exactly one PR of a configured repo under
 exactly one `tick_id`; a tick that touched several PRs, or whose window cannot
 be known whole, is recorded without PR attribution. Capture never fails a
@@ -337,6 +337,14 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
   `mctl:events:state:dedup:claude-remote:telegram%3Aevt%3Av1%3A7%3A42%3A6001` --
   every event id contains `:`, and without the encoding two different ids could
   produce one key.
+- **Sender allowlist, fail closed.** A DM-shaped event (`subject.kind`
+  `telegram.message`) wakes the session only if `subject.sender_id` is in the
+  policy's top-level `"sender_allowlist": ["<id>", ...]` (exact strings, no
+  globs). A missing or empty list allows nobody, an event with no
+  `subject.sender_id` is skipped, and a malformed list (not a list of ids)
+  stops the adapter at start. Skipped events are acknowledged and audited as
+  `skipped`. The producer must therefore put the sender in `subject.sender_id`;
+  until it does, Telegram DMs are not delivered.
 - **Deny by default.** `MCTL_EVENTS_POLICY` lists the streams, sources, event
   types and subject values this session may be woken by; anything else is
   acknowledged and audited as `skipped`.
@@ -373,6 +381,8 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
 | `MCTL_EVENTS_TELEGRAM_TOKEN_CHECK_SECONDS` | renewal check interval (default `3600`) |
 | `MCTL_EVENTS_PUSHGATEWAY_URL` | optional Pushgateway base URL for the token gauges (job `claude-remote-telegram-token`, instance = the device name); must be `http://` or `https://` |
 | `MCTL_EVENTS_POLICY` | **path** to a JSON routing policy file, not inline JSON (the format is defined by the loader in `events/mctl_events/policy.py`) |
+| `CLAUDE_REMOTE_EXTRA_ALLOW` | comma-separated extra permission rules added to `permissions.allow` (see [Permissions](#permissions)) |
+| `PR_STEWARD_ALLOWED_TOOLS` | space-separated `--allowedTools` rules for the steward tick (default `Read Edit Write Bash(gh:*) Bash(git:*) Bash(jq:*)`) |
 | `CLAUDE_PTY_ANSWER_WINDOW_SECONDS` | seconds after launch during which the PTY launcher answers the startup dialogs (default `120`); later output is never answered, even if it repeats a dialog's words |
 
 Worker tokens are bounded (30 days by default). The renewal loop checks the
@@ -401,3 +411,27 @@ The development-channels flag shows a confirmation on every launch that nothing
 persists, so with the channel enabled the session runs under
 `bin/claude-pty-launch`, which answers that dialog (and only the dialogs it
 knows) by screen content instead of by timing.
+
+## Permissions
+
+The session and the steward tick run with `--permission-mode dontAsk`. Calls
+outside `permissions.allow` are denied (visible as a denied tool call in the
+transcript), never prompted and never executed. `entrypoint.sh` keeps
+`/workspace/.claude/settings.json` converged on every start, including one
+restored from storage: `defaultMode: dontAsk`,
+`disableBypassPermissionsMode: disable`, the legacy `allow_bypass_permissions`
+key removed, and the allowlist below merged into whatever the operator added.
+
+Default allowlist (the events hydration surface):
+
+- `mcp__mctl-events__ack_event`
+- `mcp__mctl-telegram__get_messages`
+- `Bash(gh pr view *)`
+
+Reads inside the working directories are allowed by `dontAsk` itself; edits,
+other shell commands and other MCP tools are not. To allow more for interactive
+work set `CLAUDE_REMOTE_EXTRA_ALLOW` to comma-separated rules, e.g.
+`Bash(git status *),Edit`. A rule may contain only letters, digits and
+`_ * ( ) : . , / @ = -` and spaces; anything else stops the container at start
+(exit 2) rather than producing a wider or broken list. The steward tick adds
+`PR_STEWARD_ALLOWED_TOOLS` on top, for that process only.

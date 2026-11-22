@@ -115,6 +115,20 @@ class WalkingSkeletonTest(unittest.TestCase):
         self.assertEqual(0, self.pending())
         self.assertEqual(["skipped"], self.audit_stages(foreign["id"], ["skipped"]))
 
+    def test_dm_from_a_sender_off_the_allowlist_is_skipped_and_acknowledged(self) -> None:
+        self.claude.handshake()
+        self.wait_for_group()
+        stranger = envelope("telegram:evt:v1:7:99:1001")
+        stranger["subject"]["sender_id"] = "99"
+        no_sender = envelope("telegram:evt:v1:7:98:1001")
+        del no_sender["subject"]["sender_id"]
+        self.publish(stranger)
+        self.publish(no_sender)
+        self.claude.no_notification(1.5)
+        self.assertEqual(0, self.pending())
+        self.assertEqual(["skipped"], self.audit_stages(stranger["id"], ["skipped"]))
+        self.assertEqual(["skipped"], self.audit_stages(no_sender["id"], ["skipped"]))
+
     def test_ack_for_an_unknown_event_changes_nothing(self) -> None:
         self.claude.handshake()
         result = self.claude.call("ack_event", event_id="telegram:evt:v1:7:42:9", outcome="handled")
