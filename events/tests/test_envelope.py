@@ -106,6 +106,18 @@ class PolicyTest(unittest.TestCase):
             {"stream": "mctl:events:github", "sources": ["mctl-github"], "types": ["github.*"]}]})
         self.assertIsNotNone(policy.route_for("mctl:events:github", env_mod.from_dict(pr)))
 
+    def test_unknown_telegram_kinds_are_sender_checked_too(self) -> None:
+        stream = "mctl:events:telegram"
+        policy = self.with_senders(sender_allowlist=["42"])
+        for kind in ("telegram.dm", "telegram.mention", "something.new"):
+            dm = envelope()
+            dm["subject"]["kind"] = kind
+            dm["subject"]["sender_id"] = "99"
+            with self.subTest(kind=kind):
+                self.assertIsNone(policy.route_for(stream, env_mod.from_dict(dm)))
+                dm["subject"]["sender_id"] = "42"
+                self.assertIsNotNone(policy.route_for(stream, env_mod.from_dict(dm)))
+
     def test_every_dimension_must_match(self) -> None:
         env = env_mod.from_dict(envelope())
         self.assertIsNotNone(self.policy(subject={"account_id": ["7"]}).route_for("mctl:events:telegram", env))

@@ -29,6 +29,11 @@ _NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 # text it points at is attacker-reachable, the session holds credentials, and
 # "anyone who can DM the account" is not a trust boundary (#61).
 SENDER_CHECKED_KINDS = frozenset({"telegram.message"})
+# Not only the kinds above: anything that comes from the Telegram source, or has
+# a telegram.* type or subject kind, is person-writable and is checked too, so an
+# unknown or future kind (telegram.dm, telegram.mention) fails closed.
+SENDER_CHECKED_SOURCES = frozenset({"mctl-telegram"})
+SENDER_CHECKED_PREFIX = "telegram."
 SENDER_KEY = "sender_id"
 _SENDER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$")
 
@@ -96,7 +101,14 @@ class Policy:
     sender_allowlist: frozenset[str] = frozenset()
 
     def sender_allowed(self, envelope: Envelope) -> bool:
-        if envelope.subject.get("kind") not in SENDER_CHECKED_KINDS:
+        kind = envelope.subject.get("kind")
+        checked = (
+            kind in SENDER_CHECKED_KINDS
+            or envelope.source in SENDER_CHECKED_SOURCES
+            or envelope.type.startswith(SENDER_CHECKED_PREFIX)
+            or (isinstance(kind, str) and kind.startswith(SENDER_CHECKED_PREFIX))
+        )
+        if not checked:
             return True
         sender = envelope.subject.get(SENDER_KEY)
         return sender is not None and sender in self.sender_allowlist

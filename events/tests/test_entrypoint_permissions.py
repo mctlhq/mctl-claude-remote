@@ -73,7 +73,7 @@ class PermissionSettingsTest(unittest.TestCase):
         self.assertEqual("dontAsk", perms["defaultMode"])
         self.assertEqual("disable", perms["disableBypassPermissionsMode"])
         self.assertNotIn("allow_bypass_permissions", perms)
-        self.assertEqual(BASE | {"Bash(ls *)"}, set(perms["allow"]))
+        self.assertEqual(BASE, set(perms["allow"]))  # the stale Bash(ls *) is revoked
         self.assertEqual(["Bash(rm *)"], perms["deny"])
         self.assertEqual(1, doc["operatorKey"])
 
@@ -88,6 +88,17 @@ class PermissionSettingsTest(unittest.TestCase):
         proc = self.run_block()
         self.assertEqual(0, proc.returncode, proc.stderr)
         self.assertEqual(before, self.settings.stat().st_mtime_ns)
+
+    def test_a_broad_or_removed_allow_entry_is_revoked_on_the_next_start(self) -> None:
+        self.assertEqual(0, self.run_block("Read").returncode)
+        doc = json.loads(self.settings.read_text())
+        doc["permissions"]["allow"].append("Bash(*)")
+        self.settings.write_text(json.dumps(doc))
+        self.assertEqual(0, self.run_block("Read").returncode)
+        self.assertEqual(BASE | {"Read"}, set(self.perms()["allow"]))
+        # Dropping the item from the env drops the rule from the file.
+        self.assertEqual(0, self.run_block().returncode)
+        self.assertEqual(BASE, set(self.perms()["allow"]))
 
     def test_extra_allow_is_added_and_bad_characters_refuse_to_start(self) -> None:
         self.assertEqual(0, self.run_block(" Bash(git status *) , Read ").returncode)

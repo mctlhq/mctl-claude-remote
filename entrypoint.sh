@@ -223,7 +223,10 @@ esac
 # operator who needs more tools for interactive work adds them through
 # CLAUDE_REMOTE_EXTRA_ALLOW (comma-separated permission rules). Bypass mode is
 # switched off at the settings level too, so a workspace restored from MinIO
-# cannot bring it back. Entries already in the file are kept; ours are added.
+# cannot bring it back. permissions.allow is REBUILT from base plus extra on every
+# start: an entry in the restored file that is in neither (a stale rule, a removed
+# CLAUDE_REMOTE_EXTRA_ALLOW item, a tampered `Bash(*)`) is dropped. Other keys
+# (deny, ask, operator settings) are kept.
 CLAUDE_REMOTE_BASE_ALLOW='mcp__mctl-events__ack_event,mcp__mctl-telegram__get_messages,Bash(gh pr view *)'
 CLAUDE_REMOTE_EXTRA_ALLOW="${CLAUDE_REMOTE_EXTRA_ALLOW:-}"
 # The list is interpolated into jq programs and a JSON seed. A rule is a tool
@@ -245,7 +248,7 @@ ensure_json /workspace/.claude/settings.json \
        and .permissions.defaultMode? == \"dontAsk\"
        and .permissions.disableBypassPermissionsMode? == \"disable\"
        and (.permissions | has(\"allow_bypass_permissions\")) == false
-       and ($CLAUDE_REMOTE_ALLOW_JSON - (.permissions.allow? // [])) == []
+       and ((.permissions.allow? // [] | if type == \"array\" then unique else null end) == $CLAUDE_REMOTE_ALLOW_JSON)
        and .model == \"$CLAUDE_REMOTE_MODEL\")
    then \"ok\" else \"no\" end" \
   ".skipDangerousModePermissionPrompt = true
@@ -253,7 +256,7 @@ ensure_json /workspace/.claude/settings.json \
    | .permissions.defaultMode = \"dontAsk\"
    | .permissions.disableBypassPermissionsMode = \"disable\"
    | del(.permissions.allow_bypass_permissions)
-   | .permissions.allow = (((.permissions.allow // []) + $CLAUDE_REMOTE_ALLOW_JSON) | unique)
+   | .permissions.allow = $CLAUDE_REMOTE_ALLOW_JSON
    | .model = \"$CLAUDE_REMOTE_MODEL\"" <<JSON || true
 {
   "permissions": { "defaultMode": "dontAsk", "disableBypassPermissionsMode": "disable", "allow": $CLAUDE_REMOTE_ALLOW_JSON },

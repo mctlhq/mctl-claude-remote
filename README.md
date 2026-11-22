@@ -338,7 +338,8 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
   every event id contains `:`, and without the encoding two different ids could
   produce one key.
 - **Sender allowlist, fail closed.** A DM-shaped event (`subject.kind`
-  `telegram.message`) wakes the session only if `subject.sender_id` is in the
+  `telegram.message`, or anything from source `mctl-telegram` or with a
+  `telegram.*` type or kind, so unknown kinds fail closed) wakes the session only if `subject.sender_id` is in the
   policy's top-level `"sender_allowlist": ["<id>", ...]` (exact strings, no
   globs). A missing or empty list allows nobody, an event with no
   `subject.sender_id` is skipped, and a malformed list (not a list of ids)
@@ -420,7 +421,9 @@ transcript), never prompted and never executed. `entrypoint.sh` keeps
 `/workspace/.claude/settings.json` converged on every start, including one
 restored from storage: `defaultMode: dontAsk`,
 `disableBypassPermissionsMode: disable`, the legacy `allow_bypass_permissions`
-key removed, and the allowlist below merged into whatever the operator added.
+key removed, and `permissions.allow` rebuilt from the allowlist below plus
+`CLAUDE_REMOTE_EXTRA_ALLOW` on every start (a stale or tampered entry such as
+`Bash(*)` is dropped; other operator keys are kept).
 
 Default allowlist (the events hydration surface):
 
