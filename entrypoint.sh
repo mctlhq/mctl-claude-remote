@@ -757,16 +757,42 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
   # The tick runs headless in `dontAsk` (#61) with exactly the tools the skill's
   # flow uses, on top of the user settings' allowlist: gh (list/view/api/merge/
   # comment/update-branch), git (clone/fetch/checkout/commit/push), jq for the
-  # skill's own JSON handling, and file read/edit for review fixes. Anything
-  # else is denied. PR_STEWARD_ALLOWED_TOOLS replaces the list (space-separated
-  # rules, as `claude --allowedTools` takes them); an empty value is not
-  # accepted, so a typo cannot turn into "no tools" silently or "all tools".
-  STEWARD_ALLOWED_TOOLS="${PR_STEWARD_ALLOWED_TOOLS:-Read Edit Write Bash(gh:*) Bash(git:*) Bash(jq:*)}"
+  # skill's own JSON handling, file read/edit for review fixes, and three exact
+  # commands: `printenv` of the two PR_STEWARD_* values the skill reads (enable
+  # gate, tick id), `rm -f` of the lock file, and the structured-log writer.
+  # Anything else is denied. Everything else the skill needed from a shell is
+  # done HERE instead (the token and git credential helper are exported below, the
+  # gate is the `if` above), and test_steward_skill_coverage.py fails when the
+  # skill asks the model for a command this list does not cover.
+  # PR_STEWARD_WATCH_SCRIPT (absolute path of the operator's codex-watch
+  # launcher) adds exactly that one script as a rule. PR_STEWARD_ALLOWED_TOOLS
+  # replaces the list (space-separated rules, as `claude --allowedTools` takes
+  # them); an empty value is not accepted, so a typo cannot turn into "no tools"
+  # silently or "all tools".
+  STEWARD_ALLOWED_TOOLS="${PR_STEWARD_ALLOWED_TOOLS:-Read Edit Write Bash(gh:*) Bash(git:*) Bash(jq:*) Bash(printenv PR_STEWARD_ENABLED) Bash(printenv PR_STEWARD_TICK_ID) Bash(rm -f /workspace/.steward.lock) Bash(/opt/steward/bin/pr-steward-log:*)}"
   case "$STEWARD_ALLOWED_TOOLS" in
     *[!A-Za-z0-9_\ *\(\):.,/@=-]*|"")
       echo "[entrypoint] WARN PR_STEWARD_ALLOWED_TOOLS is empty or has a character a permission rule cannot have; using the default" >&2
-      STEWARD_ALLOWED_TOOLS="Read Edit Write Bash(gh:*) Bash(git:*) Bash(jq:*)" ;;
+      STEWARD_ALLOWED_TOOLS="Read Edit Write Bash(gh:*) Bash(git:*) Bash(jq:*) Bash(printenv PR_STEWARD_ENABLED) Bash(printenv PR_STEWARD_TICK_ID) Bash(rm -f /workspace/.steward.lock) Bash(/opt/steward/bin/pr-steward-log:*)" ;;
   esac
+  if [ -n "${PR_STEWARD_WATCH_SCRIPT:-}" ]; then
+    case "$PR_STEWARD_WATCH_SCRIPT" in
+      /*[!A-Za-z0-9_./@=-]*) _w_bad=1 ;;
+      /*) _w_bad=0 ;;
+      *) _w_bad=1 ;;
+    esac
+    if [ "$_w_bad" -eq 0 ]; then
+      STEWARD_ALLOWED_TOOLS="$STEWARD_ALLOWED_TOOLS Bash($PR_STEWARD_WATCH_SCRIPT:*)"
+    else
+      echo "[entrypoint] WARN PR_STEWARD_WATCH_SCRIPT is not an absolute path of plain characters; no watcher rule added" >&2
+    fi
+  fi
+  # The token the tick's gh and git use. The tick itself may not read the token
+  # file or export anything under dontAsk, so this shell does it for every tick:
+  # re-read from the file (the refresh loop rotates it), exported into the tick's
+  # environment only, never printed. Same default path as the precheck.
+  STEWARD_TOKEN_FILE="${GH_APP_TOKEN_FILE:-/run/steward/gh-token}"
+  STEWARD_GH_HOST="${GH_HOST:-github.com}"
   # Auth-loss escalation (#64): a tick that dies because the OAuth session is gone
   # sends one Telegram message, then a reminder at most every this many seconds
   # (not once per tick). Last-alert epoch lives beside the scheduler log.
@@ -797,7 +823,27 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
     while true; do
       sleep "${PR_STEWARD_SCHEDULE_SECONDS}"
       if [ -x "$STEWARD_PRECHECK" ] && "$STEWARD_PRECHECK" >>"$STEWARD_SCHED_LOG" 2>&1; then
-        echo "[scheduler $(date -u +%FT%TZ)] work found; firing tick" >>"$STEWARD_SCHED_LOG"
+        # A missing or empty token is a visible failure, not a tick that starts
+        # and silently ends as auth_error: log it (also to stderr, the pod log)
+        # and do not fire.
+        STEWARD_TOKEN="$(cat "$STEWARD_TOKEN_FILE" 2>/dev/null || true)"
+        if [ -z "$STEWARD_TOKEN" ]; then
+          echo "[scheduler $(date -u +%FT%TZ)] ERROR result=auth_error reason=token_missing: $STEWARD_TOKEN_FILE is unreadable or empty; tick NOT fired" \
+            | tee -a "$STEWARD_SCHED_LOG" >&2
+          continue
+        fi
+        case "$STEWARD_GH_HOST" in
+          github.com|*.ghe.com) export GH_TOKEN="$STEWARD_TOKEN" ;;
+          *) export GH_ENTERPRISE_TOKEN="$STEWARD_TOKEN" ;;
+        esac
+        unset STEWARD_TOKEN
+        # git push/clone: a credential helper that re-reads the token file on
+        # every call and never embeds the token in a URL or on a command line.
+        export GIT_CONFIG_COUNT=1
+        export GIT_CONFIG_KEY_0="credential.https://${STEWARD_GH_HOST}.helper"
+        export GIT_CONFIG_VALUE_0="!f() { echo username=x-access-token; echo \"password=\$(cat '$STEWARD_TOKEN_FILE')\"; }; f"
+        export PR_STEWARD_TICK_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+        echo "[scheduler $(date -u +%FT%TZ)] work found; firing tick $PR_STEWARD_TICK_ID" >>"$STEWARD_SCHED_LOG"
         # --no-session-persistence: headless steward ticks must NOT write their
         # own transcript into /workspace/.claude/projects, or the resume-on-restart
         # "newest on disk" heuristic would resolve to a steward tick instead of the
@@ -842,6 +888,7 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
         [ -x "$STEWARD_USAGE" ] && timeout 120 "$STEWARD_USAGE" --result "$STEWARD_RESULT" \
           --config "$STEWARD_CONFIG_PATH" --log-offset "$STEWARD_LOG_OFFSET" >>"$STEWARD_SCHED_LOG" 2>&1 || true
         rm -f "$STEWARD_RESULT" "$STEWARD_STDERR"
+        unset GH_TOKEN GH_ENTERPRISE_TOKEN GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0
       fi
     done
   ) &

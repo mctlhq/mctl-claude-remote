@@ -91,7 +91,7 @@ class PolicyTest(unittest.TestCase):
         # No field and an empty list both mean "nobody", never "everybody".
         for policy in (self.with_senders(), self.with_senders(sender_allowlist=[])):
             self.assertIsNone(policy.route_for(stream, allowed))
-        # A wildcard is an ordinary value, not a pattern.
+        # A glob such as "*" is rejected at load: ids are exact strings, never patterns.
         with self.assertRaises(ValueError):
             self.with_senders(sender_allowlist=["*"])
         # An allowlist that cannot be read is an error, not an empty or shorter list.

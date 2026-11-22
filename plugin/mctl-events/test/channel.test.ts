@@ -147,6 +147,21 @@ describe.skipIf(requiresValkey)("walking skeleton", () => {
     assert.deepEqual(await auditStages(foreign.id, ["skipped"]), ["skipped"]);
   });
 
+  test("a DM from a sender off the allowlist is skipped and acknowledged", async () => {
+    await claude.handshake();
+    await waitForGroup();
+    const stranger = envelope("telegram:evt:v1:7:99:1001");
+    stranger.subject.sender_id = "99";
+    const noSender = envelope("telegram:evt:v1:7:98:1001");
+    delete noSender.subject.sender_id;
+    await publish(stranger);
+    await publish(noSender);
+    await claude.noNotification(1.5);
+    assert.equal(await pendingCount(db), 0);
+    assert.deepEqual(await auditStages(stranger.id, ["skipped"]), ["skipped"]);
+    assert.deepEqual(await auditStages(noSender.id, ["skipped"]), ["skipped"]);
+  });
+
   test("an ack for an unknown event changes nothing", async () => {
     await claude.handshake();
     const result = await claude.call("ack_event", { event_id: "telegram:evt:v1:7:42:9", outcome: "handled" });

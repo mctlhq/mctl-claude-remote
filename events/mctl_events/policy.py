@@ -95,7 +95,8 @@ class Policy:
     group_start: str = "$"
     # Senders allowed to wake the session through a DM-shaped event (see
     # SENDER_CHECKED_KINDS). Exact string match against `subject.sender_id`,
-    # no globs: "*" is an ordinary, non-matching value. Empty means NO sender
+    # no globs: an entry such as "*" is rejected at load (see _SENDER), it is
+    # neither a wildcard nor a stored value. Empty means NO sender
     # is allowed, never "everyone": a policy that omits the field, an event
     # without a sender and an unparseable allowlist all end in rejection.
     sender_allowlist: frozenset[str] = frozenset()

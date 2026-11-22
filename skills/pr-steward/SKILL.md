@@ -17,11 +17,16 @@ It is *stateless per tick*: all durable state is reconstructed from GitHub (PR l
 
 ## 0. Gate — refuse to run unless explicitly enabled
 
+The scheduler never launches a tick unless `PR_STEWARD_ENABLED=true`, and the tick runs
+in `dontAsk` with a fixed tool list (entrypoint `STEWARD_ALLOWED_TOOLS`), so the gate is a
+single exact command rather than a shell conditional:
+
 ```sh
-[ "${PR_STEWARD_ENABLED:-false}" = "true" ] || { echo "pr-steward: disabled (PR_STEWARD_ENABLED!=true); no-op"; exit 0; }
+printenv PR_STEWARD_ENABLED
 ```
 
-If `PR_STEWARD_ENABLED` is not exactly `true`, **stop immediately**. Do not list PRs,
+If the output is not exactly `true`, or the call is denied (you are not in a scheduler
+tick), **stop immediately** and print `pr-steward: disabled; no-op`. Do not list PRs,
 do not touch GitHub. This is the kill switch.
 
 ## 1. Load config
@@ -53,42 +58,47 @@ Keys (see `pr-steward.config.example.json`):
 
 Compute `LP="${label_prefix}"` for label names below.
 
-## 2. Authenticate as the GitHub App (no token ever on a command line)
+## 2. Authentication is provided by the scheduler (verify it, never set it up)
 
 The entrypoint refresh loop keeps a fresh installation token in
-`github_app.token_file`. `gh` and `git` need it via two different paths — do NOT
-rely on `gh auth setup-git`, which fails when no host has been authenticated via
-`gh auth login` (a fresh steward workspace has none):
+`github_app.token_file`. The shell that launches the tick (the scheduler in
+`entrypoint.sh`) re-reads that file for every tick and puts the token in the tick's
+environment itself: `GH_TOKEN` (`GH_ENTERPRISE_TOKEN` on a GHES host) for `gh`, and a
+git credential helper (`GIT_CONFIG_*` environment) that re-reads the file on every
+git call. The tick runs in `dontAsk`, where exporting variables, reading the token file and
+`git config --global` are not permitted, so **do not try to set any of this up**.
+
+Verify it with one call that prints no token:
 
 ```sh
-HOST="${GH_HOST:-github.com}"
-# gh CLI (pr list / comment / repo clone): env token, no persisted auth state.
-case "$HOST" in
-  github.com|*.ghe.com) export GH_TOKEN="$(cat "$TOKEN_FILE")" ;;   # github.com / GHEC
-  *)                    export GH_ENTERPRISE_TOKEN="$(cat "$TOKEN_FILE")" ;;  # GHES host
-esac
-# git push/clone: a credential helper that re-reads the token file on every call
-# (so a background-rotated token is picked up) and never embeds it in a URL.
-git config --global "credential.https://${HOST}.helper" \
-  '!f() { echo username=x-access-token; echo "password=$(cat '"$TOKEN_FILE"')"; }; f'
+gh api rate_limit --jq .resources.core.remaining
 ```
 
-- Never `echo`/log the token. Never build a `https://x-access-token:...@github.com` URL.
-- On any GitHub `HTTP 401`: re-read the token file once (the refresh loop may have just
-  rotated it) and retry. If still 401, log `result=auth_error reason=token_invalid`
-  and end the tick (do **not** burn a fix attempt — this is transient).
+If it fails (non-zero exit, including "set GH_TOKEN"), the environment has no usable
+token: print `pr-steward: result=auth_error reason=token_missing`, do not touch
+GitHub any further, and end the tick. Never try to read the token file yourself.
+
+- Never print or log the token. Never build a `https://x-access-token:...@github.com` URL.
+- On any GitHub `HTTP 401`: retry the call once. The token in the environment is fixed
+  for the tick (the scheduler re-reads the file only when it starts the next tick), so a
+  token that expired mid-tick stays expired: if still 401, log
+  `result=auth_error reason=token_invalid` and end the tick; the next tick gets a fresh
+  one (do **not** burn a fix attempt — this is transient).
 
 ## 3. Acquire the tick lock
 
-```
-LOCK=/workspace/.steward.lock
-```
-If `$LOCK` exists and its `started_at` is younger than `tick_lock_stale_minutes`,
+The lock file is `/workspace/.steward.lock`.
+If it exists and its `started_at` is younger than `tick_lock_stale_minutes`,
 log `action=skip reason=locked` and exit 0. Otherwise write
-`{tick_id, started_at, pid}` (mode 0600) and remove it at the end of the tick
-(including on error).
+`{tick_id, started_at, pid}` with the Write tool (not a shell redirect) and remove it at
+the end of the tick (including on error).
 
-`tick_id` = UTC timestamp (e.g. `20260521T101500Z`). Use it in every log line.
+`tick_id` = the UTC timestamp the scheduler exports (e.g. `20260521T101500Z`); read it
+with one exact command and use it in every log line:
+
+```sh
+printenv PR_STEWARD_TICK_ID
+```
 
 ## 4. Discover in-scope PRs
 
@@ -362,6 +372,13 @@ Per PR, per tick:
    comment — so never rely on the comment alone to schedule a new Action run.
 2. If no watcher result file exists for this PR+baseline, launch a watcher (see the
    `codex-watch` skill's "Launch a watcher" section) and `action=wait reason=watcher-launched`.
+   The only launcher the tick may run is the script named by `PR_STEWARD_WATCH_SCRIPT`
+   (the operator sets it; the entrypoint allows exactly that path). Run that path
+   directly as the command (the launcher detaches itself): no nohup, setsid, trailing &
+   or wrapper, which `dontAsk` would refuse. If it is unset or the call is denied, do
+   not retry: read the review bot's comments and reviews directly with `gh api`
+   (same head-anchored baseline, read-only) and `action=wait reason=watcher-unavailable`
+   when no verdict exists yet.
 3. If a result file exists:
    - `status=responded` → parse the `---comments---`/`---reviews---` sections, extract
      `P1`/`P2` badge tokens. Beware the **claude[bot] progress-checklist false-clean**
@@ -528,7 +545,7 @@ The steward brings the branch current rather than merging stale code or escalati
      conflict, not a stale branch → §9 escalate (reason `conflict`).
    - "already up to date" / not behind → the head moved since §5 → `action=wait reason=head-moved`,
      next tick re-evaluates. Do NOT loop within the tick.
-   - `HTTP 401` → re-read the token once and retry per §2; if still failing, `auth_error`.
+   - `HTTP 401` → retry once per §2; if still failing, `auth_error`.
    - any other error → `action=escalate reason=update-branch-failed`, ONE §9 escalation.
 
 ## 8.3 Resolve bot-only blocking threads (when-green only)
@@ -606,7 +623,17 @@ a merge already happened. Only used in `merge_mode=when-green`.
 
 ## 11. Structured logging
 
-One JSON line per PR action, appended to `logging.file` and echoed to stdout:
+One JSON line per PR action, appended to `logging.file` and echoed to stdout. Write
+it only through the logger (the tick may not redirect into files), passing the line as
+one single-quoted argument:
+
+```sh
+/opt/steward/bin/pr-steward-log '{"ts":"<iso>","tick_id":"<id>","repo":"owner/repo","pr":123,"head_sha":"<sha>","action":"wait","result":"","reason":"awaiting-review"}'
+```
+
+The logger rejects anything that is not one JSON object with `repo`, `pr` and
+`head_sha`, redacts token-looking strings, and exits non-zero when it cannot append
+(then say so in the tick summary; do not retry). The shape of a line:
 
 ```json
 {"ts":"<iso>","tick_id":"<id>","repo":"owner/repo","pr":123,"head_sha":"<sha>","attempt":1,"action":"address-review","result":"pushed","reason":"","p1":1,"p2":0,"p3":2}
@@ -620,7 +647,7 @@ one, redact it to `***`.
 
 ## 12. End of tick
 
-Release the lock (`rm -f $LOCK`). Summarize counts to stdout
+Release the lock with exactly `rm -f /workspace/.steward.lock`. Summarize counts to stdout
 (`tick <id>: <waited> waited, <fixed> fixed, <ready> ready-to-merge, <escalated> escalated`).
 Do not loop — one tick per invocation. The RemoteTrigger routine fires the next tick.
 

@@ -345,7 +345,10 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
   `subject.sender_id` is skipped, and a malformed list (not a list of ids)
   stops the adapter at start. Skipped events are acknowledged and audited as
   `skipped`. The producer must therefore put the sender in `subject.sender_id`;
-  until it does, Telegram DMs are not delivered.
+  until it does, Telegram DMs are not delivered. The Python adapter
+  (`events/mctl_events/policy.py`) and the Bun adapter
+  (`plugin/mctl-events/src/policy.ts`) apply the same rule. A glob such as `*`
+  is rejected when the policy loads; ids are never patterns.
 - **Deny by default.** `MCTL_EVENTS_POLICY` lists the streams, sources, event
   types and subject values this session may be woken by; anything else is
   acknowledged and audited as `skipped`.
@@ -383,7 +386,8 @@ claude/channel) → running session → hydration through MCP / gh → ack_event
 | `MCTL_EVENTS_PUSHGATEWAY_URL` | optional Pushgateway base URL for the token gauges (job `claude-remote-telegram-token`, instance = the device name); must be `http://` or `https://` |
 | `MCTL_EVENTS_POLICY` | **path** to a JSON routing policy file, not inline JSON (the format is defined by the loader in `events/mctl_events/policy.py`) |
 | `CLAUDE_REMOTE_EXTRA_ALLOW` | comma-separated extra permission rules added to `permissions.allow` (see [Permissions](#permissions)) |
-| `PR_STEWARD_ALLOWED_TOOLS` | space-separated `--allowedTools` rules for the steward tick (default `Read Edit Write Bash(gh:*) Bash(git:*) Bash(jq:*)`) |
+| `PR_STEWARD_ALLOWED_TOOLS` | space-separated `--allowedTools` rules for the steward tick (default `Read Edit Write Bash(gh:*) Bash(git:*) Bash(jq:*) Bash(printenv PR_STEWARD_ENABLED) Bash(printenv PR_STEWARD_TICK_ID) Bash(rm -f /workspace/.steward.lock) Bash(/opt/steward/bin/pr-steward-log:*)`) |
+| `PR_STEWARD_WATCH_SCRIPT` | absolute path of the operator's `codex-watch` launcher; adds exactly `Bash(<path>:*)` to the tick's rules. Unset = the tick reads reviews directly with `gh api` |
 | `CLAUDE_PTY_ANSWER_WINDOW_SECONDS` | seconds after launch during which the PTY launcher answers the startup dialogs (default `120`); later output is never answered, even if it repeats a dialog's words |
 
 Worker tokens are bounded (30 days by default). The renewal loop checks the
@@ -438,3 +442,19 @@ work set `CLAUDE_REMOTE_EXTRA_ALLOW` to comma-separated rules, e.g.
 `_ * ( ) : . , / @ = -` and spaces; anything else stops the container at start
 (exit 2) rather than producing a wider or broken list. The steward tick adds
 `PR_STEWARD_ALLOWED_TOOLS` on top, for that process only.
+
+The steward tick (`skills/pr-steward/SKILL.md`) is held to that list: whatever
+the skill needs that the list does not cover is done by the scheduler shell
+instead of the model. Before each tick the scheduler re-reads the token file and
+exports `GH_TOKEN` (`GH_ENTERPRISE_TOKEN` for a GHES `GH_HOST`) and a git
+credential helper (`GIT_CONFIG_*`, re-reading the file on every call) into the
+tick's environment only; the token is never printed or put on a command line. A
+missing or empty token file is a logged error (`result=auth_error
+reason=token_missing`, also on stderr) and no tick fires; inside the tick,
+SKILL.md section 2 only verifies the environment with `gh api rate_limit` and
+ends the tick with `auth_error` if it has no token. The enable gate is the
+scheduler itself plus the exact `printenv PR_STEWARD_ENABLED`; the tick id comes
+from `printenv PR_STEWARD_TICK_ID`; the structured log goes through
+`bin/pr-steward-log` (it validates the line and redacts tokens); the lock is
+released with exactly `rm -f /workspace/.steward.lock`. `events/tests/test_steward_skill_coverage.py`
+fails when the skill asks for a shell command that no rule covers.

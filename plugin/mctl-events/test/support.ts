@@ -133,7 +133,7 @@ export function envelope(eventId = "telegram:evt:v1:7:42:1001", overrides: Recor
     source: "mctl-telegram",
     occurred_at: "2026-09-17T08:00:00Z",
     correlation_id: "corr-" + eventId.replaceAll(":", "-"),
-    subject: { kind: "telegram.message", account_id: "7", chat_id: "42", message_id: "1001", peer: "user:42" },
+    subject: { kind: "telegram.message", account_id: "7", chat_id: "42", message_id: "1001", peer: "user:42", sender_id: "42" },
     ...overrides,
   } as Doc;
 }
@@ -142,6 +142,7 @@ export const POLICY = {
   group: "claude-remote",
   consumer: "test-consumer",
   block_ms: 200,
+  sender_allowlist: ["42"],
   // The fake client registers nothing, so the settle window only slows tests
   // down; the two tests about it set their own.
   startup_grace_ms: 100,

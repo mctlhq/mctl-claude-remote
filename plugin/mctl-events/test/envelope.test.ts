@@ -145,11 +145,12 @@ describe("policy", () => {
     policyMod.fromDict({
       group: "g",
       consumer: "c",
+      sender_allowlist: ["42"],
       routes: [{ stream: "mctl:events:telegram", sources: ["mctl-telegram"], types: ["telegram.message.*"], ...route }],
     });
 
   test("deny by default", () => {
-    const empty = policyMod.fromDict({ group: "g", consumer: "c", routes: [] });
+    const empty = policyMod.fromDict({ group: "g", consumer: "c", sender_allowlist: ["42"], routes: [] });
     assert.equal(policyMod.routeFor(empty, "mctl:events:telegram", envMod.fromDict(envelope())), undefined);
   });
 
@@ -161,6 +162,64 @@ describe("policy", () => {
     assert.equal(policyMod.routeFor(withRoute({ types: ["github.*"] }), "mctl:events:telegram", env), undefined);
     assert.equal(policyMod.routeFor(withRoute({ subject: { account_id: ["8"] } }), "mctl:events:telegram", env), undefined);
     assert.equal(policyMod.routeFor(withRoute({ subject: { repository: ["*"] } }), "mctl:events:telegram", env), undefined);
+  });
+
+  const withSenders = (extra: Record<string, unknown> = {}) =>
+    policyMod.fromDict({
+      group: "g",
+      consumer: "c",
+      routes: [{ stream: "mctl:events:telegram", sources: ["mctl-telegram"], types: ["telegram.message.*"] }],
+      ...extra,
+    });
+  const dm = (sender: string | null, kind = "telegram.message") => {
+    const doc = envelope();
+    doc.subject.kind = kind;
+    if (sender === null) delete doc.subject.sender_id;
+    else doc.subject.sender_id = sender;
+    return envMod.fromDict(doc);
+  };
+
+  test("sender allowlist fails closed", () => {
+    const stream = "mctl:events:telegram";
+    const listed = withSenders({ sender_allowlist: ["42"] });
+    assert.notEqual(policyMod.routeFor(listed, stream, dm("42")), undefined);
+    assert.equal(policyMod.routeFor(listed, stream, dm("99")), undefined);
+    assert.equal(policyMod.routeFor(listed, stream, dm(null)), undefined);
+    // No field and an empty list both mean "nobody", never "everybody".
+    for (const policy of [withSenders(), withSenders({ sender_allowlist: [] })]) {
+      assert.equal(policyMod.routeFor(policy, stream, dm("42")), undefined);
+      assert.equal(policy.sender_allowlist.size, 0);
+    }
+    // A glob such as "*" is rejected at load: ids are exact strings, never patterns.
+    assert.throws(() => withSenders({ sender_allowlist: ["*"] }), policyMod.PolicyError);
+    // An allowlist that cannot be read is an error, not an empty or shorter list.
+    for (const bad of ["42", { "42": true }, [42], ["42", null], [""], null, ["42\n"]]) {
+      assert.throws(() => withSenders({ sender_allowlist: bad }), policyMod.PolicyError, JSON.stringify(bad));
+    }
+  });
+
+  test("the sender check applies only to DM-shaped events", () => {
+    const pr = envMod.fromDict({
+      ...envelope(),
+      type: "github.pull_request.opened",
+      source: "mctl-github",
+      subject: { kind: "github.pull_request", repository: "mctlhq/x", number: "1" },
+    });
+    const policy = policyMod.fromDict({
+      group: "g",
+      consumer: "c",
+      sender_allowlist: ["42"],
+      routes: [{ stream: "mctl:events:github", sources: ["mctl-github"], types: ["github.*"] }],
+    });
+    assert.notEqual(policyMod.routeFor(policy, "mctl:events:github", pr), undefined);
+  });
+
+  test("unknown telegram kinds are sender-checked too", () => {
+    const policy = withSenders({ sender_allowlist: ["42"] });
+    for (const kind of ["telegram.dm", "telegram.mention", "something.new"]) {
+      assert.equal(policyMod.routeFor(policy, "mctl:events:telegram", dm("99", kind)), undefined, kind);
+      assert.notEqual(policyMod.routeFor(policy, "mctl:events:telegram", dm("42", kind)), undefined, kind);
+    }
   });
 
   test("only exact reserved names are refused", () => {
@@ -232,6 +291,7 @@ const TELEGRAM_POLICY = (types: string, extra: Record<string, unknown> = {}) =>
   policyMod.fromDict({
     group: "g",
     consumer: "c",
+    sender_allowlist: ["42"],
     ...extra,
     routes: [{ stream: "mctl:events:telegram", sources: ["mctl-telegram"], types: [types] }],
   });
@@ -496,7 +556,7 @@ describe("notification", () => {
     assert.equal(pushed.method, "notifications/claude/channel");
     assert.deepEqual(Object.keys(pushed.params.meta), [
       "event_id", "type", "source", "correlation_id", "occurred_at", "attempt",
-      "subject_kind", "subject_account_id", "subject_chat_id", "subject_message_id", "subject_peer",
+      "subject_kind", "subject_account_id", "subject_chat_id", "subject_message_id", "subject_peer", "subject_sender_id",
     ]);
     assert.equal(pushed.params.meta.attempt, "3");
     assert.equal(
