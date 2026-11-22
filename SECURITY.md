@@ -21,7 +21,7 @@ re-enable it. The allowlist and its extension points are in the README
 ("Permissions"). The security contract is:
 
 - The container **must** still run in an isolated environment (dedicated namespace, restricted network policy, no sensitive volume mounts).
-- The allowlist reduces what an unlisted call can reach; it does not stop a session that has already been subverted through a listed tool.
+- The allowlist reduces what an unlisted call can reach; it does not stop a session that has already been subverted through a listed tool. For the PR steward tick this is effectively an unrestricted shell: `Bash(git:*)` and `Bash(gh:*)` together with `Write` allow a git alias, `core.pager`, a written `.git/hooks` file or `gh alias set --shell` to run arbitrary commands, and `gh auth token` prints the token. Narrowing those rules to the subcommands the skill uses is a follow-up.
 - Inbound DM events wake the session only for senders on the policy's `sender_allowlist`; an unreadable or missing list allows nobody.
 - The unattended `pr-steward` tick runs under the same mode with a fixed tool list. Its GitHub token is exported into the tick's environment by the scheduler shell (the tick may not read the token file or export variables), and a missing token stops the tick with a logged `auth_error` instead of letting it run unauthenticated.
 

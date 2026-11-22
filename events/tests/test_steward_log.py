@@ -32,6 +32,18 @@ class StewardLogTest(unittest.TestCase):
         self.assertEqual([line, line], self.log.read_text().splitlines())
         self.assertEqual(line, proc.stdout.strip())
 
+    def test_tick_level_outcomes_are_accepted_but_need_a_tick_id_and_no_pr(self) -> None:
+        for good in ('{"tick_id":"t1","action":"skip","reason":"locked"}',
+                     '{"tick_id":"t1","result":"auth_error","reason":"token_missing"}'):
+            with self.subTest(good=good):
+                self.assertEqual(0, self.run_log(good).returncode)
+        self.assertEqual(2, len(self.log.read_text().splitlines()))
+        for bad in ('{"action":"skip"}', '{"tick_id":"","action":"skip"}', '{"tick_id":"t1"}',
+                    '{"tick_id":"t1","action":"skip","pr":3}'):
+            with self.subTest(bad=bad):
+                self.assertEqual(2, self.run_log(bad).returncode)
+        self.assertEqual(2, len(self.log.read_text().splitlines()))
+
     def test_token_looking_strings_are_redacted(self) -> None:
         self.run_log(json.dumps({"repo": "o/r", "pr": 1, "head_sha": "a", "reason": "ghs_AbC123 and sk-ant-xyz"}))
         text = self.log.read_text()

@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import textwrap
 import time
+import re
 import unittest
 from pathlib import Path
 
@@ -240,7 +241,18 @@ class AuthEscalationTest(unittest.TestCase):
 
     def allowed(self, n: int = 1) -> list[str]:
         argv = (self.root / f"argv.{n}").read_text().splitlines()
-        return argv[argv.index("--allowedTools") + 1:]
+        rest = argv[argv.index("--allowedTools") + 1:]
+        # The whole rule list must arrive as ONE argument (rules contain spaces).
+        self.assertEqual(1, len(rest), f"allowedTools split into {rest!r}")
+        return re.findall(r"\S*\([^)]*\)\S*|\S+", rest[0])
+
+    def test_multi_word_rules_reach_claude_as_one_intact_argument(self) -> None:
+        self.tick(1)
+        self.run_loop(1)
+        rules = self.allowed()
+        for rule in ("Bash(printenv PR_STEWARD_ENABLED)", "Bash(printenv PR_STEWARD_TICK_ID)",
+                     "Bash(rm -f /workspace/.steward.lock)"):
+            self.assertIn(rule, rules)
 
     def test_watch_script_adds_exactly_one_rule_and_a_bad_path_adds_none(self) -> None:
         self.tick(1)

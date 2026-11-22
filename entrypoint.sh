@@ -868,11 +868,13 @@ if [ "${PR_STEWARD_ENABLED:-false}" = "true" ] && \
         # Both redirects below truncate, so a stale result/stderr from an earlier
         # run is never classified.
         STEWARD_TICK_RC=0
-        # shellcheck disable=SC2086 # STEWARD_ALLOWED_TOOLS is validated above and word-split on purpose
+        # STEWARD_ALLOWED_TOOLS is passed as ONE argument: some rules contain spaces
+        # inside the parentheses (Bash(printenv PR_STEWARD_ENABLED)) and must reach
+        # claude intact, not word-split into broken fragments.
         timeout "$STEWARD_TICK_TIMEOUT" "$STEWARD_CLAUDE_BIN" -p "Run the pr-steward skill" \
           --model "$STEWARD_MODEL" --output-format json \
           --no-session-persistence --permission-mode dontAsk \
-          --allowedTools $STEWARD_ALLOWED_TOOLS >"$STEWARD_RESULT" 2>"$STEWARD_STDERR" \
+          --allowedTools "$STEWARD_ALLOWED_TOOLS" >"$STEWARD_RESULT" 2>"$STEWARD_STDERR" \
           || STEWARD_TICK_RC=$?
         cat "$STEWARD_STDERR" >>"$STEWARD_SCHED_LOG" 2>/dev/null || true
         if [ "$STEWARD_TICK_RC" -eq 0 ]; then

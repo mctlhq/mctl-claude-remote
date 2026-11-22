@@ -26,11 +26,19 @@ def main(argv):
         entry = json.loads(argv[1])
     except ValueError:
         entry = None
-    if (not isinstance(entry, dict)
-            or not isinstance(entry.get("repo"), str)
-            or not isinstance(entry.get("pr"), int) or isinstance(entry.get("pr"), bool)
-            or not isinstance(entry.get("head_sha"), str)):
-        print("pr-steward-log: not a JSON object with repo, pr and head_sha", file=sys.stderr)
+    pr_entry = (isinstance(entry, dict)
+                and isinstance(entry.get("repo"), str)
+                and isinstance(entry.get("pr"), int) and not isinstance(entry.get("pr"), bool)
+                and isinstance(entry.get("head_sha"), str))
+    # Tick-level outcomes (skip reason=locked, auth_error) are not tied to a PR:
+    # accept them with a tick_id and an action or result.
+    tick_entry = (isinstance(entry, dict)
+                  and isinstance(entry.get("tick_id"), str) and entry["tick_id"]
+                  and (isinstance(entry.get("action"), str) or isinstance(entry.get("result"), str))
+                  and "pr" not in entry)
+    if not (pr_entry or tick_entry):
+        print("pr-steward-log: need repo, pr and head_sha, or tick_id plus action/result",
+              file=sys.stderr)
         return 2
     line = SECRET.sub("***", json.dumps(entry, separators=(",", ":"), ensure_ascii=False))
     try:

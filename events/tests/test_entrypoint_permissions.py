@@ -120,7 +120,7 @@ class LaunchModeTest(unittest.TestCase):
         # events branch, plain --remote-control branch, steward tick
         launches = [line for line in LINES if "--permission-mode dontAsk" in line and "Mode:" not in line]
         self.assertEqual(3, len(launches), launches)
-        self.assertIn("--allowedTools $STEWARD_ALLOWED_TOOLS", TEXT)
+        self.assertIn('--allowedTools "$STEWARD_ALLOWED_TOOLS"', TEXT)
 
 
 if __name__ == "__main__":
