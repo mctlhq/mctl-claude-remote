@@ -37,6 +37,7 @@ export class FakeApp {
   brokenStatus = false;
   /** thread/read answers with a JSON-RPC error. */
   failStatus = false;
+  archived = false;
   /** Page size of thread/turns/list when the caller asks for more. */
   pageLimit = 20;
   /** The cursor of every thread/turns/list call, null for a first page. */
@@ -135,6 +136,10 @@ export class FakeApp {
       case "initialize":
         return reply({ userAgent: "fake-app/0" });
       case "thread/resume":
+        if (this.archived) {
+          ws.send(JSON.stringify({ id: m.id, error: { code: -32603, message: "session is archived; unarchive it first" } }));
+          return;
+        }
         return reply({ thread: { id: this.threadId, turns: [] } });
       case "thread/read":
         // Metadata only: the waker reads turns through thread/turns/list.

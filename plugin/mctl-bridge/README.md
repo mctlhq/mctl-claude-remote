@@ -123,6 +123,21 @@ release the repository declares, so nothing is copied by hand.
   job is loaded, because the updater cannot boot itself out mid-install.
 - `com.mctl.codex-remote-guard` is installed by the same script (see `ops/codex-remote-guard.sh`).
 
+## Orchestrator health
+
+`mctl-bridge errors` includes `healthy` and `orchestrator`. `ok: true` means the
+diagnostic query succeeded, not that the system is healthy. The waker checks its
+configured thread every 30 seconds, even when no question is waiting. An archived
+or unreadable thread is `unavailable`; a missing, malformed or older-than-90-second
+observation is `unknown`. A reachable busy thread is healthy and is not interrupted.
+The CLI preserves its existing exit-code contract; automation must inspect `healthy`.
+
+If the configured chat was archived, explicitly unarchive that chat in the app (or
+with `codex unarchive <thread-id>` on its host) after confirming it is still the
+intended orchestrator. The waker never unarchives or switches chats automatically.
+Within the next probe interval, check `errors` again and run a benign question/reply
+test. Do not replay an old task to check recovery.
+
 ## Running a slot
 
 The adapter takes its configuration from its own environment, set in the slot's
