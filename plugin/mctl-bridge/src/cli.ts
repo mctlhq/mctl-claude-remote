@@ -13,6 +13,7 @@ import { Bridge, key, loadLibrary, pairs, text } from "./store.ts";
 import type { Result } from "./store.ts";
 import { Connection, endpointFromUrl } from "./valkey.ts";
 import type { Reply } from "./valkey.ts";
+import { readHealth } from "./health.ts";
 
 const USAGE = `usage: mctl-bridge <command> [options]
 
@@ -36,7 +37,7 @@ text that is not trivially safe in a shell; one trailing newline is dropped.
   observe ID                             one task (t-), question (q-) or wake (w-): state, terminal or
                                          needing the operator, open wakes, adapter liveness (read-only;
                                          an unreadable or unknown id is an error, never an empty state)
-  errors                                 delivery_unknown, wake_unknown and late evidence
+  errors                                 message failures and orchestrator reachability (healthy flag)
   wakes                                  wakes not yet settled (intent, started, wake_unknown)
   sweep [--stale-ms MS]                  expiry, stale slots and recovery
 `;
@@ -258,7 +259,9 @@ export async function run(argv: string[], b: Bridge): Promise<{ code: number; ou
         const id = k.slice(key.late("").length);
         late[id] = await b.late(id);
       }
-      return { code: 0, out: { ok: true, unknown, wakes, late } };
+      const orchestrator = await readHealth(b.exec);
+      const healthy = orchestrator.status === "healthy" && unknown.length === 0 && wakes.length === 0 && Object.keys(late).length === 0;
+      return { code: 0, out: { ok: true, healthy, orchestrator, unknown, wakes, late } };
     }
     case "wakes":
       return { code: 0, out: { ok: true, wakes: await b.openWakes() } };

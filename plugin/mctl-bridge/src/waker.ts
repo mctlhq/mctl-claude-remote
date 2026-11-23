@@ -29,6 +29,7 @@ import { BRIDGE_PREFIX, CodexThread } from "./codexctl.ts";
 import type { SayResult } from "./codexctl.ts";
 import { Bridge, newId } from "./store.ts";
 import { Connection, endpointFromUrl } from "./valkey.ts";
+import { HEALTH_INTERVAL_MS, writeHealth } from "./health.ts";
 
 export const WAKER_VERSION = "0.3.1";
 
@@ -153,21 +154,37 @@ export class Waker {
     }
   }
 
-  /** Whether the thread has no running turn (see acceptsTurn). A status we cannot read is "no". */
-  private async threadIdle(): Promise<boolean> {
+  /** Observe even with no queued questions. Never unarchive or start a turn here. */
+  async checkHealth(): Promise<string | null> {
     let c: AppClient | null = null;
+    let type: string | null = null;
+    let detail = "";
     try {
       c = await this.session();
       const r = await c.request("thread/read", { threadId: this.cfg.threadId }, this.cfg.rpcTimeoutMs);
-      const type = r?.thread?.status?.type;
-      if (!acceptsTurn(type)) log("thread not idle, no wake this pass", { status: type ?? "unreadable" });
-      return acceptsTurn(type);
+      const observed = r?.thread?.status?.type;
+      if (r?.thread?.id === this.cfg.threadId && ["idle", "active", "systemError", "notLoaded"].includes(observed)) type = observed;
+      else detail = "thread/read returned no matching thread with a recognized status";
     } catch (err) {
       log("thread status unreadable, no wake this pass", { error: String(err) });
-      return false;
+      detail = String(err).slice(0, 1000);
     } finally {
       c?.close();
     }
+    await writeHealth(this.bridge.exec, {
+      status: type === null ? "unavailable" : "healthy",
+      reason: type === null ? "thread_unreadable" : "reachable",
+      thread_id: this.cfg.threadId, checked_ms: Date.now(),
+      ...(type === null ? { detail } : { thread_status: type }),
+    });
+    return type;
+  }
+
+  /** A reachable busy thread is healthy but must not be woken. */
+  private async threadIdle(): Promise<boolean> {
+    const type = await this.checkHealth();
+    if (!acceptsTurn(type)) log("thread not idle, no wake this pass", { status: type ?? "unreadable" });
+    return acceptsTurn(type);
   }
 
   private async finish(id: string, outcome: "completed" | "failed" | "wake_unknown", reason: string): Promise<void> {
@@ -454,6 +471,7 @@ export async function main(): Promise<number> {
   const slotSh = process.env.MCTL_BRIDGE_SLOT_SH ?? "";
   log("started", { thread_id: threadId, socket: cfg.socketPath, per_hour: cfg.perHour, reconcile_slots: slots });
   const loops = [
+    loop("health", HEALTH_INTERVAL_MS, () => stopped, () => waker.checkHealth()),
     loop("sweep", sweepMs, () => stopped, () => waker.sweep()),
     loop("wake", cfg.pollMs, () => stopped, () => waker.step()),
   ];

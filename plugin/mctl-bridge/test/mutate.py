@@ -20,6 +20,9 @@ import subprocess, sys, shutil
 LUA='src/bridge.lua'; SUP='test/support.ts'; CH='src/channel.ts'; WK='src/waker.ts'; CLI='src/cli.ts'; SLOT='ops/slot.sh'; GUARD='ops/codex-remote-guard.sh'; WAKE='ops/wake-state.sh'; UPD='ops/bridge-updater.sh'; INSTALL='ops/install.sh'; PTY='ops/slot-pty.py'; WATCH='ops/watch.sh'
 CX='src/codexctl.ts'; PB='src/publish.ts'; DL='src/devloop.ts'; RC='src/reconcile.ts'; AP='src/appserver.ts'
 M=[
+ ("health ignores an archived orchestrator", WK, 'status: type === null ? "unavailable" : "healthy",', 'status: "healthy",', 1),
+ ("health never becomes stale", 'src/health.ts', 'now - h.checked_ms! > HEALTH_STALE_MS', 'false', 1),
+ ("waker never probes health without messages", WK, '    loop("health", HEALTH_INTERVAL_MS, () => stopped, () => waker.checkHealth()),\n', '', 1),
  ("devloop preflight trusts a moved or case-folded issue", DL, 'if (d?.html_url !== issue.url) throw', 'if (false) throw', 1),
  ("devloop follows a redirect with the token", DL, 'redirect: "error", ', '', 1),
  ("devloop passes any 403 code through", DL, 'code.startsWith("orchestrator_devloop_") ? ', 'code ? ', 1),
@@ -256,7 +259,7 @@ M=[
  ("waker matches the marker text, not the client id", WK, "it?.type === \"userMessage\" && it?.clientId === wakeId", "it?.type === \"userMessage\" && JSON.stringify(it).includes(`[wake:${wakeId}]`)", 1),
  ("waker sends no clientUserMessageId", WK, "          clientUserMessageId: wakeId,\n", "", 1),
  ("waker wakes a busy thread", WK, "    if (!(await this.threadIdle())) return null;\n", "", 1),
- ("waker takes an unreadable status as idle", WK, "      return acceptsTurn(type);\n", "      return acceptsTurn(type) || type === undefined;\n", 1),
+ ("waker takes an unreadable status as idle", WK, "    return acceptsTurn(type);\n", "    return acceptsTurn(type) || type === null;\n", 1),
  ("a thread in systemError takes no turn", AP, 'return statusType === "idle" || statusType === "systemError";', 'return statusType === "idle";', 1),
  ("any thread status takes a turn", AP, 'return statusType === "idle" || statusType === "systemError";', 'return statusType !== "active";', 1),
  ("reconcile alerts the same prompt again", RC, 'if (w.alert === "sent" || w.alert === "unknown") return;', 'if (w.alert === "unknown") return;', 1),
@@ -267,7 +270,7 @@ M=[
  ("reconcile alerts on an unreadable slot", RC, '        this.note("reconcile slot unreadable"', '        { const w = this.waiting.get(slot); if (w) await this.maybeAlert(slot, w, this.now()); }\n        this.note("reconcile slot unreadable"', 1),
  ("reconcile alert carries the prompt", RC, 'const a: PromptAlert = { slot, hash: w.hash,', 'const a: PromptAlert = { question: "Proceed?", slot, hash: w.hash,', 1),
  ("waker alert takes unknown as unsent", WK, 'if (r.code === "outcome_unknown") return { outcome: "unknown", detail: r.detail };', '', 1),
- ("waker takes a failed status read as idle", WK, "      log(\"thread status unreadable, no wake this pass\", { error: String(err) });\n      return false;\n", "      return true;\n", 1),
+ ("waker takes a failed status read as idle", WK, '      detail = String(err).slice(0, 1000);', '      type = "idle";', 1),
  ("waker accepts summary items", WK, "          if (t?.itemsView !== undefined && t.itemsView !== \"full\") throw", "          if (false) throw", 1),
  ("waker stops at the first page", WK, "        if (older || r.nextCursor === null", "        if (true || r.nextCursor === null", 1),
  ("waker pages past the wake", WK, "          if (typeof t?.startedAt === \"number\" && t.startedAt < sinceS) older = true;\n", "", 1),
